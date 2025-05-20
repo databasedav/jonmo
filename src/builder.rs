@@ -1,13 +1,14 @@
 //! Declarative entity builder using jonmo signals.
 
-use crate::{
+use super::{
     prelude::*,
-    signal::{Signal, SignalExt},
+    signal::{SignalBuilder, Signal, SignalExt, Source, Map},
+    signal_vec::{VecDiff},
     tree::SignalHandle,
     utils::{LazyEntity, SSs},
 };
 use bevy_ecs::component::HookContext;
-use bevy_ecs::{component::ComponentId, prelude::*, world::DeferredWorld};
+use bevy_ecs::{prelude::*, world::DeferredWorld};
 use bevy_reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
 use std::sync::{Arc, Mutex};
 
@@ -17,10 +18,9 @@ fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: 
             .get_mut::<SignalHandles>()
             .map(|mut handles| handles.0.drain(..).collect::<Vec<_>>())
     }) {
+        let mut commands = world.commands();
         for handle in handles {
-            world
-                .commands()
-                .queue(|world: &mut World| handle.cleanup(world));
+                commands.queue(|world: &mut World| handle.cleanup(world));
         }
     }
 }
@@ -254,7 +254,7 @@ impl JonmoBuilder {
                 child.spawn_on_entity(world, child_entity);
             } else {
                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                    child.despawn_recursive();
+                    child.despawn();
                 }
             }
         };
@@ -277,7 +277,7 @@ impl JonmoBuilder {
                     if let Some(child) = child_option.into() {
                         if let Some(existing_child) = existing_child_option.take() {
                             if let Ok(entity) = world.get_entity_mut(existing_child) {
-                                entity.despawn_recursive();
+                                entity.despawn();
                             }
                         }
                         let child_entity = world.spawn_empty().id();
@@ -288,14 +288,14 @@ impl JonmoBuilder {
                             *existing_child_option = Some(child_entity);
                         } else {
                             if let Ok(child) = world.get_entity_mut(child_entity) {
-                                child.despawn_recursive();
+                                child.despawn();
                             }
                         }
                         child_block_populations.lock().unwrap()[block] = 1;
                     } else {
                         if let Some(existing_child) = existing_child_option.take() {
                             if let Ok(entity) = world.get_entity_mut(existing_child) {
-                                entity.despawn_recursive();
+                                entity.despawn();
                             }
                         }
                         child_block_populations.lock().unwrap()[block] = 0;
@@ -342,7 +342,7 @@ impl JonmoBuilder {
                 // Parent despawned during child spawning
                 for child_entity in children_entities {
                     if let Ok(child) = world.get_entity_mut(child_entity) {
-                        child.despawn_recursive();
+                        child.despawn();
                     }
                 }
             }
@@ -367,7 +367,7 @@ impl JonmoBuilder {
                         VecDiff::Replace { values: children } => {
                             for child_entity in children_entities.drain(..) {
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn_recursive();
+                                    child.despawn();
                                 }
                             }
                             *children_entities =
@@ -401,7 +401,7 @@ impl JonmoBuilder {
                             } else {
                                 // Parent despawned during child insertion
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn_recursive();
+                                    child.despawn();
                                 }
                             }
                         }
@@ -423,7 +423,7 @@ impl JonmoBuilder {
                                 } else {
                                     // parent despawned during child spawning
                                     if let Ok(child) = world.get_entity_mut(child_entity) {
-                                        child.despawn_recursive();
+                                        child.despawn();
                                     }
                                 }
                             }
@@ -434,7 +434,7 @@ impl JonmoBuilder {
                         VecDiff::UpdateAt { index, value: node } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
                                 if let Ok(child) = world.get_entity_mut(existing_child) {
-                                    child.despawn_recursive(); // removes from parent
+                                    child.despawn(); // removes from parent
                                 }
                             }
                             let child_entity = world.spawn_empty().id();
@@ -448,7 +448,7 @@ impl JonmoBuilder {
                             } else {
                                 // parent despawned during child spawning
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn_recursive();
+                                    child.despawn();
                                 }
                             }
                             if set_child_entity {
@@ -506,7 +506,7 @@ impl JonmoBuilder {
                         VecDiff::RemoveAt { index } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
                                 if let Ok(child) = world.get_entity_mut(existing_child) {
-                                    child.despawn_recursive(); // removes from parent
+                                    child.despawn(); // removes from parent
                                 }
                                 children_entities.remove(index);
                                 child_block_populations.lock().unwrap()[block] =
@@ -516,7 +516,7 @@ impl JonmoBuilder {
                         VecDiff::Pop => {
                             if let Some(child_entity) = children_entities.pop() {
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn_recursive();
+                                    child.despawn();
                                 }
                                 child_block_populations.lock().unwrap()[block] =
                                     children_entities.len();
@@ -525,7 +525,7 @@ impl JonmoBuilder {
                         VecDiff::Clear => {
                             for child_entity in children_entities.drain(..) {
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn_recursive();
+                                    child.despawn();
                                 }
                             }
                             child_block_populations.lock().unwrap()[block] =

@@ -7,9 +7,9 @@ use std::{
     sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use crate::{
+use super::{
     tree::{
-        LazySignal, SignalHandle, SignalSystem, pipe_signal, register_once_signal_from_system,
+        LazySignal, SignalHandle, SignalSystem, pipe_signal, lazy_signal_from_system,
         register_signal,
     },
     utils::SSs,
@@ -144,7 +144,7 @@ where
 /// describing the change. This trait combines the public concept with internal registration.
 pub trait SignalVec: SSs {
     /// The type of items in the vector.
-    type Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs;
+    type Item: Reflect + FromReflect + GetTypeRegistration + SSs;
 
     /// Registers the systems associated with this node and its predecessors in the `World`.
     /// Returns a [`SignalHandle`] containing the entities of *all* systems
@@ -154,7 +154,7 @@ pub trait SignalVec: SSs {
 }
 
 /// A source node for a `SignalVec` chain. Holds the entity ID of the registered source system.
-#[derive(Clone)] // Clone is fine, just copies the Entity ID
+#[derive(Clone, Reflect)] // Clone is fine, just copies the Entity ID
 pub struct SourceVec<T>
 where
     T: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -180,7 +180,8 @@ where
 }
 
 /// A map node in a `SignalVec` chain.
-pub struct MapVec<Upstream, U>
+#[derive(Clone, Reflect)]
+pub struct Map<Upstream, U>
 where
     Upstream: SignalVec, // Use consolidated SignalVec trait
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -191,8 +192,25 @@ where
     _marker: PhantomData<U>,
 }
 
+// Implement SignalVec for MapVec<Upstream, U>
+impl<Upstream, U> SignalVec for Map<Upstream, U>
+where
+    Upstream: SignalVec, // Use consolidated SignalVec trait
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    type Item = U;
+
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
+        let signal = self.signal.register(world);
+        pipe_signal(world, upstream, signal);
+        SignalHandle::new(signal)
+    }
+}
+
 /// A terminal node in a `SignalVec` chain that executes a system for each batch.
-pub struct ForEachVec<Upstream>
+pub struct ForEach<Upstream>
 where
     Upstream: SignalVec,
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -201,7 +219,7 @@ where
     pub(crate) signal: LazySignal,
 }
 
-impl<Upstream> Clone for ForEachVec<Upstream>
+impl<Upstream> Clone for ForEach<Upstream>
 where
     Upstream: SignalVec + Clone,
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -214,14 +232,14 @@ where
     }
 }
 
-impl<Upstream> SignalVec for ForEachVec<Upstream>
+impl<Upstream> SignalVec for ForEach<Upstream>
 where
     Upstream: SignalVec,
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
 {
     type Item = ();
 
-    fn register_signal_vec(mut self, world: &mut World) -> SignalHandle {
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
         let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
@@ -229,37 +247,19 @@ where
     }
 }
 
-impl<Upstream, U> Clone for MapVec<Upstream, U>
+struct Filter<Upstream, U>
 where
-    Upstream: SignalVec + Clone,
+    Upstream: SignalVec,
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
     U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
 {
-    fn clone(&self) -> Self {
-        Self {
-            upstream: self.upstream.clone(),
-            signal: self.signal.clone(),
-            _marker: PhantomData,
-        }
-    }
+    upstream: Upstream,
+    signal: LazySignal,
+    _marker: PhantomData<U>,
 }
 
-// Implement SignalVec for MapVec<Upstream, U>
-impl<Upstream, U> SignalVec for MapVec<Upstream, U>
-where
-    Upstream: SignalVec, // Use consolidated SignalVec trait
-    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-{
-    type Item = U;
 
-    fn register_signal_vec(mut self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
+
 
 /// Extension trait providing combinator methods for types implementing [`SignalVec`] and [`Clone`].
 pub trait SignalVecExt: SignalVec {
@@ -273,7 +273,7 @@ pub trait SignalVecExt: SignalVec {
     /// (like `RemoveAt`, `Move`, `Pop`, `Clear`) is preserved.
     ///
     /// The system `F` must be `Clone`, `Send`, `Sync`, and `'static`.
-    fn map<O, F, M>(self, system: F) -> MapVec<Self, O>
+    fn map<O, F, M>(self, system: F) -> Map<Self, O>
     // F is IntoSystem
     where
         Self: Sized,
@@ -295,7 +295,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// Returns a [`ForEachVec`] node representing this terminal operation.
     /// Call `.register(world)` on the result to activate the chain and get a [`SignalHandle`].
-    fn for_each<F, M>(self, system: F) -> ForEachVec<Self>
+    fn for_each<F, M>(self, system: F) -> ForEach<Self>
     where
         Self: Sized,
         Self::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -312,7 +312,7 @@ impl<T> SignalVecExt for T
 where
     T: SignalVec,
 {
-    fn map<O, F, M>(self, system: F) -> MapVec<Self, O>
+    fn map<O, F, M>(self, system: F) -> Map<Self, O>
     where
         T::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
         O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -386,22 +386,22 @@ where
             signal.into()
         });
 
-        MapVec {
+        Map {
             upstream: self,
             signal,
             _marker: PhantomData,
         }
     }
 
-    fn for_each<F, M>(self, system: F) -> ForEachVec<Self>
+    fn for_each<F, M>(self, system: F) -> ForEach<Self>
     where
         T::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
         F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, (), M> + Send + Sync + Clone + 'static,
         M: SSs,
     {
-        ForEachVec {
+        ForEach {
             upstream: self,
-            signal: register_once_signal_from_system(system),
+            signal: lazy_signal_from_system(system),
         }
     }
 

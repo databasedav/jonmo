@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use bevy::color::palettes::css::*;
 use bevy::prelude::*;
 use rand::prelude::IndexedRandom;

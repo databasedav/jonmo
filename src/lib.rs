@@ -30,23 +30,16 @@
 //! to your Bevy `App`.
 
 use bevy_app::prelude::*;
-use bevy_ecs::{prelude::*, system::SystemState};
+use bevy_ecs::prelude::*;
 
-mod builder;
-mod signal;
-mod signal_vec;
-mod tree;
+pub mod tree;
+pub mod builder;
+pub mod signal;
+pub mod signal_vec;
 pub mod utils;
 pub use builder::JonmoBuilder;
 
-use bevy_reflect::PartialReflect;
-// Publicly export items from modules
-pub use signal::*;
-pub use signal_vec::{MapVec, MutableVec, SignalVec, SignalVecExt, SourceVec, VecDiff};
-pub use tree::{pipe_signal, register_signal}; // Export SignalVec types
-
-use tree::{Downstream, SignalSystem, SystemRunner, Upstream, process_signals, flush_cleanup_signals};
-use utils::SSs;
+use tree::*;
 
 /// The Bevy plugin required for `jonmo` signals to function.
 ///
@@ -83,18 +76,9 @@ impl Plugin for JonmoPlugin {
 /// ```
 pub mod prelude {
     pub use crate::{
-        self as jonmo, JonmoPlugin,
-        builder::*,
-        signal::{Combine, Map, Signal, SignalBuilder, SignalExt, Source},
-        tree::SignalHandle,
-        signal_vec::{MapVec, MutableVec, SignalVec, SignalVecExt, SourceVec, VecDiff},
+        JonmoPlugin,
+        signal::{Signal, SignalExt, SignalEither, IntoSignalEither, SignalBuilder},
+        signal_vec::{MutableVec, SignalVec, SignalVecExt},
+        builder::{JonmoBuilder, SignalHandles}
     };
-}
-
-/// A generic identity system that takes an input `T` and returns `Some(T)`.
-/// Useful for signal graph nodes that just pass through data.
-///
-/// Typically used with `In<T>` for Bevy system parameters.
-pub fn identity<T: SSs>(In(input): In<T>) -> Option<T> {
-    Some(input)
 }

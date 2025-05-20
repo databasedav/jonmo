@@ -1,4 +1,4 @@
-use crate::utils::SSs;
+use super::utils::*;
 
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::component::HookContext;
@@ -66,7 +66,7 @@ where
     F: IntoSystem<In<I>, IOO, M> + SSs,
     M: SSs,
 {
-    register_once_signal_from_system(system).register(world)
+    lazy_signal_from_system(system).register(world)
 }
 
 fn downstream_syncer(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
@@ -122,7 +122,7 @@ impl<'a> IntoIterator for &'a Downstream {
     }
 }
 
-pub fn pipe_signal(world: &mut World, source: SignalSystem, target: SignalSystem) {
+pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: SignalSystem) {
     if let Ok(mut upstream) = world.get_entity_mut(*source) {
         if let Some(mut downstream) = upstream.get_mut::<Downstream>() {
             downstream.0.insert(target);
@@ -186,7 +186,7 @@ pub(crate) fn process_signals_helper(
             .ok()
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
-            if let Some(output) = runner.run(world, input.clone_value()) {
+            if let Some(output) = input.reflect_clone().ok().and_then(|clone| runner.run(world, clone)) {
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
                     process_signals_helper(world, downstream, output);
                 }
@@ -401,7 +401,7 @@ pub(crate) fn flush_cleanup_signals(world: &mut World) {
     }
 }
 
-pub(crate) fn register_once_signal_from_system<I, O, IOO, F, M>(system: F) -> LazySignal
+pub(crate) fn lazy_signal_from_system<I, O, IOO, F, M>(system: F) -> LazySignal
 where
     I: FromReflect + SSs,
     O: FromReflect + SSs,

@@ -1,4 +1,4 @@
-use crate::{tree::*, utils::*};
+use super::{tree::*, utils::*};
 use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
 use bevy_reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
@@ -635,7 +635,7 @@ impl SignalBuilder {
         M: SSs,
     {
         Source {
-            signal: register_once_signal_from_system(system),
+            signal: lazy_signal_from_system(system),
             _marker: PhantomData,
         }
     }
@@ -825,7 +825,7 @@ pub trait SignalExt: Signal {
     {
         Map {
             upstream: self,
-            signal: register_once_signal_from_system(system),
+            signal: lazy_signal_from_system(system),
             _marker: PhantomData,
         }
     }
@@ -1040,7 +1040,7 @@ pub trait SignalExt: Signal {
         let left_wrapper = self.map(|In(left): In<Self::Item>| (Some(left), None::<Other::Item>));
         let right_wrapper =
             other.map(|In(right): In<Other::Item>| (None::<Self::Item>, Some(right)));
-        let signal = register_once_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
+        let signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
             move |In((left_option, right_option)): In<(
                 Option<Self::Item>,
                 Option<Other::Item>,
