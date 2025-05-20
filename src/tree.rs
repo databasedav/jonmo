@@ -186,7 +186,11 @@ pub(crate) fn process_signals_helper(
             .ok()
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
-            if let Some(output) = input.reflect_clone().ok().and_then(|clone| runner.run(world, clone)) {
+            if let Some(output) = input
+                .reflect_clone()
+                .ok()
+                .and_then(|clone| runner.run(world, clone))
+            {
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
                     process_signals_helper(world, downstream, output);
                 }
@@ -339,7 +343,6 @@ impl LazySystem {
     /// Registers the system if it hasn't been registered yet.
     /// Returns the system ID of the registered system.
     pub fn register(&mut self, world: &mut World) -> SignalSystem {
-        // let mut guard = self.inner.lock().unwrap();
         match self {
             LazySystem::System(f) => {
                 let signal = f.take().unwrap()(world).into();
@@ -375,7 +378,7 @@ impl Clone for LazySignal {
 
 impl Drop for LazySignal {
     fn drop(&mut self) {
-        // <= 2 because we wna queue if only the holder remains
+        // <= 2 because we also wna queue if only the holder remains
         if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2 {
             if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {
                 CLEANUP_SIGNALS.lock().unwrap().push(signal);

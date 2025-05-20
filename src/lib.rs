@@ -32,10 +32,10 @@
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 
-pub mod tree;
 pub mod builder;
 pub mod signal;
 pub mod signal_vec;
+pub mod tree;
 pub mod utils;
 pub use builder::JonmoBuilder;
 
@@ -77,8 +77,8 @@ impl Plugin for JonmoPlugin {
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
-        signal::{Signal, SignalExt, SignalEither, IntoSignalEither, SignalBuilder},
+        builder::{JonmoBuilder, SignalHandles},
+        signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
-        builder::{JonmoBuilder, SignalHandles}
     };
 }

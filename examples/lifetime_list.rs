@@ -14,7 +14,7 @@ fn main() {
             PostStartup,
             (
                 move |world: &mut World| {
-                    ui_root(colors.signal_vec(world)).spawn(world);
+                    ui_root(colors.signal_vec()).spawn(world);
                 },
                 camera,
             ),
@@ -42,7 +42,10 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(colors.map(|In(color)| item(color)))
+    .children_signal_vec(colors.map(|In(color)| {
+        println!("color: {:?}", color);
+        item(color)
+    }))
 }
 
 fn item(color: Color) -> JonmoBuilder {

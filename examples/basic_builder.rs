@@ -37,7 +37,9 @@ fn ui() -> JonmoBuilder {
         JonmoBuilder::from(Node::default())
             .insert(Value(0))
             .component_signal_from_component(|signal| {
-                signal.dedupe().map(|In(value): In<Value>| Some(Text(value.0.to_string())))
+                signal
+                    .dedupe()
+                    .map(|In(value): In<Value>| Some(Text(value.0.to_string())))
             }),
     )
 }

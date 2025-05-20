@@ -2571,22 +2571,40 @@ mod tests {
         let system_entity = handle.0.entity();
 
         assert!(app.world().get_entity(system_entity).is_ok());
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            1
+        );
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
         handle.cleanup(app.world_mut()); // RegCount = 0. LS.state_refs = 3 for holder check. Holder not removed.
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 0);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            0
+        );
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
         drop(s1); // LS.state_refs = 2. Not queued.
         app.update();
-        assert!(app.world().get_entity(system_entity).is_ok(), "Entity persists after s1 drop");
+        assert!(
+            app.world().get_entity(system_entity).is_ok(),
+            "Entity persists after s1 drop"
+        );
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
         drop(s2); // LS.state_refs = 1 (only holder's copy). Not queued.
         app.update();
-        assert!(app.world().get_entity(system_entity).is_err(), "Entity despawned after s2 drop, only holder left");
+        assert!(
+            app.world().get_entity(system_entity).is_err(),
+            "Entity despawned after s2 drop, only holder left"
+        );
     }
 
     #[test]
@@ -2597,14 +2615,32 @@ mod tests {
 
         let handle1 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (struct, holder). RegCount = 1.
         let system_entity = handle1.0.entity();
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            1
+        );
 
         let handle2 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (no new holder). RegCount = 2.
         assert_eq!(system_entity, handle2.0.entity());
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 2);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            2
+        );
 
         handle1.cleanup(app.world_mut()); // RegCount = 1. Holder not removed (LS.state_refs=2).
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            1
+        );
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
@@ -2612,7 +2648,7 @@ mod tests {
         app.update();
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
-        
+
         handle2.cleanup(app.world_mut()); // RegCount = 0. LS.state_refs = 1 for holder. Holder IS removed. Queued.
         app.update();
         assert!(app.world().get_entity(system_entity).is_err());
@@ -2627,31 +2663,68 @@ mod tests {
 
         let handle = map_s.clone().register(app.world_mut());
         let map_entity = handle.0.entity();
-        let source_entity = app.world().get::<Upstream>(map_entity).unwrap().iter().next().unwrap().entity();
+        let source_entity = app
+            .world()
+            .get::<Upstream>(map_entity)
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .entity();
 
         assert!(app.world().get_entity(map_entity).is_ok());
         assert!(app.world().get_entity(source_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(map_entity).is_some());
         assert!(app.world().get::<LazySignalHolder>(source_entity).is_some());
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(map_entity).unwrap(), 1);
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(source_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(map_entity)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(source_entity)
+                .unwrap(),
+            1
+        );
 
         handle.cleanup(app.world_mut());
         // map_entity: RegCount=0. Holder's LS refs > 1 (due to map_s). Holder not removed.
         // source_entity: RegCount=0. Holder's LS refs > 1 (due to map_s.source_s). Holder not removed.
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(map_entity).unwrap(), 0);
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(source_entity).unwrap(), 0);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(map_entity)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(source_entity)
+                .unwrap(),
+            0
+        );
         assert!(app.world().get_entity(map_entity).is_ok());
         assert!(app.world().get_entity(source_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(map_entity).is_some());
         assert!(app.world().get::<LazySignalHolder>(source_entity).is_some());
 
         drop(map_s); // Drops map_s's LazySignal, then source_s's LazySignal.
-                     // For both, their LS.state_refs becomes 1 (holder only). queued.
+        // For both, their LS.state_refs becomes 1 (holder only). queued.
         app.update();
         // Both entities despawned.
-        assert!(app.world().get_entity(map_entity).is_err(), "Map entity persists");
-        assert!(app.world().get_entity(source_entity).is_err(), "Source entity persists");
+        assert!(
+            app.world().get_entity(map_entity).is_err(),
+            "Map entity persists"
+        );
+        assert!(
+            app.world().get_entity(source_entity).is_err(),
+            "Source entity persists"
+        );
     }
 
     #[test]
@@ -2662,16 +2735,34 @@ mod tests {
 
         let handle1 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (struct, holder). RegCount = 1.
         let system_entity = handle1.0.entity();
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            1
+        );
 
         handle1.cleanup(app.world_mut()); // RegCount = 0. Holder not removed (LS.state_refs=2).
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 0);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            0
+        );
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
         let handle2 = source_signal_struct.clone().register(app.world_mut()); // RegCount becomes 1 again on same entity. LS.state_refs=2.
         assert_eq!(system_entity, handle2.0.entity());
-        assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
+        assert_eq!(
+            **app
+                .world()
+                .get::<SignalRegistrationCount>(system_entity)
+                .unwrap(),
+            1
+        );
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
         drop(source_signal_struct); // LS.state_refs = 1 (holder only). Not queued.
