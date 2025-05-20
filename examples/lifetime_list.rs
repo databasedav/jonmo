@@ -77,7 +77,7 @@ fn item(color: Color) -> JonmoBuilder {
 }
 
 fn camera(mut commands: Commands) {
-    commands.spawn(Camera2d::default());
+    commands.spawn(Camera2d);
 }
 
 fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {

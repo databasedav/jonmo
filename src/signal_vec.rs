@@ -173,15 +173,13 @@ where
 
     /// Registers the systems associated with this node. For a SourceVec, it's already registered.
     fn register_signal_vec(self, _world: &mut World) -> SignalHandle {
-        // The system is already registered (e.g., by MutableVec::signal_vec or SignalVecBuilder::from_system)
-        // We just need to return its entity ID wrapped in a handle.
-        SignalHandle::new(self.signal) // Return SignalHandle
+        SignalHandle::new(self.signal)
     }
 }
 
 /// A map node in a `SignalVec` chain.
-#[derive(Clone, Reflect)]
-pub struct Map<Upstream, U>
+// #[derive(Clone)]
+pub struct MapVec<Upstream, U>
 where
     Upstream: SignalVec, // Use consolidated SignalVec trait
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -193,7 +191,7 @@ where
 }
 
 // Implement SignalVec for MapVec<Upstream, U>
-impl<Upstream, U> SignalVec for Map<Upstream, U>
+impl<Upstream, U> SignalVec for MapVec<Upstream, U>
 where
     Upstream: SignalVec, // Use consolidated SignalVec trait
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -273,7 +271,7 @@ pub trait SignalVecExt: SignalVec {
     /// (like `RemoveAt`, `Move`, `Pop`, `Clear`) is preserved.
     ///
     /// The system `F` must be `Clone`, `Send`, `Sync`, and `'static`.
-    fn map<O, F, M>(self, system: F) -> Map<Self, O>
+    fn map<O, F, M>(self, system: F) -> MapVec<Self, O>
     // F is IntoSystem
     where
         Self: Sized,
@@ -312,7 +310,7 @@ impl<T> SignalVecExt for T
 where
     T: SignalVec,
 {
-    fn map<O, F, M>(self, system: F) -> Map<Self, O>
+    fn map<O, F, M>(self, system: F) -> MapVec<Self, O>
     where
         T::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
         O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -386,7 +384,7 @@ where
             signal.into()
         });
 
-        Map {
+        MapVec {
             upstream: self,
             signal,
             _marker: PhantomData,
@@ -728,9 +726,6 @@ where
 
     /// Creates a [`SourceVec<T>`] signal linked to this `MutableVec`.
     pub fn signal_vec(&self, world: &mut World) -> SourceVec<T> {
-        // ... (Implementation remains the same, using self.state.read/write directly) ...
-        // Register the identity batch system.
-        // Input is Vec<VecDiff<T>>, Output is Option<Vec<VecDiff<T>>>.
         let signal_lock = Arc::new(OnceLock::new());
         let signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, {
             let signal_lock = signal_lock.clone();

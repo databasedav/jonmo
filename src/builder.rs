@@ -20,7 +20,7 @@ fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: 
     }) {
         let mut commands = world.commands();
         for handle in handles {
-                commands.queue(|world: &mut World| handle.cleanup(world));
+            commands.queue(|world: &mut World| handle.cleanup(world));
         }
     }
 }
