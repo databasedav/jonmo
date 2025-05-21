@@ -1,10 +1,10 @@
-use bevy_ecs::{prelude::*, system::SystemId};
+use bevy_ecs::{component::HookContext, prelude::*, system::SystemId, world::DeferredWorld};
 use bevy_reflect::{FromReflect, GetTypeRegistration, Typed, prelude::*};
 use std::{
-    convert::identity, fmt, marker::PhantomData, ops::Deref, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}
+    fmt, marker::PhantomData, ops::Deref, sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard}
 };
 
-use super::{tree::*, utils::*};
+use super::{tree::*, utils::*, signal::*};
 
 /// Describes the changes to a `Vec`.
 ///
@@ -147,89 +147,64 @@ where
     }
 }
 
+#[derive(Clone, Reflect)]
+pub struct ForEach<Upstream, O>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    pub(crate) upstream: Upstream,
+    pub(crate) signal: LazySignal,
+    _marker: PhantomData<O>,
+}
+
+impl<Upstream, O> SignalVec for ForEach<Upstream, O>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    type Item = O;
+
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+        let SignalHandle(upstream) = self.upstream.register(world);
+        let signal = self.signal.register(world);
+        pipe_signal(world, upstream, signal);
+        SignalHandle::new(signal)
+    }
+}
+
+
 /// A map node in a `SignalVec` chain.
 #[derive(Clone, Reflect)]
-pub struct Map<Upstream, U>
+pub struct Map<Upstream, O>
 where
     Upstream: SignalVec, // Use consolidated SignalVec trait
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
 {
     pub(crate) upstream: Upstream,
     pub(crate) signal: LazySignal,
-    _marker: PhantomData<U>,
+    _marker: PhantomData<O>,
 }
 
-// Implement SignalVec for MapVec<Upstream, U>
-impl<Upstream, U> SignalVec for Map<Upstream, U>
+impl<Upstream, O> SignalVec for Map<Upstream, O>
 where
     Upstream: SignalVec, // Use consolidated SignalVec trait
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
 {
-    type Item = U;
+    type Item = O;
 
     fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
+        let SignalHandle(upstream) = self.upstream.register(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
         SignalHandle::new(signal)
     }
 }
 
-/// A terminal node in a `SignalVec` chain that executes a system for each batch.
 #[derive(Clone, Reflect)]
-pub struct ForEach<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-{
-    pub(crate) upstream: Upstream,
-    pub(crate) signal: LazySignal,
-}
-
-impl<Upstream> SignalVec for ForEach<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-{
-    type Item = ();
-
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
-pub struct FilterMap<Upstream, U>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-{
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<U>,
-}
-
-impl<Upstream, U> SignalVec for FilterMap<Upstream, U>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-    U: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-{
-    type Item = U;
-
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
 pub struct Filter<Upstream>
 where
     Upstream: SignalVec,
@@ -255,6 +230,55 @@ where
     }
 }
 
+#[derive(Clone, Reflect)]
+pub struct FilterMap<Upstream, O>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    upstream: Upstream,
+    signal: LazySignal,
+    _marker: PhantomData<O>,
+}
+
+impl<Upstream, O> SignalVec for FilterMap<Upstream, O>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    type Item = O;
+
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+        let SignalHandle(upstream) = self.upstream.register_signal_vec(world);
+        let signal = self.signal.register(world);
+        pipe_signal(world, upstream, signal);
+        SignalHandle::new(signal)
+    }
+}
+
+#[derive(Clone, Reflect)]
+pub struct Enumerate<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    signal: ForEach<Upstream, Option<Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>>>,
+}
+
+impl<Upstream> SignalVec for Enumerate<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+{
+    type Item = (Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item);
+
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
 fn find_index(indices: &[bool], index: usize) -> usize {
     indices[0..index].into_iter().filter(|x| **x).count()
 }
@@ -272,7 +296,6 @@ where
     O: 'static
 {
     let mut output = vec![];
-
     for diff in diffs {
         let diff_option = match diff {
             VecDiff::Replace { values } => {
@@ -298,7 +321,7 @@ where
                     })
                 } else {
                     indices.insert(index, false);
-                    continue;
+                    None
                 }
             }
 
@@ -324,7 +347,7 @@ where
                             index: find_index(indices, index),
                         })
                     } else {
-                        continue;
+                        None
                     }
                 }
             }
@@ -342,7 +365,7 @@ where
                     })
                 } else {
                     indices.insert(new_index, false);
-                    continue;
+                    None
                 }
             }
 
@@ -352,7 +375,7 @@ where
                         index: find_index(&indices, index),
                     })
                 } else {
-                    continue;
+                    None
                 }
             }
 
@@ -363,15 +386,15 @@ where
                     Some(VecDiff::Push { value })
                 } else {
                     indices.push(false);
-                    continue;
+                    None
                 }
             }
 
             VecDiff::Pop {} => {
-                if indices.pop().expect("Cannot pop from empty vec") {
+                if indices.pop().expect("can't pop from empty vec") {
                     Some(VecDiff::Pop {})
                 } else {
-                    continue;
+                    None
                 }
             }
 
@@ -393,6 +416,28 @@ where
     }
 }
 
+fn despawn_on_remove(
+    mut world: DeferredWorld,
+    HookContext { entity, .. }: HookContext,
+) {
+    if let Some(DespawnOnRemove(entities)) = world.get_entity(entity).ok().and_then(|entity| entity.get::<DespawnOnRemove>()).cloned() {
+        let mut commands = world.commands();
+        for entity in entities {
+            if let Ok(mut entity) = commands.get_entity(entity) {
+                entity.despawn();
+            }
+        }
+    }
+}
+
+#[derive(Component, Clone)]
+#[component(on_remove = despawn_on_remove)]
+struct DespawnOnRemove(Vec<Entity>);
+
+fn index_signal_from_index(index: Arc<Mutex<Option<usize>>>) -> Dedupe<super::signal::Source<Option<usize>>> {
+    SignalBuilder::from_system(move |_: In<_>| *index.lock().unwrap()).dedupe()
+}
+
 /// Extension trait providing combinator methods for types implementing [`SignalVec`] and [`Clone`].
 pub trait SignalVecExt: SignalVec {
     /// Registers a system that runs for each batch of `VecDiff`s emitted by this signal.
@@ -402,7 +447,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// Returns a [`ForEachVec`] node representing this terminal operation.
     /// Call `.register(world)` on the result to activate the chain and get a [`SignalHandle`].
-    fn for_each<O, F, M>(self, system: F) -> ForEach<Self>
+    fn for_each<O, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
         Self::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
@@ -413,6 +458,7 @@ pub trait SignalVecExt: SignalVec {
         ForEach {
             upstream: self,
             signal: lazy_signal_from_system(system),
+            _marker: PhantomData,
         }
     }
 
@@ -436,9 +482,7 @@ pub trait SignalVecExt: SignalVec {
     {
         let signal = LazySignal::new(move |world: &mut World| -> SignalSystem {
             let system = world.register_system(system);
-            let wrapper_system = move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                                       world: &mut World|
-                  -> Option<Vec<VecDiff<O>>> {
+            let wrapper_system = move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
                 let mut output: Vec<VecDiff<O>> = Vec::new();
 
                 for diff in diffs {
@@ -573,6 +617,100 @@ pub trait SignalVecExt: SignalVec {
             signal,
             _marker: PhantomData,
         }
+    }
+
+    fn enumerate(self) -> Enumerate<Self>
+    where
+        Self: Sized,
+        Self::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
+    {
+        fn increment_indices(range: &[Arc<Mutex<Option<usize>>>]) {
+            for index in range {
+                let mut guard = index.lock().unwrap();
+                *guard = guard
+                    .as_ref()
+                    .map(|value| value + 1)
+            }
+        }
+
+        fn decrement_indices(range: &[Arc<Mutex<Option<usize>>>]) {
+            for index in range {
+                let mut guard = index.lock().unwrap();
+                *guard = guard
+                    .as_ref()
+                    .map(|value| value - 1)
+            }
+        }
+        let signal = self.for_each(|In(diffs), mut indices: Local<Vec<Arc<Mutex<Option<usize>>>>>| {
+            let mut output = vec![];
+            for diff in diffs {
+                let diff = match diff {
+                    VecDiff::Replace { values } => {
+                        for signal in indices.drain(..) {
+                            signal.lock().unwrap().take();
+                        }
+                        *indices = Vec::with_capacity(values.len());
+                        VecDiff::Replace {
+                            values: values.into_iter().enumerate().map(|(index, value)| {
+                                let index = Arc::new(Mutex::new(Some(index)));
+                                indices.push(index.clone());
+                                (index_signal_from_index(index), value)
+                            }).collect()
+                        }
+                    }
+                    VecDiff::InsertAt { index: i, value } => {
+                        let index = Arc::new(Mutex::new(Some(i)));
+                        indices.insert(i, index.clone());
+                        increment_indices(&indices[(i + 1)..]);
+                        VecDiff::InsertAt { index: i, value: (index_signal_from_index(index), value) }
+                    }
+                    VecDiff::UpdateAt { index, value } => {
+                        VecDiff::UpdateAt { index, value: (index_signal_from_index(indices[index].clone()), value) }
+                    },
+                    VecDiff::Push { value } => {
+                        let index = Arc::new(Mutex::new(Some(indices.len())));
+                        indices.push(index.clone());
+                        VecDiff::Push { value: (index_signal_from_index(index), value) }
+                    },
+                    VecDiff::Move { old_index, new_index } => {
+                        let index = indices.remove(old_index);
+                        indices.insert(new_index, index.clone());
+                        if old_index < new_index {
+                            decrement_indices(&indices[old_index..new_index]);
+                        } else if new_index < old_index {
+                            increment_indices(&indices[(new_index + 1)..(old_index + 1)]);
+                        }
+                        *index.lock().unwrap() = Some(new_index);
+                        VecDiff::Move { old_index, new_index }
+                    },
+                    VecDiff::RemoveAt { index: i } => {
+                        let index = indices.remove(i);
+                        decrement_indices(&indices[i..]);
+                        *index.lock().unwrap() = None;
+                        VecDiff::RemoveAt { index: i }
+                    },
+                    VecDiff::Pop {} => {
+                        let index = indices.pop().expect("can't pop from empty vec");
+                        *index.lock().unwrap() = None;
+                        VecDiff::Pop {}
+                    },
+    
+                    VecDiff::Clear {} => {
+                        for index in indices.drain(..) {
+                            *index.lock().unwrap() = None;
+                        }
+                        VecDiff::Clear {}
+                    },
+                };
+                output.push(diff);
+            }
+            if output.is_empty() {
+                None
+            } else {
+                Some(output)
+            }
+        });
+        Enumerate { signal }
     }
 
     /// Registers all the systems defined in this `SignalVec` chain into the Bevy `World`.

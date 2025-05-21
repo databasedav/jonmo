@@ -42,10 +42,10 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(colors.map(|In(color)| item(color)))
+    .children_signal_vec(colors.enumerate().map(|In((index, color))| item(index, color)))
 }
 
-fn item(color: Color) -> JonmoBuilder {
+fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder {
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
@@ -67,12 +67,18 @@ fn item(color: Color) -> JonmoBuilder {
             TextLayout::new_with_justify(JustifyText::Center),
             Lifetime::default(),
         ))
-        .component_signal_from_component(|signal| {
-            signal
-                .map(|In(Lifetime(lifetime))| lifetime.round())
+        .component_signal(
+            index
+                .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
                 .dedupe()
-                .map(|In(lifetime): In<f32>| Some(Text::new(format!("lifetime: {}", lifetime))))
-        }),
+                .map(|In(text): In<String>| Some(Text::new(text))),
+        )
+        // .component_signal_from_component(|signal| {
+        //     signal
+        //         .map(|In(Lifetime(lifetime))| lifetime.round())
+        //         .dedupe()
+        //         .map(|In(lifetime): In<f32>| Some(Text::new(format!("lifetime: {}", lifetime))))
+        // }),
     )
 }
 
