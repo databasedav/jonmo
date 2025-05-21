@@ -264,7 +264,7 @@ where
     Upstream: SignalVec,
     Upstream::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
 {
-    signal: ForEach<Upstream, Option<Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>>>,
+    signal: ForEach<Upstream, Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>>,
 }
 
 impl<Upstream> SignalVec for Enumerate<Upstream>
@@ -447,12 +447,13 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// Returns a [`ForEachVec`] node representing this terminal operation.
     /// Call `.register(world)` on the result to activate the chain and get a [`SignalHandle`].
-    fn for_each<O, F, M>(self, system: F) -> ForEach<Self, O>
+    fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
         Self::Item: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
         O: Reflect + FromReflect + GetTypeRegistration + Typed + SSs,
-        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, O, M> + Send + Sync + Clone + 'static,
+        IOO: Into<Option<O>> + SSs,
+        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, IOO, M> + Send + Sync + Clone + 'static,
         M: SSs,
     {
         ForEach {
