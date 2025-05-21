@@ -335,8 +335,6 @@ pub(crate) struct LazySignal {
 }
 
 impl LazySignal {
-    /// Creates a new `RegisterOnceSignal` that will register the system only once.
-    /// The system is provided as a closure that takes a mutable reference to the `World`.
     pub fn new<F: FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>(system: F) -> Self {
         LazySignal {
             inner: Arc::new(LazySignalState {

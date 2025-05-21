@@ -32,7 +32,7 @@ struct Numbers(MutableVec<u32>);
 #[derive(Component, Default, Clone, Reflect)]
 struct Lifetime(f32);
 
-fn ui_root(numbers: impl SignalVec<Item = u32>) -> JonmoBuilder {
+fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -42,7 +42,8 @@ fn ui_root(numbers: impl SignalVec<Item = u32>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(numbers.filter_map(|In(i)| if i % 2 == 0 { Some(i * 10) } else { None }).map(|In(color)| item(color)))
+    .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
+    .children_signal_vec(numbers.map(|In(color)| item(color)))
 }
 
 fn item(number: u32) -> JonmoBuilder {
@@ -56,19 +57,17 @@ fn item(number: u32) -> JonmoBuilder {
         },
         BackgroundColor(Color::WHITE),
     ))
-    .child(
-        JonmoBuilder::from((
-            Node {
-                height: Val::Percent(100.),
-                width: Val::Percent(100.),
-                ..default()
-            },
-            Text(number.to_string()),
-            TextColor(Color::BLACK),
-            TextLayout::new_with_justify(JustifyText::Center),
-            Lifetime::default(),
-        ))
-    )
+    .child(JonmoBuilder::from((
+        Node {
+            height: Val::Percent(100.),
+            width: Val::Percent(100.),
+            ..default()
+        },
+        Text(number.to_string()),
+        TextColor(Color::BLACK),
+        TextLayout::new_with_justify(JustifyText::Center),
+        Lifetime::default(),
+    )))
 }
 
 fn camera(mut commands: Commands) {

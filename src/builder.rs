@@ -183,19 +183,20 @@ impl JonmoBuilder {
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn component_signal<S, O>(self, signal: S) -> Self
+    pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
     where
-        S: Signal<Item = Option<O>> + SSs,
-        O: Component + FromReflect + GetTypeRegistration + Typed + SSs,
+        C: Component + FromReflect + GetTypeRegistration + Typed + SSs,
+        IOC: Into<Option<C>> + FromReflect + GetTypeRegistration + Typed,
+        S: Signal<Item = IOC> + SSs,
     {
         self.on_signal(
             signal,
-            move |In((entity, component_option)): In<(Entity, Option<O>)>, world: &mut World| {
+            move |In((entity, component_option)): In<(Entity, IOC)>, world: &mut World| {
                 if let Ok(mut entity) = world.get_entity_mut(entity) {
-                    if let Some(component) = component_option {
+                    if let Some(component) = component_option.into() {
                         entity.insert(component);
                     } else {
-                        entity.remove::<O>();
+                        entity.remove::<C>();
                     }
                 }
             },
@@ -243,10 +244,11 @@ impl JonmoBuilder {
 
     /// Declare a static child node.
     /// The child is spawned and added to the parent when the parent is spawned.
-    pub fn child(self, child: JonmoBuilder) -> Self {
+    pub fn child(self, child: impl Into<JonmoBuilder>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(1);
         let offset = offset(block, &self.child_block_populations.lock().unwrap());
+        let child = child.into();
         let on_spawn = move |world: &mut World, parent| {
             let child_entity = world.spawn_empty().id();
             if let Ok(ref mut parent) = world.get_entity_mut(parent) {
@@ -311,10 +313,10 @@ impl JonmoBuilder {
     /// Declare static children.
     pub fn children(
         self,
-        children: impl IntoIterator<Item = JonmoBuilder> + Send + 'static,
+        children: impl IntoIterator<Item = impl Into<JonmoBuilder>> + Send + 'static,
     ) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
-        let children_vec: Vec<JonmoBuilder> = children.into_iter().collect(); // Collect into Vec
+        let children_vec: Vec<JonmoBuilder> = children.into_iter().map(Into::into).collect(); // Collect into Vec
         let population = children_vec.len();
         self.child_block_populations
             .lock()

@@ -2,7 +2,7 @@ mod utils;
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::prelude::*;
+use jonmo::{prelude::*, utils::LazyEntity};
 
 fn main() {
     let mut app = App::new();
@@ -42,21 +42,26 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(colors.enumerate().map(|In((index, color))| item(index, color)))
+    .children_signal_vec(
+        colors
+            .enumerate()
+            .map(|In((index, color))| item(index, color)),
+    )
 }
 
 fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder {
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
-            width: Val::Px(200.0),
+            width: Val::Px(250.0),
             padding: UiRect::all(Val::Px(5.0)),
             align_items: AlignItems::Center,
             ..default()
         },
         BackgroundColor(color),
     ))
-    .child(
+    .child({
+        let parent = LazyEntity::new();
         JonmoBuilder::from((
             Node {
                 height: Val::Percent(100.),
@@ -67,19 +72,46 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
             TextLayout::new_with_justify(JustifyText::Center),
             Lifetime::default(),
         ))
-        .component_signal(
-            index
-                .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
-                .dedupe()
-                .map(|In(text): In<String>| Some(Text::new(text))),
+        .entity_sync(parent.clone())
+        .child(
+            JonmoBuilder::from((
+                Node {
+                    height: Val::Percent(100.),
+                    width: Val::Percent(100.),
+                    ..default()
+                },
+                TextColor(Color::BLACK),
+                TextLayout::new_with_justify(JustifyText::Center),
+            ))
+            .component_signal(
+                index
+                    .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
+                    .map(|In(text): In<String>| Text::new(text)),
+            ),
         )
-        // .component_signal_from_component(|signal| {
-        //     signal
-        //         .map(|In(Lifetime(lifetime))| lifetime.round())
-        //         .dedupe()
-        //         .map(|In(lifetime): In<f32>| Some(Text::new(format!("lifetime: {}", lifetime))))
-        // }),
-    )
+        .child((
+            TextColor(Color::BLACK),
+            TextLayout::new_with_justify(JustifyText::Center),
+            Text::new(" | "),
+        ))
+        .child(
+            JonmoBuilder::from((
+                Node {
+                    height: Val::Percent(100.),
+                    width: Val::Percent(100.),
+                    ..default()
+                },
+                TextColor(Color::BLACK),
+                TextLayout::new_with_justify(JustifyText::Center),
+            ))
+            .component_signal(
+                SignalBuilder::from_component_lazy(parent)
+                    .map(|In(Lifetime(lifetime))| lifetime.round())
+                    .dedupe()
+                    .map(|In(lifetime): In<f32>| Text::new(format!("lifetime: {}", lifetime))),
+            ),
+        )
+    })
 }
 
 fn camera(mut commands: Commands) {
