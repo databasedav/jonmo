@@ -53,7 +53,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
-            width: Val::Px(250.0),
+            width: Val::Px(300.0),
             padding: UiRect::all(Val::Px(5.0)),
             align_items: AlignItems::Center,
             ..default()
@@ -68,47 +68,28 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
                 width: Val::Percent(100.),
                 ..default()
             },
+            Text::new(""),
             TextColor(Color::BLACK),
             TextLayout::new_with_justify(JustifyText::Center),
             Lifetime::default(),
         ))
         .entity_sync(parent.clone())
         .child(
-            JonmoBuilder::from((
-                Node {
-                    height: Val::Percent(100.),
-                    width: Val::Percent(100.),
-                    ..default()
-                },
-                TextColor(Color::BLACK),
-                TextLayout::new_with_justify(JustifyText::Center),
-            ))
+            JonmoBuilder::from(TextColor(Color::BLACK))
             .component_signal(
                 index
                     .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
-                    .map(|In(text): In<String>| Text::new(text)),
+                    .map(|In(text): In<String>| TextSpan(text)),
             ),
         )
-        .child((
-            TextColor(Color::BLACK),
-            TextLayout::new_with_justify(JustifyText::Center),
-            Text::new(" | "),
-        ))
+        .child((TextColor(Color::BLACK), TextSpan::new(" | ")))
         .child(
-            JonmoBuilder::from((
-                Node {
-                    height: Val::Percent(100.),
-                    width: Val::Percent(100.),
-                    ..default()
-                },
-                TextColor(Color::BLACK),
-                TextLayout::new_with_justify(JustifyText::Center),
-            ))
+            JonmoBuilder::from(TextColor(Color::BLACK))
             .component_signal(
                 SignalBuilder::from_component_lazy(parent)
                     .map(|In(Lifetime(lifetime))| lifetime.round())
                     .dedupe()
-                    .map(|In(lifetime): In<f32>| Text::new(format!("lifetime: {}", lifetime))),
+                    .map(|In(lifetime): In<f32>| TextSpan(format!("lifetime: {}", lifetime))),
             ),
         )
     })
