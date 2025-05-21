@@ -75,8 +75,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
         ))
         .entity_sync(parent.clone())
         .child(
-            JonmoBuilder::from(TextColor(Color::BLACK))
-            .component_signal(
+            JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 index
                     .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
                     .map(|In(text): In<String>| TextSpan(text)),
@@ -84,8 +83,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
         )
         .child((TextColor(Color::BLACK), TextSpan::new(" | ")))
         .child(
-            JonmoBuilder::from(TextColor(Color::BLACK))
-            .component_signal(
+            JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 SignalBuilder::from_component_lazy(parent)
                     .map(|In(Lifetime(lifetime))| lifetime.round())
                     .dedupe()

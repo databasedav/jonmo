@@ -39,7 +39,7 @@ fn ui() -> JonmoBuilder {
             .component_signal_from_component(|signal| {
                 signal
                     .dedupe()
-                    .map(|In(value): In<Value>| Some(Text(value.0.to_string())))
+                    .map(|In(value): In<Value>| Text(value.0.to_string()))
             }),
     )
 }

@@ -185,7 +185,7 @@ impl JonmoBuilder {
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
     pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + SSs,
+        C: Component,
         IOC: Into<Option<C>> + FromReflect + GetTypeRegistration + Typed,
         S: Signal<Item = IOC> + SSs,
     {
@@ -204,35 +204,35 @@ impl JonmoBuilder {
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn component_signal_from_entity<C, S, F>(self, f: F) -> Self
+    pub fn component_signal_from_entity<C, IOC, S, F>(self, f: F) -> Self
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + SSs,
-        S: Signal<Item = Option<C>> + SSs,
+        C: Component,
+        IOC: Into<Option<C>> + FromReflect + GetTypeRegistration + Typed,
+        S: Signal<Item = IOC> + SSs,
         F: FnOnce(Source<Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
         self.entity_sync(entity.clone())
             .signal_from_entity(move |signal| {
-                f(signal).map(
-                    move |In(component_option): In<Option<C>>, world: &mut World| {
-                        if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
-                            if let Some(component) = component_option {
-                                entity.insert(component);
-                            } else {
-                                entity.remove::<C>();
-                            }
+                f(signal).map(move |In(component_option): In<IOC>, world: &mut World| {
+                    if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
+                        if let Some(component) = component_option.into() {
+                            entity.insert(component);
+                        } else {
+                            entity.remove::<C>();
                         }
-                    },
-                )
+                    }
+                })
             })
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn component_signal_from_component<I, O, S, F>(self, f: F) -> Self
+    pub fn component_signal_from_component<I, O, IOO, S, F>(self, f: F) -> Self
     where
         I: Component + Clone + FromReflect + GetTypeRegistration + Typed,
-        O: Component + FromReflect + GetTypeRegistration + Typed + SSs,
-        S: Signal<Item = Option<O>> + SSs,
+        O: Component,
+        IOO: Into<Option<O>> + FromReflect + GetTypeRegistration + Typed,
+        S: Signal<Item = IOO> + SSs,
         F: FnOnce(Map<Source<Entity>, I>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
