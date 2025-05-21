@@ -36,7 +36,13 @@ pub trait Signal: SSs {
 /// A source signal is the starting point of a signal chain. It typically originates
 /// from a Bevy resource, component, entity, or a custom system.
 #[derive(Clone, Reflect)]
-pub struct Source<O> {
+#[reflect(Clone)]
+#[reflect(opaque)]
+pub struct Source<O>
+where
+    O: Clone,
+{
+    // TODO: get rid of this clone bound, may be a bug with reflect clone ?
     signal: LazySignal,
     #[reflect(ignore)]
     _marker: PhantomData<O>,
@@ -2106,14 +2112,12 @@ mod tests {
         let signal = SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
             let mut c = counter.lock().unwrap();
             *c += 1;
-            println!("Source System: Emitting {}", *c);
             Some(*c) // Emit 1, 2, 3, 4, 5... rapidly
         }))
         .throttle(throttle_duration)
         .map(clone!((emit_count) move |In(val): In<i32>| {
             let mut count = emit_count.lock().unwrap();
             *count += 1;
-            println!("Emit Count Map: Incremented count to {}, passing value={}", *count, val);
             val // Pass the value through
         }))
         .map(capture_output)

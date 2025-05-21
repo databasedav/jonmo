@@ -42,10 +42,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(colors.map(|In(color)| {
-        println!("color: {:?}", color);
-        item(color)
-    }))
+    .children_signal_vec(colors.map(|In(color)| item(color)))
 }
 
 fn item(color: Color) -> JonmoBuilder {

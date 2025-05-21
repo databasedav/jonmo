@@ -58,12 +58,11 @@ fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
 
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive systems and
 /// children using a declarative builder pattern. Inspired by Dominator's DomBuilder and Haalka's NodeBuilder.
-#[derive(Default, Reflect)]
+#[derive(Default, Clone, Reflect)]
+#[reflect(opaque)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
-    #[reflect(ignore)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>, // Changed type
-    #[reflect(ignore)]
     child_block_populations: Arc<Mutex<Vec<usize>>>, // Keep this for child logic for now
 }
 
@@ -381,7 +380,6 @@ impl JonmoBuilder {
                                     children.into_iter().zip(children_entities.iter().copied())
                                 {
                                     child.spawn_on_entity(world, child_entity);
-                                    println!("here");
                                 }
                                 child_block_populations.lock().unwrap()[block] =
                                     children_entities.len();
@@ -536,8 +534,7 @@ impl JonmoBuilder {
                     }
                 }
             };
-            let handle =
-                SignalVec::register_signal_vec(children_signal_vec.for_each(system), world);
+            let handle = children_signal_vec.for_each(system).register(world);
             add_handle(world, parent, handle);
         };
         self.on_spawn(on_spawn)

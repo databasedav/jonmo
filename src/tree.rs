@@ -186,11 +186,7 @@ pub(crate) fn process_signals_helper(
             .ok()
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
-            if let Some(output) = input
-                .reflect_clone()
-                .ok()
-                .and_then(|clone| runner.run(world, clone))
-            {
+            if let Some(output) = runner.run(world, input.to_dynamic()) {
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
                     process_signals_helper(world, downstream, output);
                 }
@@ -220,7 +216,7 @@ pub(crate) fn process_signals(world: &mut World) {
 /// Dropping the handle does *not* automatically clean up the underlying systems.
 /// Use the [`cleanup`](SignalHandle::cleanup) method for explicit cleanup, which decrements
 /// reference counts and potentially despawns systems if their count reaches zero.
-#[derive(Clone, Deref, DerefMut)]
+#[derive(Clone, Deref, DerefMut, Debug)]
 pub struct SignalHandle(pub SignalSystem);
 
 impl SignalHandle {
@@ -301,44 +297,6 @@ enum LazySystem {
     Registered(SignalSystem),
 }
 
-/// A helper struct to ensure a signal system is registered only once in the `World`.
-///
-/// This struct wraps the registration logic. When `register` is called, it checks
-/// if the system has already been registered. If not, it runs the provided closure
-/// to create and register the system. If it has, it increments the registration count
-/// for the existing system.
-#[derive(Reflect)]
-#[reflect(opaque)]
-pub(crate) struct LazySignal {
-    inner: Arc<LazySignalState>,
-}
-
-#[derive(Component)]
-pub(crate) struct LazySignalHolder(LazySignal);
-
-impl LazySignal {
-    /// Creates a new `RegisterOnceSignal` that will register the system only once.
-    /// The system is provided as a closure that takes a mutable reference to the `World`.
-    pub fn new<F: FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>(system: F) -> Self {
-        LazySignal {
-            inner: Arc::new(LazySignalState {
-                references: AtomicUsize::new(1),
-                system: RwLock::new(LazySystem::System(Some(Box::new(system)))),
-            }),
-        }
-    }
-
-    pub fn register(self, world: &mut World) -> SignalSystem {
-        let signal = self.inner.system.write().unwrap().register(world);
-        if let Ok(mut entity) = world.get_entity_mut(*signal) {
-            if !entity.contains::<LazySignalHolder>() {
-                entity.insert(LazySignalHolder(self));
-            }
-        }
-        signal
-    }
-}
-
 impl LazySystem {
     /// Registers the system if it hasn't been registered yet.
     /// Returns the system ID of the registered system.
@@ -363,9 +321,41 @@ impl LazySystem {
     }
 }
 
-// TODO: drop has to be impl for all signal structs, since they are the ones being cloned
-pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+/// A helper struct to ensure a signal system is registered only once in the `World`.
+///
+/// This struct wraps the registration logic. When `register` is called, it checks
+/// if the system has already been registered. If not, it runs the provided closure
+/// to create and register the system. If it has, it increments the registration count
+/// for the existing system.
+#[derive(Reflect)]
+#[reflect(Clone)]
+#[reflect(opaque)]
+pub(crate) struct LazySignal {
+    inner: Arc<LazySignalState>,
+}
+
+impl LazySignal {
+    /// Creates a new `RegisterOnceSignal` that will register the system only once.
+    /// The system is provided as a closure that takes a mutable reference to the `World`.
+    pub fn new<F: FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>(system: F) -> Self {
+        LazySignal {
+            inner: Arc::new(LazySignalState {
+                references: AtomicUsize::new(1),
+                system: RwLock::new(LazySystem::System(Some(Box::new(system)))),
+            }),
+        }
+    }
+
+    pub fn register(self, world: &mut World) -> SignalSystem {
+        let signal = self.inner.system.write().unwrap().register(world);
+        if let Ok(mut entity) = world.get_entity_mut(*signal) {
+            if !entity.contains::<LazySignalHolder>() {
+                entity.insert(LazySignalHolder(self));
+            }
+        }
+        signal
+    }
+}
 
 impl Clone for LazySignal {
     fn clone(&self) -> Self {
@@ -386,6 +376,13 @@ impl Drop for LazySignal {
         }
     }
 }
+
+#[derive(Component)]
+pub(crate) struct LazySignalHolder(LazySignal);
+
+// TODO: drop has to be impl for all signal structs, since they are the ones being cloned
+pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn flush_cleanup_signals(world: &mut World) {
     let signals = CLEANUP_SIGNALS
