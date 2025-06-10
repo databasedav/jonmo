@@ -36,11 +36,10 @@ pub trait Signal: SSs {
 /// A source signal is the starting point of a signal chain. It typically originates
 /// from a Bevy resource, component, entity, or a custom system.
 #[derive(Clone, Reflect)]
-#[reflect(Clone)]
-#[reflect(opaque)]
+// #[reflect(opaque)]
 pub struct Source<O>
-where
-    O: Clone,
+// where
+//     O: Clone,
 {
     // TODO: get rid of this clone bound, may be a bug with reflect clone ?
     signal: LazySignal,
@@ -85,7 +84,7 @@ where
         let SignalHandle(upstream) = self.upstream.register(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
+        signal.into()
     }
 }
 
@@ -165,7 +164,6 @@ where
 pub struct Dedupe<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     pub(crate) signal: Map<Upstream, Upstream::Item>,
 }
@@ -189,7 +187,6 @@ where
 pub struct First<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     pub(crate) signal: Map<Upstream, Upstream::Item>,
 }
@@ -217,8 +214,6 @@ pub struct Combine<Left, Right>
 where
     Left: Signal,
     Right: Signal,
-    Left::Item: FromReflect + GetTypeRegistration + Typed + SSs,
-    Right::Item: FromReflect + GetTypeRegistration + Typed + SSs,
 {
     pub(crate) left_wrapper: Map<Left, (Option<Left::Item>, Option<Right::Item>)>,
     pub(crate) right_wrapper: Map<Right, (Option<Left::Item>, Option<Right::Item>)>,
@@ -240,7 +235,7 @@ where
         let signal = self.signal.register(world);
         pipe_signal(world, left_upstream, signal);
         pipe_signal(world, right_upstream, signal);
-        SignalHandle::new(signal)
+        signal.into()
     }
 }
 
@@ -278,11 +273,7 @@ where
 /// Emits `true` if the upstream value is equal to the provided `value`, `false` otherwise.
 /// Requires `Upstream::Item` to implement `PartialEq`.
 #[derive(Clone, Reflect)]
-pub struct Eq<Upstream>
-where
-    Upstream: Signal,
-    Upstream::Item: PartialEq + FromReflect + SSs,
-{
+pub struct Eq<Upstream> {
     pub(crate) signal: Map<Upstream, bool>,
 }
 
@@ -303,11 +294,7 @@ where
 /// Emits `true` if the upstream value is *not* equal to the provided `value`, `false` otherwise.
 /// Requires `Upstream::Item` to implement `PartialEq`.
 #[derive(Clone, Reflect)]
-pub struct Neq<Upstream>
-where
-    Upstream: Signal,
-    Upstream::Item: PartialEq + FromReflect + SSs,
-{
+pub struct Neq<Upstream> {
     pub(crate) signal: Map<Upstream, bool>,
 }
 
@@ -356,10 +343,9 @@ where
 /// If the predicate returns `false` or the system errors, propagation terminates.
 #[derive(Clone, Reflect)]
 pub struct Filter<Upstream> {
-    pub(crate) upstream: Upstream,
     pub(crate) signal: LazySignal,
     #[reflect(ignore)]
-    _marker: PhantomData<bool>,
+    _marker: PhantomData<Upstream>,
 }
 
 impl<Upstream> Signal for Filter<Upstream>
@@ -370,10 +356,7 @@ where
     type Item = Upstream::Item;
 
     fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
+        self.signal.register(world).into()
     }
 }
 
@@ -412,10 +395,10 @@ where
 ///
 /// This node only propagates a value if the specified `duration` has elapsed since the
 /// last propagated value. It uses Bevy's `Time` resource internally.
+#[derive(Clone, Reflect)]
 pub struct Throttle<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     pub(crate) signal: Map<Upstream, Upstream::Item>,
 }
@@ -432,10 +415,11 @@ where
     }
 }
 
+#[derive(Clone, Reflect)]
 pub struct MapBool<Upstream, O> {
-    upstream: Upstream,
     signal: LazySignal,
-    _marker: PhantomData<O>,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapBool<Upstream, O>
@@ -447,10 +431,120 @@ where
     type Item = O;
 
     fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
+        self.signal.register(world).into()
+    }
+}
+
+/// Represents a node that maps a `true` boolean signal value using a system. Implements [`Signal`].
+/// Executes the provided system `t` only when the upstream signal emits `true`.
+#[derive(Clone, Reflect)]
+pub struct MapTrue<Upstream, O> {
+    signal: LazySignal,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
+}
+
+impl<Upstream, O> Signal for MapTrue<Upstream, O>
+where
+    Upstream: Signal<Item = bool>,
+    Upstream::Item: FromReflect + SSs,
+    O: FromReflect + SSs,
+{
+    type Item = O;
+
+    fn register_signal(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
+/// Represents a node that maps a `false` boolean signal value using a system. Implements [`Signal`].
+/// Executes the provided system `f` only when the upstream signal emits `false`.
+#[derive(Clone, Reflect)]
+pub struct MapFalse<Upstream, O> {
+    signal: LazySignal,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
+}
+
+impl<Upstream, O> Signal for MapFalse<Upstream, O>
+where
+    Upstream: Signal<Item = bool>,
+    Upstream::Item: FromReflect + SSs,
+    O: FromReflect + SSs,
+{
+    type Item = O;
+
+    fn register_signal(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
+// --- Map Option Family Structs ---
+
+/// Represents a node that maps an `Option<T>` signal value using different systems for `Some` and `None`. Implements [`Signal`].
+/// Executes `some_system` if the upstream emits `Some(T)`, passing `T` via `In`.
+/// Executes `none_system` if the upstream emits `None`, passing `()` via `In`.
+#[derive(Clone, Reflect)]
+pub struct MapOption<Upstream, O> {
+    signal: LazySignal,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
+}
+
+impl<Upstream, O> Signal for MapOption<Upstream, O>
+where
+    Upstream: Signal,
+    Upstream::Item: FromReflect + SSs,
+    O: FromReflect + SSs,
+{
+    type Item = O;
+
+    fn register_signal(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
+/// Represents a node that maps a `Some(T)` signal value using a system. Implements [`Signal`].
+/// Executes the provided system `some_system` only when the upstream signal emits `Some(T)`, passing `T` via `In`.
+#[derive(Clone, Reflect)]
+pub struct MapSome<Upstream, O> {
+    signal: LazySignal,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
+}
+
+impl<Upstream, O> Signal for MapSome<Upstream, O>
+where
+    Upstream: Signal,
+    Upstream::Item: FromReflect + SSs,
+    O: FromReflect + SSs,
+{
+    type Item = O;
+
+    fn register_signal(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
+/// Represents a node that maps a `None` signal value using a system. Implements [`Signal`].
+/// Executes the provided system `none_system` only when the upstream signal emits `None`, passing `()` via `In`.
+#[derive(Clone, Reflect)]
+pub struct MapNone<Upstream, O> {
+    signal: LazySignal,
+    #[reflect(ignore)]
+    _marker: PhantomData<(Upstream, O)>,
+}
+
+impl<Upstream, O> Signal for MapNone<Upstream, O>
+where
+    Upstream: Signal,
+    Upstream::Item: FromReflect + SSs,
+    O: FromReflect + SSs,
+{
+    type Item = O;
+
+    fn register_signal(self, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
     }
 }
 
@@ -458,10 +552,10 @@ where
 ///
 /// This node passes through the upstream value unchanged but logs it using `bevy_log::debug!`
 /// along with the source code location where `.debug()` was called.
+#[derive(Clone, Reflect)]
 pub struct SignalDebug<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     pub(crate) signal: Map<Upstream, Upstream::Item>,
 }
@@ -475,132 +569,6 @@ where
 
     fn register_signal(self, world: &mut World) -> SignalHandle {
         self.signal.register(world)
-    }
-}
-
-/// Represents a node that maps a `true` boolean signal value using a system. Implements [`Signal`].
-/// Executes the provided system `t` only when the upstream signal emits `true`.
-pub struct MapTrue<Upstream, O> {
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<O>,
-}
-
-impl<Upstream, O> Signal for MapTrue<Upstream, O>
-where
-    Upstream: Signal<Item = bool>,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
-{
-    type Item = O;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
-/// Represents a node that maps a `false` boolean signal value using a system. Implements [`Signal`].
-/// Executes the provided system `f` only when the upstream signal emits `false`.
-pub struct MapFalse<Upstream, O> {
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<O>,
-}
-
-impl<Upstream, O> Signal for MapFalse<Upstream, O>
-where
-    Upstream: Signal<Item = bool>,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
-{
-    type Item = O;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
-// --- Map Option Family Structs ---
-
-/// Represents a node that maps an `Option<T>` signal value using different systems for `Some` and `None`. Implements [`Signal`].
-/// Executes `some_system` if the upstream emits `Some(T)`, passing `T` via `In`.
-/// Executes `none_system` if the upstream emits `None`, passing `()` via `In`.
-pub struct MapOption<Upstream, I, O> {
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<(I, O)>,
-}
-
-impl<Upstream, I, O> Signal for MapOption<Upstream, I, O>
-where
-    Upstream: Signal<Item = Option<I>>,
-    Upstream::Item: FromReflect + SSs,
-    I: FromReflect + GetTypeRegistration + Typed + SSs,
-    O: FromReflect + SSs,
-{
-    type Item = O;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
-/// Represents a node that maps a `Some(T)` signal value using a system. Implements [`Signal`].
-/// Executes the provided system `some_system` only when the upstream signal emits `Some(T)`, passing `T` via `In`.
-pub struct MapSome<Upstream, I, O> {
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<(I, O)>,
-}
-
-impl<Upstream, I, O> Signal for MapSome<Upstream, I, O>
-where
-    Upstream: Signal<Item = Option<I>>,
-    Upstream::Item: FromReflect + SSs,
-    I: FromReflect + GetTypeRegistration + Typed + SSs,
-    O: FromReflect + SSs,
-{
-    type Item = O;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
-    }
-}
-
-/// Represents a node that maps a `None` signal value using a system. Implements [`Signal`].
-/// Executes the provided system `none_system` only when the upstream signal emits `None`, passing `()` via `In`.
-pub struct MapNone<Upstream, I, O> {
-    upstream: Upstream,
-    signal: LazySignal,
-    _marker: PhantomData<(I, O)>,
-}
-
-impl<Upstream, I, O> Signal for MapNone<Upstream, I, O>
-where
-    Upstream: Signal<Item = Option<I>>,
-    Upstream::Item: FromReflect + SSs,
-    I: FromReflect + GetTypeRegistration + Typed + SSs,
-    O: FromReflect + SSs,
-{
-    type Item = O;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        let SignalHandle(upstream) = self.upstream.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, upstream, signal);
-        SignalHandle::new(signal)
     }
 }
 
@@ -1104,6 +1072,7 @@ pub trait SignalExt: Signal {
         <Self::Item as Signal>::Item: FromReflect + SSs + Clone,
     {
         // TODO: forward with observer instead of mutex ?
+        // TODO: instead of mutex, sync the signal's downstreams with self
         let cur = Arc::new(Mutex::new(None));
         Flatten { signal: self.map(move |In(signal): In<Self::Item>, world: &mut World, mut prev_system_option: Local<Option<(SignalSystem, SignalHandle)>>| {
             // TODO: is this registering/cleanup too expensive ?
@@ -1117,16 +1086,9 @@ pub trait SignalExt: Signal {
                 let forwarder = signal.map(clone!((cur) move |In(item)| {
                     *cur.lock().unwrap() = Some(item);
                 }));
-                let handle = forwarder.register(world);
-                if let Ok(ancestor_orphans) = world.run_system_cached_with(
-                    move |In(signal): In<SignalSystem>, upstreams: Query<&Upstream>| {
-                        UpstreamIter::new(&upstreams, signal).filter(|upstream| !upstreams.contains(**upstream)).collect::<Vec<_>>()
-                    },
-                    handle.0
-                ) {
-                    process_signals_helper(world, ancestor_orphans, Box::new(()));
-                }
-                *prev_system_option = Some((cur_system, handle.clone()));
+                let forwarder = forwarder.register(world);
+                poll_signal(world, forwarder.0);
+                *prev_system_option = Some((cur_system, forwarder.clone()));
             }
             cur.lock().unwrap().take()
         }) }
@@ -1233,20 +1195,20 @@ pub trait SignalExt: Signal {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(predicate);
-            let wrapper_system = move |In(item): In<Self::Item>, world: &mut World| {
-                match world.run_system_with(system, item.clone()) {
-                    Ok(true) => Some(item),
-                    Ok(false) | Err(_) => None, // terminate on false or error
-                }
-            };
-            let signal = register_signal::<_, Self::Item, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<Self::Item, _, _, _>(move |In(item): In<Self::Item>, world: &mut World| {
+                    match world.run_system_with(system, item.clone()) {
+                        Ok(true) => Some(item),
+                        Ok(false) | Err(_) => None, // terminate on false or error
+                    }
+                })
+                .register(world);
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(system.entity());
             signal.into()
         });
 
         Filter {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1389,14 +1351,15 @@ pub trait SignalExt: Signal {
         let signal = LazySignal::new(move |world: &mut World| {
             let true_system = world.register_system(true_system);
             let false_system = world.register_system(false_system);
-            let wrapper_system = move |In(item): In<Self::Item>, world: &mut World| {
-                world
-                    .run_system_with(if item { true_system } else { false_system }, ())
-                    .ok()
-                    .map(Into::into)
-                    .flatten()
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(move |In(item): In<Self::Item>, world: &mut World| {
+                    world
+                        .run_system_with(if item { true_system } else { false_system }, ())
+                        .ok()
+                        .map(Into::into)
+                        .flatten()
+                })
+                .register(world);
             // just attach the system to the lifetime of the signal
             world
                 .entity_mut(*signal)
@@ -1405,7 +1368,6 @@ pub trait SignalExt: Signal {
             signal.into()
         });
         MapBool {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1441,24 +1403,24 @@ pub trait SignalExt: Signal {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let true_system = world.register_system(system);
-            let wrapper_system = move |In(item): In<Self::Item>, world: &mut World| {
-                if item {
-                    world
-                        .run_system_with(true_system, ())
-                        .ok()
-                        .map(Into::into)
-                        .flatten()
-                } else {
-                    None
-                }
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(move |In(item): In<Self::Item>, world: &mut World| {
+                    if item {
+                        world
+                            .run_system_with(true_system, ())
+                            .ok()
+                            .map(Into::into)
+                            .flatten()
+                    } else {
+                        None
+                    }
+                })
+                .register(world);
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(true_system.entity());
             signal.into()
         });
         MapTrue {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1494,24 +1456,24 @@ pub trait SignalExt: Signal {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let false_system = world.register_system(system);
-            let wrapper_system = move |In(item): In<Self::Item>, world: &mut World| {
-                if !item {
-                    world
-                        .run_system_with(false_system, ())
-                        .ok()
-                        .map(Into::into)
-                        .flatten()
-                } else {
-                    None
-                }
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(move |In(item): In<Self::Item>, world: &mut World| {
+                    if !item {
+                        world
+                            .run_system_with(false_system, ())
+                            .ok()
+                            .map(Into::into)
+                            .flatten()
+                    } else {
+                        None
+                    }
+                })
+                .register(world);
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(false_system.entity());
             signal.into()
         });
         MapFalse {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1536,7 +1498,7 @@ pub trait SignalExt: Signal {
         self,
         some_system: SF,
         none_system: NF,
-    ) -> MapOption<Self, I, O>
+    ) -> MapOption<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
@@ -1551,19 +1513,22 @@ pub trait SignalExt: Signal {
         let signal = LazySignal::new(move |world: &mut World| {
             let some_system = world.register_system(some_system);
             let none_system = world.register_system(none_system);
-            let wrapper_system = move |In(item): In<Option<I>>, world: &mut World| match item {
-                Some(value) => world
-                    .run_system_with(some_system, value)
-                    .ok()
-                    .map(Into::into)
-                    .flatten(),
-                None => world
-                    .run_system_with(none_system, ())
-                    .ok()
-                    .map(Into::into)
-                    .flatten(),
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(
+                    move |In(item): In<Self::Item>, world: &mut World| match item {
+                        Some(value) => world
+                            .run_system_with(some_system, value)
+                            .ok()
+                            .map(Into::into)
+                            .flatten(),
+                        None => world
+                            .run_system_with(none_system, ())
+                            .ok()
+                            .map(Into::into)
+                            .flatten(),
+                    },
+                )
+                .register(world);
             // just attach the system to the lifetime of the signal
             world
                 .entity_mut(*signal)
@@ -1572,7 +1537,6 @@ pub trait SignalExt: Signal {
             signal.into()
         });
         MapOption {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1592,7 +1556,7 @@ pub trait SignalExt: Signal {
     ///     |In(value): In<i32>| format!("Some({})", value),
     /// ); // Emits "Some(42)"
     /// ```
-    fn map_some<I, O, IOO, SF, SM>(self, system: SF) -> MapSome<Self, I, O>
+    fn map_some<I, O, IOO, SF, SM>(self, system: SF) -> MapSome<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
@@ -1604,21 +1568,23 @@ pub trait SignalExt: Signal {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let some_system = world.register_system(system);
-            let wrapper_system = move |In(item): In<Option<I>>, world: &mut World| match item {
-                Some(value) => world
-                    .run_system_with(some_system, value)
-                    .ok()
-                    .map(Into::into)
-                    .flatten(),
-                None => None,
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(
+                    move |In(item): In<Self::Item>, world: &mut World| match item {
+                        Some(value) => world
+                            .run_system_with(some_system, value)
+                            .ok()
+                            .map(Into::into)
+                            .flatten(),
+                        None => None,
+                    },
+                )
+                .register(world);
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(some_system.entity());
             signal.into()
         });
         MapSome {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }
@@ -1638,33 +1604,35 @@ pub trait SignalExt: Signal {
     ///     |_: In<()>| "None".to_string(),
     /// ); // Emits "None"
     /// ```
-    fn map_none<I, O, IOO, NF, NM>(self, none_system: NF) -> MapNone<Self, I, O>
+    fn map_none<I, O, IOO, F, M>(self, none_system: F) -> MapNone<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
         I: FromReflect + GetTypeRegistration + Typed + SSs,
         O: FromReflect + SSs,
         IOO: Into<Option<O>> + SSs,
-        NF: IntoSystem<In<()>, IOO, NM> + Send + Sync + 'static,
-        NM: SSs,
+        F: IntoSystem<In<()>, IOO, M> + Send + Sync + 'static,
+        M: SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let none_system = world.register_system(none_system);
-            let wrapper_system = move |In(item): In<Option<I>>, world: &mut World| match item {
-                Some(_) => None,
-                None => world
-                    .run_system_with(none_system, ())
-                    .ok()
-                    .map(Into::into)
-                    .flatten(),
-            };
-            let signal = register_signal::<_, O, _, _, _>(world, wrapper_system);
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(
+                    move |In(item): In<Self::Item>, world: &mut World| match item {
+                        Some(_) => None,
+                        None => world
+                            .run_system_with(none_system, ())
+                            .ok()
+                            .map(Into::into)
+                            .flatten(),
+                    },
+                )
+                .register(world);
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(none_system.entity());
             signal.into()
         });
         MapNone {
-            upstream: self,
             signal,
             _marker: PhantomData,
         }

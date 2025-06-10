@@ -24,7 +24,7 @@ pub struct SignalSystem(pub Entity);
 
 impl<I: 'static, O> From<SystemId<In<I>, O>> for SignalSystem {
     fn from(system_id: SystemId<In<I>, O>) -> Self {
-        SignalSystem(system_id.entity())
+        Self(system_id.entity())
     }
 }
 
@@ -179,7 +179,9 @@ pub(crate) fn process_signals_helper(
     world: &mut World,
     signals: impl IntoIterator<Item = SignalSystem>,
     input: Box<dyn PartialReflect>,
-) {
+    // TODO: this is a very naive approach, should ideally only run the exact minimal set of systems
+    return_option: Option<SignalSystem>,
+) -> Option<Box<dyn PartialReflect>> {
     for signal in signals {
         if let Some(runner) = world
             .get_entity(*signal)
@@ -187,12 +189,16 @@ pub(crate) fn process_signals_helper(
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
             if let Some(output) = runner.run(world, input.to_dynamic()) {
+                if return_option.map(|s| *s == *signal).unwrap_or(false) {
+                    return Some(output);
+                }
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
-                    process_signals_helper(world, downstream, output);
+                    return process_signals_helper(world, downstream, output, return_option);
                 }
             }
         }
     }
+    None
 }
 
 /// System that drives signal propagation by calling [`SignalPropagator::execute`].
@@ -205,7 +211,7 @@ pub(crate) fn process_signals(world: &mut World) {
     >::new(world);
     let orphan_parents = orphan_parents.get(world);
     let orphan_parents = orphan_parents.iter().map(SignalSystem).collect::<Vec<_>>();
-    process_signals_helper(world, orphan_parents, Box::new(()));
+    process_signals_helper(world, orphan_parents, Box::new(()), None);
 }
 
 /// Handle returned by [`SignalExt::register`] used for managing the lifecycle of a registered signal chain.
@@ -218,6 +224,12 @@ pub(crate) fn process_signals(world: &mut World) {
 /// reference counts and potentially despawns systems if their count reaches zero.
 #[derive(Clone, Deref, DerefMut, Debug)]
 pub struct SignalHandle(pub SignalSystem);
+
+impl From<SignalSystem> for SignalHandle {
+    fn from(signal: SignalSystem) -> Self {
+        Self(signal)
+    }
+}
 
 impl SignalHandle {
     /// Creates a new SignalHandle.
@@ -335,7 +347,7 @@ pub(crate) struct LazySignal {
 }
 
 impl LazySignal {
-    pub fn new<F: FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>(system: F) -> Self {
+    pub fn new<F: FnOnce(&mut World) -> SignalSystem + SSs>(system: F) -> Self {
         LazySignal {
             inner: Arc::new(LazySignalState {
                 references: AtomicUsize::new(1),
@@ -368,7 +380,7 @@ impl Drop for LazySignal {
     fn drop(&mut self) {
         // <= 2 because we also wna queue if only the holder remains
         if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2 {
-            if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {
+            if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {                
                 CLEANUP_SIGNALS.lock().unwrap().push(signal);
             }
         }
@@ -378,7 +390,6 @@ impl Drop for LazySignal {
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
 
-// TODO: drop has to be impl for all signal structs, since they are the ones being cloned
 pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
@@ -392,6 +403,7 @@ pub(crate) fn flush_cleanup_signals(world: &mut World) {
         if let Ok(entity) = world.get_entity_mut(*signal) {
             if let Some(registration_count) = entity.get::<SignalRegistrationCount>() {
                 if **registration_count == 0 {
+                    println!("LazySignal despawning for signal: {:?}", signal);
                     entity.despawn();
                 }
             }
@@ -533,4 +545,30 @@ pub(crate) fn signal_handle_cleanup_helper(
             }
         }
     }
+}
+
+// TODO: optimize this
+pub fn poll_signal_one_shot(
+    In(signal): In<SignalSystem>,
+    world: &mut World,
+) -> Option<Box<dyn PartialReflect>> {
+    // TODO: implications of this cached system "leaking" ? i guess it will be used for all flattens, but will truly leak if all flattens are dropped ...
+    if let Ok(ancestor_orphans) = world.run_system_cached_with(
+        move |In(signal): In<SignalSystem>, upstreams: Query<&Upstream>| {
+            UpstreamIter::new(&upstreams, signal)
+                .filter(|upstream| !upstreams.contains(**upstream))
+                .collect::<Vec<_>>()
+        },
+        signal,
+    ) {
+        return process_signals_helper(world, ancestor_orphans, Box::new(()), Some(signal));
+    }
+    None
+}
+
+pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn PartialReflect>> {
+    world
+        .run_system_cached_with(poll_signal_one_shot, signal)
+        .ok()
+        .flatten()
 }

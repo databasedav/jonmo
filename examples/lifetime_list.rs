@@ -53,7 +53,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
-            width: Val::Px(300.0),
+            width: Val::Px(400.0),
             padding: UiRect::all(Val::Px(5.0)),
             align_items: AlignItems::Center,
             ..default()
@@ -77,8 +77,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
         .child(
             JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 index
-                    .map(|In(index): In<Option<usize>>| format!("item {}", index.unwrap_or(0)))
-                    .map(|In(text): In<String>| TextSpan(text)),
+                    .map(|In(index): In<Option<usize>>| TextSpan(format!("item {}", index.unwrap_or(0))))
             ),
         )
         .child((TextColor(Color::BLACK), TextSpan::new(" | ")))
@@ -105,11 +104,12 @@ fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
 
 fn hotkeys(keys: Res<ButtonInput<KeyCode>>, colors: ResMut<Colors>, mut commands: Commands) {
     let mut flush = false;
+    let mut guard = colors.0.write();
     if keys.just_pressed(KeyCode::Equal) {
-        colors.0.push(random_color());
+        guard.push(random_color());
         flush = true;
     } else if keys.just_pressed(KeyCode::Minus) {
-        colors.0.pop();
+        guard.pop();
         flush = true;
     }
     if flush {

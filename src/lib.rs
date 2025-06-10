@@ -80,5 +80,6 @@ pub mod prelude {
         builder::{JonmoBuilder, SignalHandles},
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
+        utils::{LazyEntity, clone},
     };
 }

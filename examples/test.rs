@@ -21,8 +21,9 @@ fn main() {
         )
         .add_systems(
             Update,
-            (live.run_if(any_with_component::<Lifetime>), hotkeys),
+            (live.run_if(any_with_component::<Lifetime>), hotkeys, toggle),
         )
+        .insert_resource(ToggleFilter(true))
         .run();
 }
 
@@ -42,9 +43,21 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
-    .children_signal_vec(numbers.map(|In(color)| item(color)))
+    // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
+    .children_signal_vec(
+        numbers
+            .filter_signal(|In(n)| {
+                SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+                    // println!("toggle: {}", toggle.0);
+                    if toggle.0 { n % 2 == 0 } else { true }
+                })
+            })
+            .map(|In(color)| item(color)),
+    )
 }
+
+#[derive(Resource)]
+struct ToggleFilter(bool);
 
 fn item(number: u32) -> JonmoBuilder {
     JonmoBuilder::from((
@@ -82,14 +95,22 @@ fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
 
 fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut commands: Commands) {
     let mut flush = false;
+    let mut guard = numbers.0.write();
     if keys.just_pressed(KeyCode::Equal) {
-        numbers.0.push((numbers.0.len() + 1) as u32);
+        guard.push((guard.len() + 1) as u32);
         flush = true;
     } else if keys.just_pressed(KeyCode::Minus) {
-        numbers.0.pop();
+        guard.pop();
         flush = true;
     }
     if flush {
         commands.queue(numbers.0.flush());
+    }
+}
+
+fn toggle(keys: Res<ButtonInput<KeyCode>>, mut toggle: ResMut<ToggleFilter>) {
+    if keys.just_pressed(KeyCode::Space) {
+        toggle.0 = !toggle.0;
+        info!("Toggle filter: {}", toggle.0);
     }
 }

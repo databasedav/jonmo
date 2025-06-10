@@ -252,7 +252,7 @@ impl JonmoBuilder {
         let on_spawn = move |world: &mut World, parent| {
             let child_entity = world.spawn_empty().id();
             if let Ok(ref mut parent) = world.get_entity_mut(parent) {
-                EntityWorldMut::insert_children(parent, offset, &[child_entity]);
+                insert_children(parent, offset, &[child_entity]);
                 child.spawn_on_entity(world, child_entity);
             } else {
                 if let Ok(child) = world.get_entity_mut(child_entity) {
@@ -285,7 +285,7 @@ impl JonmoBuilder {
                         let child_entity = world.spawn_empty().id();
                         if let Ok(mut parent) = world.get_entity_mut(parent) {
                             let offset = offset(block, &child_block_populations.lock().unwrap());
-                            parent.insert_children(offset, &[child_entity]);
+                            insert_children(&mut parent, offset, &[child_entity]);
                             child.spawn_on_entity(world, child_entity);
                             *existing_child_option = Some(child_entity);
                         } else {
@@ -303,8 +303,7 @@ impl JonmoBuilder {
                         child_block_populations.lock().unwrap()[block] = 0;
                     }
                 };
-            let signal = child_option.map(system);
-            let handle = Signal::register_signal(signal, world);
+            let handle = child_option.map(system).register(world);
             add_handle(world, parent, handle);
         };
         self.on_spawn(on_spawn)
@@ -332,7 +331,7 @@ impl JonmoBuilder {
 
             if let Ok(mut parent) = world.get_entity_mut(parent) {
                 let offset = offset(block, &child_block_populations.lock().unwrap()); // Recalculate offset
-                parent.insert_children(offset, &children_entities);
+                insert_children(&mut parent, offset, &children_entities);
                 for (child, child_entity) in children_vec
                     .into_iter()
                     .zip(children_entities.iter().copied())
@@ -377,7 +376,7 @@ impl JonmoBuilder {
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
                                 let offset =
                                     offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset, &children_entities);
+                                insert_children(&mut parent, offset, &children_entities);
                                 for (child, child_entity) in
                                     children.into_iter().zip(children_entities.iter().copied())
                                 {
@@ -395,7 +394,7 @@ impl JonmoBuilder {
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
                                 let offset =
                                     offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset + index, &[child_entity]);
+                                insert_children(&mut parent, offset + index, &[child_entity]);
                                 child.spawn_on_entity(world, child_entity);
                                 children_entities.insert(index, child_entity);
                                 child_block_populations.lock().unwrap()[block] =
@@ -414,7 +413,8 @@ impl JonmoBuilder {
                                 if let Ok(mut parent) = world.get_entity_mut(parent) {
                                     let offset =
                                         offset(block, &child_block_populations.lock().unwrap());
-                                    parent.insert_children(
+                                    insert_children(
+                                        &mut parent,
                                         offset + children_entities.len(),
                                         &[child_entity],
                                     );
@@ -445,7 +445,7 @@ impl JonmoBuilder {
                                 set_child_entity = true;
                                 let offset =
                                     offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset + index, &[child_entity]);
+                                insert_children(&mut parent, offset + index, &[child_entity]);
                                 node.spawn_on_entity(world, child_entity);
                             } else {
                                 // parent despawned during child spawning
@@ -473,7 +473,7 @@ impl JonmoBuilder {
                                         children_entities.get(old_index).copied()
                                     {
                                         parent.remove_children(&[old_entity]);
-                                        parent.insert_children(new_index, &[old_entity]);
+                                        insert_children(parent, new_index, &[old_entity]);
                                     }
                                 }
                             }
@@ -563,6 +563,54 @@ impl JonmoBuilder {
     }
 }
 
+fn place(children: &mut Vec<Entity>, entity: Entity, index: usize) {
+    if let Some(current) = <[Entity]>::iter(children).position(|e| *e == entity) {
+        // The len is at least 1, so the subtraction is safe.
+        let index = index.min(children.len());
+        Vec::remove(children, current);
+        children.insert(index, entity);
+    };
+}
+
+fn place_most_recent(children: &mut Vec<Entity>, index: usize) {
+    if let Some(entity) = children.pop() {
+        let index = index.min(children.len());
+        children.insert(index, entity);
+    }
+}
+
+// TODO: remove 0.16.1
+fn insert_children(entity: &mut EntityWorldMut, index: usize, children: &[Entity]) {
+    let id = entity.id();
+    entity.world_scope(|world| {
+        for (offset, child) in children.iter().enumerate() {
+            let index = index.saturating_add(offset);
+            if world
+                .get::<ChildOf>(*child)
+                .is_some_and(|children| children.parent() == id)
+            {
+                place(
+                    world
+                        .get_mut::<Children>(id)
+                        .expect("hooks should have added relationship target")
+                        .collection_mut_risky(),
+                    *child,
+                    index,
+                );
+            } else {
+                world.entity_mut(*child).insert(ChildOf(id));
+                place_most_recent(
+                    world
+                        .get_mut::<Children>(id)
+                        .expect("hooks should have added relationship target")
+                        .collection_mut_risky(),
+                    index,
+                );
+            }
+        }
+    });
+}
+
 fn offset(i: usize, child_block_populations: &[usize]) -> usize {
-    child_block_populations[0..i].iter().copied().sum()
+    child_block_populations[..i].iter().copied().sum()
 }
