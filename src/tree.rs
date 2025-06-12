@@ -1,25 +1,24 @@
 use super::utils::*;
 
-use bevy_platform::{
-    collections::{HashMap, HashSet},
-    sync::{
-        Arc, LazyLock, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-use core::hash::Hash;
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::component::HookContext;
 use bevy_ecs::{
+    component::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
     system::{RunSystemOnce, SystemId, SystemState},
     world::DeferredWorld,
 };
 use bevy_log::prelude::*;
-use bevy_reflect::{FromReflect, PartialReflect, Reflect};
+use bevy_platform::{
+    collections::HashSet,
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+use core::{any::Any, hash::Hash, marker::PhantomData};
 
-#[derive(Clone, Copy, Deref, Debug, PartialEq, Eq, Hash, Reflect)]
+#[derive(Clone, Copy, Deref, Debug, PartialEq, Eq, Hash)]
 pub struct SignalSystem(pub Entity);
 
 impl From<Entity> for SignalSystem {
@@ -66,11 +65,10 @@ impl SignalRegistrationCount {
 /// reference counting via `SignalNodeMetadata`. Returns the `SystemId`.
 pub fn register_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
-    I: FromReflect + SSs,
-    O: FromReflect + SSs,
-    IOO: Into<Option<O>> + SSs,
+    I: 'static,
+    O: Clone + 'static,
+    IOO: Into<Option<O>> + 'static,
     F: IntoSystem<In<I>, IOO, M> + SSs,
-    M: SSs,
 {
     lazy_signal_from_system(system).register(world)
 }
@@ -106,7 +104,7 @@ pub(crate) struct Upstream(pub(crate) HashSet<SignalSystem>);
 impl<'a> IntoIterator for &'a Upstream {
     type Item = <Self::IntoIter as Iterator>::Item;
 
-    type IntoIter = std::collections::hash_set::Iter<'a, SignalSystem>;
+    type IntoIter = bevy_platform::collections::hash_set::Iter<'a, SignalSystem>;
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
@@ -120,7 +118,7 @@ pub(crate) struct Downstream(HashSet<SignalSystem>);
 impl<'a> IntoIterator for &'a Downstream {
     type Item = <Self::IntoIter as Iterator>::Item;
 
-    type IntoIter = std::collections::hash_set::Iter<'a, SignalSystem>;
+    type IntoIter = bevy_platform::collections::hash_set::Iter<'a, SignalSystem>;
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
@@ -143,8 +141,7 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
             downstream.insert(Upstream(HashSet::from([source])));
         }
     }
-    let mut signals = world.get_resource_mut::<Signals>().unwrap();
-
+    // let mut signals = world.get_resource_mut::<Signals>().unwrap();
 }
 
 /// Component holding the type-erased system runner function.
@@ -154,15 +151,46 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
 /// handles the type-erased execution logic, including downcasting inputs and boxing outputs.
 #[derive(Component, Clone)]
 pub(crate) struct SystemRunner {
-    /// The type-erased function to execute the system.
-    pub(crate) runner: Arc<
-        Box<
-            dyn Fn(&mut World, Box<dyn PartialReflect>) -> Option<Box<dyn PartialReflect>>
-                + Send
-                + Sync
-                + 'static,
-        >,
-    >,
+    pub(crate) runner:
+        Arc<Box<dyn Fn(&mut World, Box<dyn Any>) -> Option<Box<dyn AnyClone>> + Send + Sync>>,
+}
+
+trait Runnable: Send + Sync {
+    fn run(&self, w: &mut World, i: Box<dyn Any>) -> Option<Box<dyn AnyClone>>;
+}
+
+struct SystemHolder<I, O, S>
+where
+    I: 'static,
+    O: 'static,
+    S: Into<Option<O>>,
+{
+    system: SystemId<In<I>, S>,
+    _marker: PhantomData<fn() -> O>,
+}
+
+impl<I, O, S> Runnable for SystemHolder<I, O, S>
+where
+    I: 'static,
+    O: Clone,
+    S: Into<Option<O>> + 'static,
+{
+    fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
+        match input.downcast::<I>() {
+            Ok(bx) => world
+                .run_system_with(self.system, *bx)
+                .ok()
+                .and_then(Into::into)
+                .map(|o| Box::new(o) as Box<dyn AnyClone>),
+            Err(error) => {
+                error!(
+                    "Failed to downcast input for system {:?}: {:?}",
+                    self.system, error
+                );
+                None
+            }
+        }
+    }
 }
 
 impl SystemRunner {
@@ -170,11 +198,7 @@ impl SystemRunner {
     ///
     /// Takes the `World` and a `Box<dyn PartialReflect>` input, runs the system,
     /// and returns an optional `Box<dyn PartialReflect>` output.
-    pub(crate) fn run(
-        &self,
-        world: &mut World,
-        input: Box<dyn PartialReflect>,
-    ) -> Option<Box<dyn PartialReflect>> {
+    pub(crate) fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
         (self.runner)(world, input)
     }
 }
@@ -183,10 +207,17 @@ fn clone_downstream(downstream: &Downstream) -> Vec<SignalSystem> {
     downstream.iter().cloned().collect()
 }
 
+use dyn_clone::{DynClone, clone_trait_object};
+
+pub(crate) trait AnyClone: Any + DynClone {}
+clone_trait_object!(AnyClone);
+
+impl<T: Clone + 'static> AnyClone for T {}
+
 pub(crate) fn process_signals_helper(
     world: &mut World,
     signals: impl IntoIterator<Item = SignalSystem>,
-    input: Box<dyn PartialReflect>,
+    input: Box<dyn AnyClone>,
 ) {
     for signal in signals {
         if let Some(runner) = world
@@ -194,7 +225,7 @@ pub(crate) fn process_signals_helper(
             .ok()
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
-            if let Some(output) = runner.run(world, input.to_dynamic()) {
+            if let Some(output) = runner.run(world, input.clone()) {
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
                     process_signals_helper(world, downstream, output);
                 }
@@ -256,128 +287,30 @@ impl SignalHandle {
     }
 }
 
-trait Runnable<T> {
-    fn run(&self, world: &mut World, input: T);
-    fn register(&mut self);
-}
-
-type DynRunnable<T> = Arc<Mutex<dyn Runnable<T> + Send + Sync + 'static>>;
-
-struct SignalData<I, O, IOO>
-where
-    I: 'static,
-    O: 'static + Clone,
-    IOO: Into<Option<O>> + SSs,
-{
-    system: SystemId<In<I>, IOO>,
-    registrations: usize,
-    upstreams: HashSet<SignalSystem>,
-    downstreams: HashMap<SignalSystem, DynRunnable<O>>,
-}
-
-impl<I, O, IOO> SignalData<I, O, IOO>
-where
-    I: 'static,
-    O: 'static + Clone,
-    IOO: Into<Option<O>> + SSs,
-{
-    pub fn new(
-        system: SystemId<In<I>, IOO>,
-    ) -> Self {
-        Self {
-            system,
-            registrations: 1,
-            upstreams: HashSet::new(),
-            downstreams: HashMap::new(),
-        }
-    }
-}
-
-impl<I, O, IOO> Runnable<I> for SignalData<I, O, IOO>
-where
-    I: 'static,
-    O: 'static + Clone,
-    IOO: Into<Option<O>> + SSs,
-{
-    fn run(&self, world: &mut World, input: I) {
-        if let Ok(Some(output)) = world.run_system_with(self.system, input).map(Into::into) {
-            for downstream in self.downstreams.values() {
-                // TODO: will deadlock on cycles
-                downstream.lock().unwrap().run(world, output.clone())
-            }
-        }
-    }
-
-    fn register(&mut self) {
-        self.registrations += 1;
-    }
-}
-
-#[derive(Resource, Default)]
-struct Signals {
-    signals: HashSet<SignalSystem>,
-    roots: HashMap<SignalSystem, DynRunnable<()>>,
-}
-
-impl Signals {
-    pub fn add_signal<I, O, IOO>(&mut self, system: F) -> SignalSystem
-    where
-        I: 'static,
-        O: 'static + Clone,
-        IOO: Into<Option<O>> + SSs,
-    {
-        let signal = spawn_signal(self, system);
-        self.signals.insert(signal, Box::new(()));
-        signal
-    }
-}
-
 pub(crate) fn spawn_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
-    I: FromReflect + SSs,
-    O: FromReflect + SSs,
-    IOO: Into<Option<O>> + SSs,
-    F: IntoSystem<In<I>, IOO, M> + SSs,
-    M: SSs,
+    I: 'static,
+    O: Clone + 'static,
+    IOO: Into<Option<O>> + 'static,
+    F: IntoSystem<In<I>, IOO, M> + 'static,
 {
-    let system = world.register_system(system);
-    let entity = system.entity();
-    let mut signals = world
-        .get_resource_mut::<Signals>()
-        .unwrap();
-    
+    let sys_id = world.register_system(system);
+    let entity = sys_id.entity();
+
+    // Wrap the typed node behind NodeErased
+    let runner: Arc<Box<dyn Runnable>> = Arc::new(Box::new(SystemHolder::<I, O, IOO> {
+        system: sys_id,
+        _marker: std::marker::PhantomData,
+    }));
+
     world.entity_mut(entity).insert((
         SignalRegistrationCount::new(),
         SystemRunner {
-            runner: Arc::new(Box::new(move |world, input| {
-                match I::from_reflect(input.as_ref()) {
-                    Some(input) => match world.run_system_with(system, input) {
-                        Ok(output) => {
-                            if let Some(output) = Into::<Option<O>>::into(output) {
-                                Some(Box::new(output) as Box<dyn PartialReflect>)
-                            } else {
-                                None // terminate
-                            }
-                        }
-                        Err(err) => {
-                            warn!("error running system {:?}: {}", system, err);
-                            None // terminate on error
-                        }
-                    },
-                    None => {
-                        warn!(
-                            "failed to downcast input for system {:?}<{:?}>: {:?}",
-                            system,
-                            input.reflect_type_path(),
-                            input
-                        );
-                        None
-                    }
-                }
-            })),
+            runner: Arc::new(Box::new(move |w, inp| runner.run(w, inp))),
         },
     ));
-    system.into()
+
+    entity.into()
 }
 
 /// Internal enum used by `RegisterOnceSignal` to track registration state.
@@ -387,7 +320,7 @@ pub(crate) struct LazySignalState {
 }
 
 enum LazySystem {
-    System(Option<Box<dyn FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>>),
+    System(Option<Box<dyn FnOnce(&mut World) -> SignalSystem + Send + Sync>>),
     Registered(SignalSystem),
 }
 
@@ -402,12 +335,12 @@ impl LazySystem {
                 signal
             }
             LazySystem::Registered(signal) => {
-                let mut signals = world
-                    .get_resource_mut::<Signals>()
-                    .unwrap();
-                if let Some(data) = signals.signals.get_mut(signal) {
-                    data.register()
-                }
+                // let mut signals = world
+                //     .get_resource_mut::<Signals>()
+                //     .unwrap();
+                // if let Some(data) = signals.signals.get_mut(signal) {
+                //     data.register()
+                // }
                 if let Ok(mut system) = world.get_entity_mut(**signal) {
                     if let Some(mut registration_count) =
                         system.get_mut::<SignalRegistrationCount>()
@@ -427,9 +360,6 @@ impl LazySystem {
 /// if the system has already been registered. If not, it runs the provided closure
 /// to create and register the system. If it has, it increments the registration count
 /// for the existing system.
-#[derive(Reflect)]
-#[reflect(Clone)]
-#[reflect(opaque)]
 pub(crate) struct LazySignal {
     inner: Arc<LazySignalState>,
 }
@@ -468,7 +398,7 @@ impl Drop for LazySignal {
     fn drop(&mut self) {
         // <= 2 because we also wna queue if only the holder remains
         if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2 {
-            if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {                
+            if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {
                 CLEANUP_SIGNALS.lock().unwrap().push(signal);
             }
         }
@@ -491,7 +421,6 @@ pub(crate) fn flush_cleanup_signals(world: &mut World) {
         if let Ok(entity) = world.get_entity_mut(*signal) {
             if let Some(registration_count) = entity.get::<SignalRegistrationCount>() {
                 if **registration_count == 0 {
-                    println!("LazySignal despawning for signal: {:?}", signal);
                     entity.despawn();
                 }
             }
@@ -501,11 +430,10 @@ pub(crate) fn flush_cleanup_signals(world: &mut World) {
 
 pub(crate) fn lazy_signal_from_system<I, O, IOO, F, M>(system: F) -> LazySignal
 where
-    I: FromReflect + SSs,
-    O: FromReflect + SSs,
-    IOO: Into<Option<O>> + SSs,
+    I: 'static,
+    O: Clone + 'static,
+    IOO: Into<Option<O>> + 'static,
     F: IntoSystem<In<I>, IOO, M> + SSs,
-    M: SSs,
 {
     LazySignal::new(move |world: &mut World| spawn_signal(world, system))
 }
@@ -519,7 +447,7 @@ where
     D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
 {
     upstreams_query: &'w Query<'w, 's, D, F>,
-    upstreams: VecDeque<SignalSystem>,
+    upstreams: Vec<SignalSystem>,
 }
 
 impl<'w, 's, D: QueryData, F: QueryFilter> UpstreamIter<'w, 's, D, F>
@@ -547,7 +475,7 @@ where
     type Item = SignalSystem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let signal = self.upstreams.pop_front()?;
+        let signal = self.upstreams.pop()?;
 
         if let Ok(upstream) = self.upstreams_query.get(*signal) {
             self.upstreams.extend(upstream);
@@ -567,7 +495,7 @@ where
     D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
 {
     downstreams_query: &'w Query<'w, 's, D, F>,
-    downstreams: VecDeque<SignalSystem>,
+    downstreams: Vec<SignalSystem>,
 }
 
 impl<'w, 's, D: QueryData, F: QueryFilter> DownstreamIter<'w, 's, D, F>
@@ -596,7 +524,7 @@ where
     type Item = SignalSystem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let signal = self.downstreams.pop_front()?;
+        let signal = self.downstreams.pop()?;
 
         if let Ok(downstream) = self.downstreams_query.get(*signal) {
             self.downstreams.extend(downstream);
@@ -639,7 +567,7 @@ pub(crate) fn signal_handle_cleanup_helper(
 pub fn poll_signal_one_shot(
     In(signal): In<SignalSystem>,
     world: &mut World,
-) -> Option<Box<dyn PartialReflect>> {
+) -> Option<Box<dyn Any>> {
     // TODO: implications of this cached system "leaking" ? i guess it will be used for all flattens, but will truly leak if all flattens are dropped ...
     if let Ok(ancestor_orphans) = world.run_system_cached_with(
         move |In(signal): In<SignalSystem>, upstreams: Query<&Upstream>| {
@@ -649,12 +577,13 @@ pub fn poll_signal_one_shot(
         },
         signal,
     ) {
-        return process_signals_helper(world, ancestor_orphans, Box::new(()), Some(signal));
+        return None;
+        // return process_signals_helper(world, ancestor_orphans, Box::new(()), Some(signal));
     }
     None
 }
 
-pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn PartialReflect>> {
+pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn Any>> {
     world
         .run_system_cached_with(poll_signal_one_shot, signal)
         .ok()

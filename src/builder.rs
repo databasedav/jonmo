@@ -1,16 +1,8 @@
 //! Declarative entity builder using jonmo signals.
 
-use super::{
-    prelude::*,
-    signal::{Map, Signal, SignalBuilder, SignalExt, Source},
-    signal_vec::VecDiff,
-    tree::SignalHandle,
-    utils::{LazyEntity, SSs},
-};
-use bevy_ecs::component::HookContext;
-use bevy_ecs::{prelude::*, world::DeferredWorld};
-use bevy_reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
-use std::sync::{Arc, Mutex};
+use super::{signal::*, signal_vec::*, tree::*, utils::*};
+use bevy_ecs::{component::HookContext, prelude::*, world::DeferredWorld};
+use bevy_platform::sync::{Arc, Mutex};
 
 fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     if let Some(handles) = world.get_entity_mut(entity).ok().and_then(|mut entity| {
@@ -58,8 +50,7 @@ fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
 
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive systems and
 /// children using a declarative builder pattern. Inspired by Dominator's DomBuilder and Haalka's NodeBuilder.
-#[derive(Default, Clone, Reflect)]
-#[reflect(opaque)]
+#[derive(Default, Clone)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
@@ -110,10 +101,9 @@ impl JonmoBuilder {
     /// to the entity's `SignalHandlers` component upon spawning.
     pub fn on_signal<I, S, F, M>(self, signal: S, system: F) -> Self
     where
-        I: FromReflect + GetTypeRegistration + Typed + SSs,
+        I: Clone + 'static,
         S: Signal<Item = I> + SSs,
         F: IntoSystem<In<(Entity, I)>, (), M> + SSs,
-        M: SSs,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle = Signal::register_signal(
@@ -128,11 +118,10 @@ impl JonmoBuilder {
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn signal_from_entity<O, OS, F>(self, f: F) -> Self
+    pub fn signal_from_entity<O, S, F>(self, f: F) -> Self
     where
-        O: FromReflect + GetTypeRegistration + Typed + SSs,
-        OS: Signal<Item = O> + SSs,
-        F: FnOnce(Source<Entity>) -> OS + SSs,
+        S: Signal<Item = O>,
+        F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle = Signal::register_signal(f(SignalBuilder::from_entity(entity)), world);
@@ -142,12 +131,12 @@ impl JonmoBuilder {
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn signal_from_component<C, OS, F, O>(self, f: F) -> Self
+    pub fn signal_from_component<C, S, F, O>(self, f: F) -> Self
     where
-        C: Component + Clone + FromReflect + GetTypeRegistration + Typed,
-        OS: Signal<Item = O> + SSs,
-        F: FnOnce(Map<Source<Entity>, C>) -> OS + SSs,
-        O: FromReflect + GetTypeRegistration + Typed + SSs,
+        C: Component + Clone,
+        S: Signal<Item = O>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
+        // O: FromReflect + GetTypeRegistration + Typed + SSs,
     {
         self.signal_from_entity(|signal| {
             f(signal.map(|In(entity): In<Entity>, components: Query<&C>| {
@@ -156,11 +145,10 @@ impl JonmoBuilder {
         })
     }
 
-    pub fn signal_from_ancestor<O, OS, F>(self, generations: usize, f: F) -> Self
+    pub fn signal_from_ancestor<O, S, F>(self, generations: usize, f: F) -> Self
     where
-        O: FromReflect + GetTypeRegistration + Typed + SSs,
-        OS: Signal<Item = O> + SSs,
-        F: FnOnce(Map<Source<Entity>, Entity>) -> OS + SSs,
+        S: Signal<Item = O>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_entity(move |signal| {
             f(
@@ -173,11 +161,10 @@ impl JonmoBuilder {
         })
     }
 
-    pub fn signal_from_parent<O, OS, F>(self, f: F) -> Self
+    pub fn signal_from_parent<O, S, F>(self, f: F) -> Self
     where
-        O: FromReflect + GetTypeRegistration + Typed + SSs,
-        OS: Signal<Item = O> + SSs,
-        F: FnOnce(Map<Source<Entity>, Entity>) -> OS + SSs,
+        S: Signal<Item = O>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_ancestor(1, f)
     }
@@ -186,7 +173,7 @@ impl JonmoBuilder {
     pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
     where
         C: Component,
-        IOC: Into<Option<C>> + FromReflect + GetTypeRegistration + Typed,
+        IOC: Into<Option<C>> + Clone + 'static,
         S: Signal<Item = IOC> + SSs,
     {
         self.on_signal(
@@ -207,9 +194,9 @@ impl JonmoBuilder {
     pub fn component_signal_from_entity<C, IOC, S, F>(self, f: F) -> Self
     where
         C: Component,
-        IOC: Into<Option<C>> + FromReflect + GetTypeRegistration + Typed,
-        S: Signal<Item = IOC> + SSs,
-        F: FnOnce(Source<Entity>) -> S + SSs,
+        IOC: Into<Option<C>> + 'static,
+        S: Signal<Item = IOC>,
+        F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
         self.entity_sync(entity.clone())
@@ -229,11 +216,11 @@ impl JonmoBuilder {
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
     pub fn component_signal_from_component<I, O, IOO, S, F>(self, f: F) -> Self
     where
-        I: Component + Clone + FromReflect + GetTypeRegistration + Typed,
+        I: Component + Clone,
         O: Component,
-        IOO: Into<Option<O>> + FromReflect + GetTypeRegistration + Typed,
+        IOO: Into<Option<O>> + 'static,
         S: Signal<Item = IOO> + SSs,
-        F: FnOnce(Map<Source<Entity>, I>) -> S + SSs,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
             f(signal.map(|In(entity): In<Entity>, components: Query<&I>| {
@@ -265,7 +252,7 @@ impl JonmoBuilder {
     }
 
     /// Declare a reactive child. When the [`Signal`] outputs [`None`], the child is removed.
-    pub fn child_signal<T: Into<Option<JonmoBuilder>> + FromReflect>(
+    pub fn child_signal<T: Into<Option<JonmoBuilder>> + 'static>(
         self,
         child_option: impl Signal<Item = T> + SSs,
     ) -> Self {
@@ -355,7 +342,7 @@ impl JonmoBuilder {
     /// Declare reactive children based on a `SignalVec`.
     pub fn children_signal_vec(
         self,
-        children_signal_vec: impl SignalVec<Item = JonmoBuilder>,
+        children_signal_vec: impl SignalVec<Item = JonmoBuilder> + SSs,
     ) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(0);

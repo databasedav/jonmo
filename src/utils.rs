@@ -1,8 +1,7 @@
 use bevy_ecs::prelude::*;
-use bevy_reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
+use bevy_platform::sync::{Arc, OnceLock};
 #[doc(no_inline)]
 pub use enclose::enclose as clone;
-use std::sync::{Arc, OnceLock};
 
 #[derive(Default, Clone)]
 pub struct LazyEntity(Arc<OnceLock<Entity>>);
@@ -32,6 +31,3 @@ impl LazyEntity {
 
 pub trait SSs: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> SSs for T {}
-
-pub trait BigReflect: Reflect + FromReflect + GetTypeRegistration + Typed {}
-impl<T: Reflect + FromReflect + GetTypeRegistration + Typed> BigReflect for T {}

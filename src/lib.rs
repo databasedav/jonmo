@@ -37,7 +37,6 @@ pub mod signal;
 pub mod signal_vec;
 pub mod tree;
 pub mod utils;
-pub use builder::JonmoBuilder;
 
 use tree::*;
 

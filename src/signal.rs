@@ -1,14 +1,9 @@
 use super::{tree::*, utils::*};
 use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
-use bevy_reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
+use bevy_platform::sync::{Arc, Mutex};
 use bevy_time::{Time, Timer, TimerMode};
-use std::{
-    fmt::Debug,
-    marker::PhantomData,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use core::{fmt::Debug, marker::PhantomData, time::Duration};
 
 /// Represents a value that changes over time and handles internal registration logic.
 ///
@@ -19,8 +14,8 @@ use std::{
 /// This trait defines the fundamental behavior of a signal, including its output type
 /// and the mechanism for registering its underlying systems in the Bevy `World`.
 pub trait Signal: SSs {
-    /// The type of value produced by this signal.
-    type Item: SSs;
+    /// The output type
+    type Item;
 
     /// Registers the systems associated with this node and its predecessors in the `World`.
     /// Returns a [`SignalHandle`] containing the entities of *all* systems
@@ -35,21 +30,15 @@ pub trait Signal: SSs {
 ///
 /// A source signal is the starting point of a signal chain. It typically originates
 /// from a Bevy resource, component, entity, or a custom system.
-#[derive(Clone, Reflect)]
-// #[reflect(opaque)]
-pub struct Source<O>
-// where
-//     O: Clone,
-{
-    // TODO: get rid of this clone bound, may be a bug with reflect clone ?
+#[derive(Clone)]
+pub struct Source<O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<O>,
+    _marker: PhantomData<fn() -> O>,
 }
 
 impl<O> Signal for Source<O>
 where
-    O: SSs + Clone,
+    O: 'static,
 {
     type Item = O;
 
@@ -64,19 +53,17 @@ where
 /// The transformation function receives the upstream value (`Upstream::Item`) via `In`
 /// and should return an `Option<O>`. Returning `None` terminates the signal propagation
 /// for the current update cycle.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Map<Upstream, O> {
     pub(crate) upstream: Upstream,
     pub(crate) signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<O>,
+    _marker: PhantomData<fn() -> O>,
 }
 
 impl<Upstream, O> Signal for Map<Upstream, O>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -93,7 +80,7 @@ where
 /// This is a specialized map node where the upstream signal emits `Entity` values.
 /// It attempts to get the component `C` from the emitted entity and propagates the component's value.
 /// If the entity does not have the component, the signal terminates for that update.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapComponent<Upstream, C> {
     pub(crate) signal: Map<Upstream, C>,
 }
@@ -101,8 +88,7 @@ pub struct MapComponent<Upstream, C> {
 impl<Upstream, C> Signal for MapComponent<Upstream, C>
 where
     Upstream: Signal<Item = Entity>,
-    Upstream::Item: FromReflect + SSs,
-    C: Component + Clone + FromReflect + SSs,
+    C: Component,
 {
     type Item = C;
 
@@ -115,7 +101,7 @@ where
 ///
 /// Similar to `MapComponent`, but always propagates an `Option<C>`. It emits `Some(C)`
 /// if the entity has the component, and `None` otherwise.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct ComponentOption<Upstream, C> {
     pub(crate) signal: Map<Upstream, Option<C>>,
 }
@@ -123,7 +109,7 @@ pub struct ComponentOption<Upstream, C> {
 impl<Upstream, C> Signal for ComponentOption<Upstream, C>
 where
     Upstream: Signal<Item = Entity>,
-    C: Component + Clone + FromReflect + GetTypeRegistration + Typed + SSs,
+    C: Component,
 {
     type Item = Option<C>;
 
@@ -136,18 +122,16 @@ where
 ///
 /// This node takes an entity signal and emits `true` if the entity has component `C`,
 /// and `false` otherwise.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct HasComponent<Upstream, C> {
     pub(crate) signal: Map<Upstream, bool>,
-    #[reflect(ignore)]
-    _marker: PhantomData<C>,
+    _marker: PhantomData<fn() -> C>,
 }
 
 impl<Upstream, C> Signal for HasComponent<Upstream, C>
 where
     Upstream: Signal<Item = Entity>,
-    Upstream::Item: FromReflect + SSs,
-    C: Component + Clone + FromReflect + SSs,
+    C: Component,
 {
     type Item = bool;
 
@@ -160,7 +144,7 @@ where
 ///
 /// This node only propagates a value if it is different from the previously emitted value.
 /// Requires the `Item` type to implement `PartialEq`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Dedupe<Upstream>
 where
     Upstream: Signal,
@@ -171,7 +155,6 @@ where
 impl<Upstream> Signal for Dedupe<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -183,7 +166,7 @@ where
 /// Represents a node that only emits the first value it receives. Implements [`Signal`].
 ///
 /// After the first value is emitted, this node will terminate propagation for all subsequent updates.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct First<Upstream>
 where
     Upstream: Signal,
@@ -194,7 +177,6 @@ where
 impl<Upstream> Signal for First<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -209,7 +191,7 @@ where
 /// It emits a tuple `(Left::Item, Right::Item)` only when *both* upstream signals have
 /// produced a new value since the last emission from this combine node. It internally
 /// caches the latest value from each upstream signal.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Combine<Left, Right>
 where
     Left: Signal,
@@ -223,9 +205,7 @@ where
 impl<Left, Right> Signal for Combine<Left, Right>
 where
     Left: Signal,
-    Left::Item: FromReflect + GetTypeRegistration + Typed + SSs,
     Right: Signal,
-    Right::Item: FromReflect + GetTypeRegistration + Typed + SSs,
 {
     type Item = (Left::Item, Right::Item);
 
@@ -245,12 +225,12 @@ where
 /// this node subscribes to the *inner* signal emitted most recently and propagates values
 /// from that inner signal. When the upstream emits a *new* inner signal, `Flatten` switches
 /// its subscription to the new one.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Flatten<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + Signal,
-    <Upstream::Item as Signal>::Item: FromReflect + SSs + Clone,
+    Upstream::Item: Signal,
+    <Upstream::Item as Signal>::Item: Clone,
 {
     pub(crate) signal: Map<Upstream, <Upstream::Item as Signal>::Item>,
 }
@@ -258,8 +238,8 @@ where
 impl<Upstream> Signal for Flatten<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + Signal,
-    <Upstream::Item as Signal>::Item: FromReflect + SSs + Clone,
+    Upstream::Item: Signal,
+    <Upstream::Item as Signal>::Item: Clone,
 {
     type Item = <Upstream::Item as Signal>::Item;
 
@@ -272,7 +252,7 @@ where
 ///
 /// Emits `true` if the upstream value is equal to the provided `value`, `false` otherwise.
 /// Requires `Upstream::Item` to implement `PartialEq`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Eq<Upstream> {
     pub(crate) signal: Map<Upstream, bool>,
 }
@@ -280,7 +260,7 @@ pub struct Eq<Upstream> {
 impl<Upstream> Signal for Eq<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: PartialEq + FromReflect + SSs,
+    Upstream::Item: PartialEq,
 {
     type Item = bool;
 
@@ -293,7 +273,7 @@ where
 ///
 /// Emits `true` if the upstream value is *not* equal to the provided `value`, `false` otherwise.
 /// Requires `Upstream::Item` to implement `PartialEq`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Neq<Upstream> {
     pub(crate) signal: Map<Upstream, bool>,
 }
@@ -301,7 +281,7 @@ pub struct Neq<Upstream> {
 impl<Upstream> Signal for Neq<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: PartialEq + FromReflect + SSs,
+    Upstream::Item: PartialEq,
 {
     type Item = bool;
 
@@ -313,12 +293,12 @@ where
 /// Represents a node that applies logical negation to a boolean signal. Implements [`Signal`].
 ///
 /// Requires `Upstream::Item` to implement `std::ops::Not`. Typically used with boolean signals.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Not<Upstream>
 where
     Upstream: Signal,
-    <Upstream as Signal>::Item: std::ops::Not + FromReflect + SSs,
-    <<Upstream as Signal>::Item as std::ops::Not>::Output: FromReflect + SSs + Clone,
+    <Upstream as Signal>::Item: std::ops::Not,
+    <<Upstream as Signal>::Item as std::ops::Not>::Output: Clone,
 {
     pub(crate) signal: Map<Upstream, <Upstream::Item as std::ops::Not>::Output>,
 }
@@ -326,8 +306,8 @@ where
 impl<Upstream> Signal for Not<Upstream>
 where
     Upstream: Signal,
-    <Upstream as Signal>::Item: std::ops::Not + FromReflect + SSs,
-    <<Upstream as Signal>::Item as std::ops::Not>::Output: FromReflect + SSs + Clone,
+    <Upstream as Signal>::Item: std::ops::Not,
+    <<Upstream as Signal>::Item as std::ops::Not>::Output: Clone,
 {
     type Item = <Upstream::Item as std::ops::Not>::Output;
 
@@ -341,17 +321,15 @@ where
 /// This node takes a predicate system that receives the upstream value (`Upstream::Item`) via `In`
 /// and returns `bool`. The node only propagates the upstream value if the predicate returns `true`.
 /// If the predicate returns `false` or the system errors, propagation terminates.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Filter<Upstream> {
     pub(crate) signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<Upstream>,
+    _marker: PhantomData<fn() -> Upstream>,
 }
 
 impl<Upstream> Signal for Filter<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: Clone + FromReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -366,13 +344,12 @@ where
 /// and must return another signal (`Switcher: Signal`). The `Switch` node then behaves like the
 /// returned signal until the `Upstream` emits a new value, causing the `switcher` to potentially
 /// return a different signal to switch to.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Switch<Upstream, Other>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    Other: Signal + FromReflect + SSs,
-    Other::Item: FromReflect + SSs + Clone,
+    Other: Signal,
+    Other::Item: Clone,
 {
     pub(crate) signal: Flatten<Map<Upstream, Other>>,
 }
@@ -380,9 +357,8 @@ where
 impl<Upstream, Other> Signal for Switch<Upstream, Other>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    Other: FromReflect + Signal,
-    Other::Item: FromReflect + SSs + Clone,
+    Other: Signal,
+    Other::Item: Clone,
 {
     type Item = Other::Item;
 
@@ -395,7 +371,7 @@ where
 ///
 /// This node only propagates a value if the specified `duration` has elapsed since the
 /// last propagated value. It uses Bevy's `Time` resource internally.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Throttle<Upstream>
 where
     Upstream: Signal,
@@ -406,7 +382,6 @@ where
 impl<Upstream> Signal for Throttle<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -415,18 +390,16 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapBool<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapBool<Upstream, O>
 where
     Upstream: Signal<Item = bool>,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -437,18 +410,17 @@ where
 
 /// Represents a node that maps a `true` boolean signal value using a system. Implements [`Signal`].
 /// Executes the provided system `t` only when the upstream signal emits `true`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapTrue<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapTrue<Upstream, O>
 where
     Upstream: Signal<Item = bool>,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -459,18 +431,16 @@ where
 
 /// Represents a node that maps a `false` boolean signal value using a system. Implements [`Signal`].
 /// Executes the provided system `f` only when the upstream signal emits `false`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapFalse<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapFalse<Upstream, O>
 where
     Upstream: Signal<Item = bool>,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -484,18 +454,16 @@ where
 /// Represents a node that maps an `Option<T>` signal value using different systems for `Some` and `None`. Implements [`Signal`].
 /// Executes `some_system` if the upstream emits `Some(T)`, passing `T` via `In`.
 /// Executes `none_system` if the upstream emits `None`, passing `()` via `In`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapOption<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapOption<Upstream, O>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -506,18 +474,16 @@ where
 
 /// Represents a node that maps a `Some(T)` signal value using a system. Implements [`Signal`].
 /// Executes the provided system `some_system` only when the upstream signal emits `Some(T)`, passing `T` via `In`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapSome<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapSome<Upstream, O>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -528,18 +494,16 @@ where
 
 /// Represents a node that maps a `None` signal value using a system. Implements [`Signal`].
 /// Executes the provided system `none_system` only when the upstream signal emits `None`, passing `()` via `In`.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct MapNone<Upstream, O> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> Signal for MapNone<Upstream, O>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
-    O: FromReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -552,7 +516,7 @@ where
 ///
 /// This node passes through the upstream value unchanged but logs it using `bevy_log::debug!`
 /// along with the source code location where `.debug()` was called.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct SignalDebug<Upstream>
 where
     Upstream: Signal,
@@ -563,7 +527,6 @@ where
 impl<Upstream> Signal for SignalDebug<Upstream>
 where
     Upstream: Signal,
-    Upstream::Item: FromReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -603,10 +566,9 @@ impl SignalBuilder {
     /// ```
     pub fn from_system<O, IOO, F, M>(system: F) -> Source<O>
     where
-        O: FromReflect + SSs + Clone,
-        IOO: Into<Option<O>> + SSs,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
         F: IntoSystem<In<()>, IOO, M> + SSs,
-        M: SSs,
     {
         Source {
             signal: lazy_signal_from_system(system),
@@ -659,7 +621,7 @@ impl SignalBuilder {
     /// ```
     pub fn from_component<C>(entity: Entity) -> Source<C>
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        C: Component + Clone,
     {
         Self::from_system(move |_: In<()>, components: Query<&C>| {
             components.get(entity).ok().cloned()
@@ -668,17 +630,16 @@ impl SignalBuilder {
 
     pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        C: Component + Clone,
     {
         Self::from_system(move |_: In<()>, components: Query<&C>| {
-            println!("here");
             components.get(entity.get()).ok().cloned()
         })
     }
 
     pub fn from_component_option<C>(entity: Entity) -> Source<Option<C>>
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        C: Component + Clone,
     {
         Self::from_system(move |_: In<()>, components: Query<&C>| {
             Some(components.get(entity).ok().cloned())
@@ -687,7 +648,7 @@ impl SignalBuilder {
 
     pub fn from_component_option_lazy<C>(entity: LazyEntity) -> Source<Option<C>>
     where
-        C: Component + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        C: Component + Clone,
     {
         Self::from_system(move |_: In<()>, components: Query<&C>| {
             Some(components.get(entity.get()).ok().cloned())
@@ -712,34 +673,33 @@ impl SignalBuilder {
     /// ```
     pub fn from_resource<R>() -> Source<R>
     where
-        R: Resource + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        R: Resource + Clone,
     {
         Self::from_system(move |_: In<()>, resource: Option<Res<R>>| resource.map(|r| r.clone()))
     }
 
     pub fn from_resource_option<R>() -> Source<Option<R>>
     where
-        R: Resource + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
+        R: Resource + Clone,
     {
         Self::from_system(move |_: In<()>, resource: Option<Res<R>>| resource.map(|r| r.clone()))
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub enum SignalEither<L, R>
 where
-    L: Signal + FromReflect + SSs,
-    R: Signal + FromReflect + SSs,
+    L: Signal,
+    R: Signal,
 {
     Left(L),
     Right(R),
 }
 
-impl<T: SSs, L: Signal<Item = T>, R: Signal<Item = T>> Signal for SignalEither<L, R>
+impl<T, L: Signal<Item = T>, R: Signal<Item = T>> Signal for SignalEither<L, R>
 where
-    T: SSs,
-    L: Signal<Item = T> + FromReflect + SSs,
-    R: Signal<Item = T> + FromReflect + SSs,
+    L: Signal<Item = T>,
+    R: Signal<Item = T>,
 {
     type Item = T;
     fn register_signal(self, world: &mut World) -> SignalHandle {
@@ -752,24 +712,24 @@ where
 
 pub trait IntoSignalEither: Sized
 where
-    Self: Signal + FromReflect + SSs,
+    Self: Signal,
 {
     fn left_either<R>(self) -> SignalEither<Self, R>
     where
-        R: Signal + FromReflect + SSs,
+        R: Signal,
     {
         SignalEither::Left(self)
     }
 
     fn right_either<L>(self) -> SignalEither<L, Self>
     where
-        L: Signal + FromReflect + SSs,
+        L: Signal,
     {
         SignalEither::Right(self)
     }
 }
 
-impl<T: Signal + FromReflect + SSs> IntoSignalEither for T {}
+impl<T: Signal> IntoSignalEither for T {}
 
 /// Extension trait providing combinator methods for types implementing [`Signal`].
 ///
@@ -792,11 +752,10 @@ pub trait SignalExt: Signal {
     fn map<O, IOO, F, M>(self, system: F) -> Map<Self, O>
     where
         Self: Sized,
-        Self::Item: FromReflect + SSs,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        F: IntoSystem<In<Self::Item>, IOO, M> + Send + Sync + 'static,
-        M: SSs,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: IntoSystem<In<Self::Item>, IOO, M> + SSs,
     {
         Map {
             upstream: self,
@@ -826,7 +785,7 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Entity>,
-        C: Component + Clone + FromReflect + SSs,
+        C: Component + Clone,
     {
         MapComponent {
             signal: self.map(|In(entity): In<Entity>, components: Query<&C>| {
@@ -859,7 +818,7 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Entity>,
-        C: Component + Clone + FromReflect + GetTypeRegistration + Typed + SSs,
+        C: Component + Clone,
     {
         ComponentOption {
             signal: self.map(|In(entity): In<Entity>, components: Query<&C>| {
@@ -892,7 +851,7 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Entity>,
-        C: Component + Clone + FromReflect + SSs,
+        C: Component + Clone,
     {
         HasComponent {
             signal: self
@@ -927,7 +886,7 @@ pub trait SignalExt: Signal {
     fn dedupe(self) -> Dedupe<Self>
     where
         Self: Sized,
-        Self::Item: PartialEq + Clone + FromReflect + SSs,
+        Self::Item: PartialEq + Clone + Send + 'static,
     {
         Dedupe {
             signal: self.map(
@@ -977,7 +936,7 @@ pub trait SignalExt: Signal {
     fn first(self) -> First<Self>
     where
         Self: Sized,
-        Self::Item: FromReflect + SSs,
+        Self::Item: Clone + 'static,
     {
         First {
             signal: self.map(|In(item): In<Self::Item>, mut first: Local<bool>| {
@@ -1007,10 +966,10 @@ pub trait SignalExt: Signal {
     /// ```
     fn combine<Other>(self, other: Other) -> Combine<Self, Other>
     where
-        Self: Sized, // Added Sized bound here
+        Self: Sized,
         Other: Signal,
-        Self::Item: FromReflect + GetTypeRegistration + Typed + SSs,
-        Other::Item: FromReflect + GetTypeRegistration + Typed + SSs,
+        Self::Item: Clone + Send + 'static,
+        Other::Item: Clone + Send + 'static,
     {
         let left_wrapper = self.map(|In(left): In<Self::Item>| (Some(left), None::<Other::Item>));
         let right_wrapper =
@@ -1069,8 +1028,8 @@ pub trait SignalExt: Signal {
     fn flatten(self) -> Flatten<Self>
     where
         Self: Sized,
-        Self::Item: FromReflect + Signal + Clone,
-        <Self::Item as Signal>::Item: FromReflect + SSs + Clone,
+        Self::Item: Signal + Clone + 'static,
+        <Self::Item as Signal>::Item: Clone + Send,
     {
         // TODO: forward with observer instead of mutex ?
         // TODO: instead of mutex, sync the signal's downstreams with self
@@ -1111,7 +1070,7 @@ pub trait SignalExt: Signal {
     fn eq(self, value: Self::Item) -> Eq<Self>
     where
         Self: Sized,
-        Self::Item: PartialEq + FromReflect + SSs,
+        Self::Item: PartialEq + Send + Sync,
     {
         Eq {
             signal: self.map(move |In(item): In<Self::Item>| item == value),
@@ -1134,7 +1093,7 @@ pub trait SignalExt: Signal {
     fn neq(self, value: Self::Item) -> Neq<Self>
     where
         Self: Sized,
-        Self::Item: PartialEq + FromReflect + SSs,
+        Self::Item: PartialEq + Send + Sync,
     {
         Neq {
             signal: self.map(move |In(item): In<Self::Item>| item != value),
@@ -1155,8 +1114,8 @@ pub trait SignalExt: Signal {
     fn not(self) -> Not<Self>
     where
         Self: Sized,
-        <Self as Signal>::Item: std::ops::Not + FromReflect + SSs,
-        <<Self as Signal>::Item as std::ops::Not>::Output: FromReflect + SSs + Clone,
+        <Self as Signal>::Item: std::ops::Not + 'static,
+        <<Self as Signal>::Item as std::ops::Not>::Output: Clone,
     {
         Not {
             signal: self.map(|In(item): In<Self::Item>| std::ops::Not::not(item)),
@@ -1186,13 +1145,10 @@ pub trait SignalExt: Signal {
     /// });
     /// let even_numbers = source_signal.filter(|In(x): In<i32>| x % 2 == 0); // Emits: 2, 4
     /// ```
-    fn filter<M>(
-        self,
-        predicate: impl IntoSystem<In<Self::Item>, bool, M> + Send + Sync + 'static,
-    ) -> Filter<Self>
+    fn filter<M>(self, predicate: impl IntoSystem<In<Self::Item>, bool, M> + SSs) -> Filter<Self>
     where
         Self: Sized,
-        Self::Item: Clone + FromReflect + SSs,
+        Self::Item: Clone + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(predicate);
@@ -1257,11 +1213,10 @@ pub trait SignalExt: Signal {
     fn switch<S, F, M>(self, switcher: F) -> Switch<Self, S>
     where
         Self: Sized,
-        Self::Item: FromReflect + SSs,
-        S: Signal + Clone + FromReflect + SSs,
-        S::Item: FromReflect + SSs + Clone,
-        F: IntoSystem<In<Self::Item>, S, M> + Send + Sync + 'static,
-        M: SSs,
+        Self::Item: 'static,
+        S: Signal + Clone + 'static,
+        S::Item: Clone + Send,
+        F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
         Switch {
             signal: self.map(switcher).flatten(),
@@ -1296,7 +1251,7 @@ pub trait SignalExt: Signal {
     fn throttle(self, duration: Duration) -> Throttle<Self>
     where
         Self: Sized,
-        Self::Item: FromReflect + SSs,
+        Self::Item: Clone + 'static,
     {
         Throttle {
             signal: self.map(
@@ -1342,12 +1297,10 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = bool>,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        TF: IntoSystem<In<()>, IOO, TM> + Send + Sync + 'static,
-        FF: IntoSystem<In<()>, IOO, FM> + Send + Sync + 'static,
-        TM: SSs,
-        FM: SSs,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        TF: IntoSystem<In<()>, IOO, TM> + SSs,
+        FF: IntoSystem<In<()>, IOO, FM> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let true_system = world.register_system(true_system);
@@ -1393,14 +1346,13 @@ pub trait SignalExt: Signal {
     ///     |_: In<()>| "Is Active",
     /// ); // Does not emit
     /// ```
-    fn map_true<O, IOO, TF, TM>(self, system: TF) -> MapTrue<Self, O>
+    fn map_true<O, IOO, F, M>(self, system: F) -> MapTrue<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = bool>,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        TF: IntoSystem<In<()>, IOO, TM> + Send + Sync + 'static,
-        TM: SSs,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: IntoSystem<In<()>, IOO, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let true_system = world.register_system(system);
@@ -1446,14 +1398,13 @@ pub trait SignalExt: Signal {
     ///     |_: In<()>| "Is Inactive",
     /// ); // Emits "Is Inactive"
     /// ```
-    fn map_false<O, IOO, FF, FM>(self, system: FF) -> MapFalse<Self, O>
+    fn map_false<O, IOO, F, M>(self, system: F) -> MapFalse<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = bool>,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        FF: IntoSystem<In<()>, IOO, FM> + Send + Sync + 'static,
-        FM: SSs,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: IntoSystem<In<()>, IOO, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let false_system = world.register_system(system);
@@ -1503,13 +1454,11 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
-        I: FromReflect + GetTypeRegistration + Typed + SSs,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        SF: IntoSystem<In<I>, IOO, SM> + Send + Sync + 'static,
-        NF: IntoSystem<In<()>, IOO, NM> + Send + Sync + 'static,
-        SM: SSs,
-        NM: SSs,
+        I: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        SF: IntoSystem<In<I>, IOO, SM> + SSs,
+        NF: IntoSystem<In<()>, IOO, NM> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let some_system = world.register_system(some_system);
@@ -1557,15 +1506,14 @@ pub trait SignalExt: Signal {
     ///     |In(value): In<i32>| format!("Some({})", value),
     /// ); // Emits "Some(42)"
     /// ```
-    fn map_some<I, O, IOO, SF, SM>(self, system: SF) -> MapSome<Self, O>
+    fn map_some<I, O, IOO, F, M>(self, system: F) -> MapSome<Self, O>
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
-        I: FromReflect + GetTypeRegistration + Typed + SSs,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        SF: IntoSystem<In<I>, IOO, SM> + Send + Sync + 'static,
-        SM: SSs,
+        I: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: IntoSystem<In<I>, IOO, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let some_system = world.register_system(system);
@@ -1609,11 +1557,10 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Option<I>>,
-        I: FromReflect + GetTypeRegistration + Typed + SSs,
-        O: FromReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        F: IntoSystem<In<()>, IOO, M> + Send + Sync + 'static,
-        M: SSs,
+        I: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static, // TODO: not having 'static here causes an ICE, report
+        F: IntoSystem<In<()>, IOO, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let none_system = world.register_system(none_system);
@@ -1658,7 +1605,7 @@ pub trait SignalExt: Signal {
     fn debug(self) -> SignalDebug<Self>
     where
         Self: Sized,
-        Self::Item: Debug + FromReflect + SSs,
+        Self::Item: Debug + Clone + 'static,
     {
         let location = std::panic::Location::caller();
         SignalDebug {

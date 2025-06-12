@@ -1,19 +1,13 @@
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
-use bevy_reflect::{FromReflect, GetTypeRegistration, Typed, prelude::*};
-use std::{
-    fmt,
-    marker::PhantomData,
-    ops::Deref,
-    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
-};
+use bevy_platform::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use core::{fmt, marker::PhantomData, ops::Deref};
 
 use super::{signal::*, tree::*, utils::*};
 
 /// Describes the changes to a `Vec`.
 ///
 /// This is used by [`SignalVec`] to efficiently represent changes.
-#[derive(Reflect)] // Removed PartialEq, removed #[reflect(PartialEq)]
 pub enum VecDiff<T> {
     // Add PartialEq bound
     /// Replaces the entire contents of the `Vec`.
@@ -100,17 +94,29 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Replace { values } => write!(f, "Replace({:?})", values),
-            Self::InsertAt { index, value } => write!(f, "InsertAt({}, {:?})", index, value),
-            Self::UpdateAt { index, value } => write!(f, "UpdateAt({}, {:?})", index, value),
-            Self::RemoveAt { index } => write!(f, "RemoveAt({})", index),
+            Self::Replace { values } => f.debug_struct("Replace").field("values", values).finish(),
+            Self::InsertAt { index, value } => f
+                .debug_struct("InsertAt")
+                .field("index", index)
+                .field("value", value)
+                .finish(),
+            Self::UpdateAt { index, value } => f
+                .debug_struct("UpdateAt")
+                .field("index", index)
+                .field("value", value)
+                .finish(),
+            Self::RemoveAt { index } => f.debug_struct("RemoveAt").field("index", index).finish(),
             Self::Move {
                 old_index,
                 new_index,
-            } => write!(f, "Move({}, {})", old_index, new_index),
-            Self::Push { value } => write!(f, "Push({:?})", value),
-            Self::Pop => write!(f, "Pop"),
-            Self::Clear => write!(f, "Clear"),
+            } => f
+                .debug_struct("Move")
+                .field("old_index", old_index)
+                .field("new_index", new_index)
+                .finish(),
+            Self::Push { value } => f.debug_struct("Push").field("value", value).finish(),
+            Self::Pop => f.debug_struct("Pop").finish(),
+            Self::Clear => f.debug_struct("Clear").finish(),
         }
     }
 }
@@ -121,7 +127,7 @@ where
 /// describing the change. This trait combines the public concept with internal registration.
 pub trait SignalVec: SSs {
     /// The type of items in the vector.
-    type Item: BigReflect + SSs;
+    type Item;
 
     /// Registers the systems associated with this node and its predecessors in the `World`.
     /// Returns a [`SignalHandle`] containing the entities of *all* systems
@@ -131,16 +137,15 @@ pub trait SignalVec: SSs {
 }
 
 /// A source node for a `SignalVec` chain. Holds the entity ID of the registered source system.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Source<T> {
     pub(crate) signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<T>,
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<T> SignalVec for Source<T>
 where
-    T: Clone + BigReflect + SSs,
+    T: 'static,
 {
     type Item = T;
 
@@ -153,19 +158,17 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct ForEach<Upstream, O> {
     pub(crate) upstream: Upstream,
     pub(crate) signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<O>,
+    _marker: PhantomData<fn() -> O>,
 }
 
 impl<Upstream, O> SignalVec for ForEach<Upstream, O>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
-    O: BigReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -184,11 +187,10 @@ where
 }
 
 /// A map node in a `SignalVec` chain.
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Map<Upstream, O> {
     pub(crate) signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 fn get_direct_upstream(world: &mut World, signal: SignalSystem) -> Option<SignalSystem> {
@@ -216,8 +218,7 @@ fn register_non_source_signal_vec(world: &mut World, signal: LazySignal) -> Sign
 impl<Upstream, O> SignalVec for Map<Upstream, O>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
-    O: BigReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -226,17 +227,15 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Filter<Upstream> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<Upstream>,
+    _marker: PhantomData<fn() -> Upstream>,
 }
 
 impl<Upstream> SignalVec for Filter<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
 {
     type Item = Upstream::Item;
 
@@ -245,23 +244,20 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct FilterMap<Upstream, O>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
-    O: BigReflect + SSs,
 {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<(Upstream, O)>,
+
+    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 impl<Upstream, O> SignalVec for FilterMap<Upstream, O>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
-    O: BigReflect + SSs,
+    O: 'static,
 {
     type Item = O;
 
@@ -270,11 +266,10 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Enumerate<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
 {
     signal: ForEach<
         Upstream,
@@ -285,7 +280,6 @@ where
 impl<Upstream> SignalVec for Enumerate<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
 {
     type Item = (Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item);
 
@@ -294,11 +288,10 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct ToSignal<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
 {
     signal: ForEach<Upstream, Vec<Upstream::Item>>,
 }
@@ -306,7 +299,6 @@ where
 impl<Upstream> Signal for ToSignal<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + SSs,
 {
     type Item = Vec<Upstream::Item>;
 
@@ -315,11 +307,11 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct IsEmpty<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
+    Upstream::Item: Clone,
 {
     signal: super::signal::Map<ToSignal<Upstream>, bool>,
 }
@@ -327,7 +319,7 @@ where
 impl<Upstream> Signal for IsEmpty<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
+    Upstream::Item: Clone,
 {
     type Item = bool;
 
@@ -336,11 +328,11 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Len<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
+    Upstream::Item: Clone,
 {
     signal: super::signal::Map<ToSignal<Upstream>, usize>,
 }
@@ -348,7 +340,7 @@ where
 impl<Upstream> Signal for Len<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
+    Upstream::Item: Clone,
 {
     type Item = usize;
 
@@ -357,11 +349,10 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct Sum<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
 {
     signal: super::signal::Map<ToSignal<Upstream>, Upstream::Item>,
 }
@@ -369,7 +360,6 @@ where
 impl<Upstream> Signal for Sum<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
 {
     type Item = Upstream::Item;
 
@@ -378,17 +368,15 @@ where
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Clone)]
 pub struct FilterSignal<Upstream> {
     signal: LazySignal,
-    #[reflect(ignore)]
-    _marker: PhantomData<Upstream>,
+    _marker: PhantomData<fn() -> Upstream>,
 }
 
 impl<Upstream> SignalVec for FilterSignal<Upstream>
 where
     Upstream: SignalVec,
-    Upstream::Item: BigReflect + Clone + SSs,
 {
     type Item = Upstream::Item;
 
@@ -398,10 +386,7 @@ where
 }
 
 fn find_index<'a>(indices: impl Iterator<Item = &'a bool>, index: usize) -> usize {
-    indices
-        .take(index)
-        .filter(|x| **x)
-        .count()
+    indices.take(index).filter(|x| **x).count()
 }
 
 fn filter_helper<T, O, O2>(
@@ -586,31 +571,37 @@ struct FilterSignalIndex(usize);
 fn create_filter_signal_processor<T: Clone + SSs>(
     parent: Entity,
     entity: LazyEntity,
-) -> impl Fn(In<bool>, Query<&FilterSignalIndex>, Query<&mut FilterSignalData<T>>, Query<&SignalRegistrationCount>) -> bool
-{
+) -> impl Fn(
+    In<bool>,
+    Query<&FilterSignalIndex>,
+    Query<&mut FilterSignalData<T>>,
+    Query<&SignalRegistrationCount>,
+) -> bool {
     move |In(filter),
           filter_signal_indices: Query<&FilterSignalIndex>,
           mut filter_signal_datas: Query<&mut FilterSignalData<T>>,
           signals: Query<&SignalRegistrationCount>| {
-
         println!("here {}: {}", signals.iter().len(), filter);
         let mut filter_signal_data = filter_signal_datas.get_mut(parent).unwrap();
         let index = filter_signal_indices.get(entity.get()).unwrap().0;
         println!("index: {}, filter: {}", index, filter);
-        
+
         // First, check if we need to do anything and gather info with immutable access
         let (should_insert, should_remove, filtered_index, value) = {
             if let Some(signal) = filter_signal_data.items.get(index) {
                 if signal.filtered != filter {
                     let old_filtered = signal.filtered;
-                    
+
                     if filter && !old_filtered {
                         // Item becoming visible - calculate insertion index based on current state
-                        let filtered_index = find_filter_signal_index(&filter_signal_data.items, index);
+                        let filtered_index =
+                            find_filter_signal_index(&filter_signal_data.items, index);
                         (true, false, filtered_index, Some(signal.value.clone()))
                     } else if !filter && old_filtered {
                         // Item becoming hidden - calculate removal index based on current state
-                        let filtered_index = filter_signal_data.items.iter()
+                        let filtered_index = filter_signal_data
+                            .items
+                            .iter()
                             .take(index)
                             .filter(|item| item.filtered)
                             .count();
@@ -625,25 +616,28 @@ fn create_filter_signal_processor<T: Clone + SSs>(
                 (false, false, 0, None)
             }
         };
-        
+
         // Now update the filtered field with mutable access
         if should_insert || should_remove {
             if let Some(signal) = filter_signal_data.items.get_mut(index) {
                 signal.filtered = filter;
             }
         }
-        
+
         // Finally, push the diffs
         if should_insert {
             println!("filter_signal: InsertAt({})", filtered_index);
-            filter_signal_data
-                .diffs
-                .push(VecDiff::InsertAt { index: filtered_index, value: value.unwrap() });
+            filter_signal_data.diffs.push(VecDiff::InsertAt {
+                index: filtered_index,
+                value: value.unwrap(),
+            });
         } else if should_remove {
             println!("filter_signal: RemoveAt({})", filtered_index);
-            filter_signal_data.diffs.push(VecDiff::RemoveAt { index: filtered_index });
+            filter_signal_data.diffs.push(VecDiff::RemoveAt {
+                index: filtered_index,
+            });
         }
-        
+
         filter
     }
 }
@@ -666,7 +660,7 @@ fn spawn_filter_signal<T: Clone + SSs>(
 
 fn poll_filter_signal(world: &mut World, signal: SignalSystem) -> bool {
     poll_signal(world, signal)
-        .map(|output| bool::from_reflect(output.as_ref()))
+        .map(|output| output.downcast::<bool>().ok().as_deref().copied())
         .flatten()
         .unwrap_or(false)
 }
@@ -683,11 +677,10 @@ pub trait SignalVecExt: SignalVec {
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
-        Self::Item: BigReflect + SSs,
-        O: BigReflect + SSs,
-        IOO: Into<Option<O>> + SSs,
-        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, IOO, M> + Send + Sync + Clone + 'static,
-        M: SSs,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, IOO, M> + SSs,
     {
         ForEach {
             upstream: self,
@@ -706,13 +699,11 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// The system `F` must be `Clone`, `Send`, `Sync`, and `'static`.
     fn map<O, F, M>(self, system: F) -> Map<Self, O>
-    // F is IntoSystem
     where
         Self: Sized,
-        Self::Item: BigReflect + SSs,
-        O: BigReflect + SSs,
+        Self::Item: 'static,
+        O: Clone + 'static,
         F: IntoSystem<In<Self::Item>, O, M> + SSs,
-        M: SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(system);
@@ -791,10 +782,9 @@ pub trait SignalVecExt: SignalVec {
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, Self::Item>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
-        O: BigReflect + SSs,
-        F: IntoSystem<In<Self::Item>, Option<O>, M> + Send + Sync + Clone + 'static,
-        M: SSs,
+        Self::Item: Clone + 'static,
+        O: Clone + 'static,
+        F: IntoSystem<In<Self::Item>, Option<O>, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(system);
@@ -820,8 +810,8 @@ pub trait SignalVecExt: SignalVec {
     fn filter<F, M>(self, system: F) -> Filter<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
-        F: IntoSystem<In<Self::Item>, bool, M> + Send + Sync + Clone + 'static,
+        Self::Item: Clone + 'static,
+        F: IntoSystem<In<Self::Item>, bool, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(system);
@@ -855,7 +845,7 @@ pub trait SignalVecExt: SignalVec {
     fn enumerate(self) -> Enumerate<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + SSs,
+        Self::Item: Clone + 'static,
     {
         fn increment_indices(range: &[Arc<Mutex<Option<usize>>>]) {
             for index in range {
@@ -963,7 +953,7 @@ pub trait SignalVecExt: SignalVec {
     fn to_signal(self) -> ToSignal<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
+        Self::Item: Clone + Send + 'static,
     {
         let signal = self.for_each(|In(diffs), mut values: Local<Vec<Self::Item>>| {
             for diff in diffs {
@@ -1006,7 +996,7 @@ pub trait SignalVecExt: SignalVec {
     fn is_empty(self) -> IsEmpty<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
+        Self::Item: Clone + Send + 'static,
     {
         IsEmpty {
             signal: self
@@ -1018,7 +1008,7 @@ pub trait SignalVecExt: SignalVec {
     fn len(self) -> Len<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
+        Self::Item: Clone + Send + 'static,
     {
         Len {
             signal: self.to_signal().map(|In(v): In<Vec<Self::Item>>| v.len()),
@@ -1028,7 +1018,7 @@ pub trait SignalVecExt: SignalVec {
     fn sum(self) -> Sum<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + for<'a> std::iter::Sum<&'a Self::Item> + SSs,
+        Self::Item: for<'a> std::iter::Sum<&'a Self::Item> + Clone + Send + 'static,
     {
         Sum {
             signal: self
@@ -1040,10 +1030,9 @@ pub trait SignalVecExt: SignalVec {
     fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
     where
         Self: Sized,
-        Self::Item: BigReflect + Clone + SSs,
-        S: Signal<Item = bool>,
-        F: IntoSystem<In<Self::Item>, S, M> + Send + Sync + Clone + 'static,
-        M: SSs,
+        Self::Item: Clone + SSs,
+        S: Signal<Item = bool> + 'static,
+        F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let entity = LazyEntity::new();
@@ -1271,14 +1260,14 @@ impl<T> SignalVecExt for T where T: SignalVec {}
 /// The guard holds the read lock, ensuring safe access.
 pub struct MutableVecReadGuard<'a, T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     guard: RwLockReadGuard<'a, MutableVecState<T>>,
 }
 
 impl<'a, T> Deref for MutableVecReadGuard<'a, T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     type Target = [T];
 
@@ -1294,14 +1283,14 @@ where
 /// the corresponding `VecDiff`s.
 pub struct MutableVecWriteGuard<'a, T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     guard: RwLockWriteGuard<'a, MutableVecState<T>>,
 }
 
 impl<'a, T> MutableVecWriteGuard<'a, T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     /// Pushes a value to the end of the vector and queues a `VecDiff::Push`.
     pub fn push(&mut self, value: T) {
@@ -1404,7 +1393,7 @@ where
 
 impl<'a, T> Deref for MutableVecWriteGuard<'a, T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     type Target = [T];
 
@@ -1422,7 +1411,7 @@ where
 /// Internal state for `MutableVec`, allowing `MutableVec` to be `Clone`.
 struct MutableVecState<T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     vec: Vec<T>,
     pending_diffs: Vec<VecDiff<T>>,
@@ -1434,15 +1423,15 @@ where
 #[derive(Clone)]
 pub struct MutableVec<T>
 where
-    T: BigReflect + SSs + Clone,
+    T: Clone,
 {
     state: Arc<RwLock<MutableVecState<T>>>,
 }
 
 #[derive(Component)]
-struct QueuedVecDiffs<T: FromReflect + GetTypeRegistration + Typed>(Vec<VecDiff<T>>);
+struct QueuedVecDiffs<T>(Vec<VecDiff<T>>);
 
-impl<T, A: Clone + FromReflect + GetTypeRegistration + Typed + SSs> From<T> for MutableVec<A>
+impl<T, A: Clone> From<T> for MutableVec<A>
 where
     Vec<A>: From<T>,
 {
@@ -1465,7 +1454,7 @@ struct SignalVecLock;
 
 impl<T> MutableVec<T>
 where
-    T: BigReflect + SSs + Clone, // Removed PartialEq
+    T: Clone,
 {
     /// Creates a new, empty `MutableVec`.
     pub fn new() -> Self {
@@ -1507,7 +1496,10 @@ where
     }
 
     /// Creates a [`SourceVec<T>`] signal linked to this `MutableVec`.
-    pub fn signal_vec(&self) -> Source<T> {
+    pub fn signal_vec(&self) -> Source<T>
+    where
+        T: SSs,
+    {
         let signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
             let entity = LazyEntity::new();
             let signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, clone!((entity) move |_: In<()>, world: &mut World| {
@@ -1549,7 +1541,10 @@ where
         }
     }
 
-    pub fn flush_into_world(&self, world: &mut World) {
+    pub fn flush_into_world(&self, world: &mut World)
+    where
+        T: SSs,
+    {
         let mut state: RwLockWriteGuard<'_, MutableVecState<T>> = self.state.write().unwrap();
         if !state.pending_diffs.is_empty() {
             for &signal in &state.signals {
@@ -1564,7 +1559,10 @@ where
     }
 
     /// Sends any pending `VecDiff`s accumulated since the last flush to the signal system.
-    pub fn flush(&self) -> impl Command {
+    pub fn flush(&self) -> impl Command
+    where
+        T: SSs,
+    {
         let self_ = self.clone();
         move |world: &mut World| self_.flush_into_world(world)
     }
@@ -1583,7 +1581,7 @@ mod tests {
     struct TestItem(i32);
 
     #[derive(Resource, Default)]
-    struct SignalVecOutput<T: BigReflect + SSs + Clone + std::fmt::Debug>(Vec<VecDiff<T>>);
+    struct SignalVecOutput<T: Clone + std::fmt::Debug>(Vec<VecDiff<T>>);
 
     fn create_test_app() -> App {
         let mut app = App::new();
@@ -1598,7 +1596,7 @@ mod tests {
         In(diffs): In<Vec<VecDiff<T>>>,
         mut output: ResMut<SignalVecOutput<T>>,
     ) where
-        T: BigReflect + SSs + Clone + std::fmt::Debug,
+        T: SSs + Clone + std::fmt::Debug,
     {
         debug!(
             "Capture SignalVec Output: Received {:?}, extending resource from {:?} with new diffs",
@@ -1607,19 +1605,19 @@ mod tests {
         output.0.extend(diffs);
     }
 
-    fn get_signal_vec_output<T: BigReflect + SSs + Clone + std::fmt::Debug>(
+    fn get_signal_vec_output<T: SSs + Clone + std::fmt::Debug>(
         world: &World,
     ) -> Vec<VecDiff<T>> {
         world.resource::<SignalVecOutput<T>>().0.clone()
     }
 
-    fn clear_signal_vec_output<T: BigReflect + SSs + Clone + std::fmt::Debug>(world: &mut World) {
+    fn clear_signal_vec_output<T: SSs + Clone + std::fmt::Debug>(world: &mut World) {
         if let Some(mut output) = world.get_resource_mut::<SignalVecOutput<T>>() {
             output.0.clear();
         }
     }
 
-    impl<T: BigReflect + SSs + PartialEq + std::fmt::Debug> PartialEq for VecDiff<T> {
+    impl<T: SSs + PartialEq + std::fmt::Debug> PartialEq for VecDiff<T> {
         fn eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (Self::Replace { values: l_values }, Self::Replace { values: r_values }) => {

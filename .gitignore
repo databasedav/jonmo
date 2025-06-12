@@ -2,3 +2,4 @@
 rust-signals
 rust-toolchain.toml
 .cargo
+note.md

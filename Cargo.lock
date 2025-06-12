@@ -1853,6 +1853,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dyn-clone"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c7a8fb8a9fbf66c1f703fe16184d10ca0ee9d23be5b4436400408ba54a95005"
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2514,8 +2520,8 @@ dependencies = [
  "bevy_ecs",
  "bevy_log",
  "bevy_platform",
- "bevy_reflect",
  "bevy_time",
+ "dyn-clone",
  "enclose",
  "rand 0.9.1",
 ]

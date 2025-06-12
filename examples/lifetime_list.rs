@@ -53,7 +53,7 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
-            width: Val::Px(400.0),
+            width: Val::Px(350.0),
             padding: UiRect::all(Val::Px(5.0)),
             align_items: AlignItems::Center,
             ..default()
@@ -75,18 +75,17 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
         ))
         .entity_sync(parent.clone())
         .child(
-            JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
-                index
-                    .map(|In(index): In<Option<usize>>| TextSpan(format!("item {}", index.unwrap_or(0))))
-            ),
+            JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(index.map(
+                |In(index): In<Option<usize>>| TextSpan(format!("item {}", index.unwrap_or(0))),
+            )),
         )
         .child((TextColor(Color::BLACK), TextSpan::new(" | ")))
         .child(
             JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 SignalBuilder::from_component_lazy(parent)
-                    .map(|In(Lifetime(lifetime))| {println!("life: {}", lifetime); lifetime.round()})
+                    .map(|In(Lifetime(lifetime))| lifetime.round())
                     .dedupe()
-                    .map(|In(lifetime): In<f32>| {println!("life: {}", lifetime); TextSpan(format!("lifetime: {}", lifetime))}),
+                    .map(|In(lifetime): In<f32>| TextSpan(format!("lifetime: {}", lifetime))),
             ),
         )
     })

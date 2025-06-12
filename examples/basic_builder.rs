@@ -34,7 +34,7 @@ fn ui() -> JonmoBuilder {
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node::default())
+        JonmoBuilder::from((Node::default(), TextFont::from_font_size(100.)))
             .insert(Value(0))
             .component_signal_from_component(|signal| {
                 signal
