@@ -1,5 +1,13 @@
 use super::utils::*;
 
+use bevy_platform::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+use core::hash::Hash;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::component::HookContext;
 use bevy_ecs::{
@@ -10,21 +18,19 @@ use bevy_ecs::{
 };
 use bevy_log::prelude::*;
 use bevy_reflect::{FromReflect, PartialReflect, Reflect};
-use std::{
-    collections::{HashSet, VecDeque},
-    hash::Hash,
-    sync::{
-        Arc, LazyLock, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
 
 #[derive(Clone, Copy, Deref, Debug, PartialEq, Eq, Hash, Reflect)]
 pub struct SignalSystem(pub Entity);
 
+impl From<Entity> for SignalSystem {
+    fn from(entity: Entity) -> Self {
+        Self(entity)
+    }
+}
+
 impl<I: 'static, O> From<SystemId<In<I>, O>> for SignalSystem {
     fn from(system_id: SystemId<In<I>, O>) -> Self {
-        Self(system_id.entity())
+        system_id.entity().into()
     }
 }
 
@@ -137,6 +143,8 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
             downstream.insert(Upstream(HashSet::from([source])));
         }
     }
+    let mut signals = world.get_resource_mut::<Signals>().unwrap();
+
 }
 
 /// Component holding the type-erased system runner function.
@@ -179,9 +187,7 @@ pub(crate) fn process_signals_helper(
     world: &mut World,
     signals: impl IntoIterator<Item = SignalSystem>,
     input: Box<dyn PartialReflect>,
-    // TODO: this is a very naive approach, should ideally only run the exact minimal set of systems
-    return_option: Option<SignalSystem>,
-) -> Option<Box<dyn PartialReflect>> {
+) {
     for signal in signals {
         if let Some(runner) = world
             .get_entity(*signal)
@@ -189,16 +195,12 @@ pub(crate) fn process_signals_helper(
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
         {
             if let Some(output) = runner.run(world, input.to_dynamic()) {
-                if return_option.map(|s| *s == *signal).unwrap_or(false) {
-                    return Some(output);
-                }
                 if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
-                    return process_signals_helper(world, downstream, output, return_option);
+                    process_signals_helper(world, downstream, output);
                 }
             }
         }
     }
-    None
 }
 
 /// System that drives signal propagation by calling [`SignalPropagator::execute`].
@@ -211,7 +213,7 @@ pub(crate) fn process_signals(world: &mut World) {
     >::new(world);
     let orphan_parents = orphan_parents.get(world);
     let orphan_parents = orphan_parents.iter().map(SignalSystem).collect::<Vec<_>>();
-    process_signals_helper(world, orphan_parents, Box::new(()), None);
+    process_signals_helper(world, orphan_parents, Box::new(()));
 }
 
 /// Handle returned by [`SignalExt::register`] used for managing the lifecycle of a registered signal chain.
@@ -254,6 +256,82 @@ impl SignalHandle {
     }
 }
 
+trait Runnable<T> {
+    fn run(&self, world: &mut World, input: T);
+    fn register(&mut self);
+}
+
+type DynRunnable<T> = Arc<Mutex<dyn Runnable<T> + Send + Sync + 'static>>;
+
+struct SignalData<I, O, IOO>
+where
+    I: 'static,
+    O: 'static + Clone,
+    IOO: Into<Option<O>> + SSs,
+{
+    system: SystemId<In<I>, IOO>,
+    registrations: usize,
+    upstreams: HashSet<SignalSystem>,
+    downstreams: HashMap<SignalSystem, DynRunnable<O>>,
+}
+
+impl<I, O, IOO> SignalData<I, O, IOO>
+where
+    I: 'static,
+    O: 'static + Clone,
+    IOO: Into<Option<O>> + SSs,
+{
+    pub fn new(
+        system: SystemId<In<I>, IOO>,
+    ) -> Self {
+        Self {
+            system,
+            registrations: 1,
+            upstreams: HashSet::new(),
+            downstreams: HashMap::new(),
+        }
+    }
+}
+
+impl<I, O, IOO> Runnable<I> for SignalData<I, O, IOO>
+where
+    I: 'static,
+    O: 'static + Clone,
+    IOO: Into<Option<O>> + SSs,
+{
+    fn run(&self, world: &mut World, input: I) {
+        if let Ok(Some(output)) = world.run_system_with(self.system, input).map(Into::into) {
+            for downstream in self.downstreams.values() {
+                // TODO: will deadlock on cycles
+                downstream.lock().unwrap().run(world, output.clone())
+            }
+        }
+    }
+
+    fn register(&mut self) {
+        self.registrations += 1;
+    }
+}
+
+#[derive(Resource, Default)]
+struct Signals {
+    signals: HashSet<SignalSystem>,
+    roots: HashMap<SignalSystem, DynRunnable<()>>,
+}
+
+impl Signals {
+    pub fn add_signal<I, O, IOO>(&mut self, system: F) -> SignalSystem
+    where
+        I: 'static,
+        O: 'static + Clone,
+        IOO: Into<Option<O>> + SSs,
+    {
+        let signal = spawn_signal(self, system);
+        self.signals.insert(signal, Box::new(()));
+        signal
+    }
+}
+
 pub(crate) fn spawn_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
     I: FromReflect + SSs,
@@ -264,6 +342,10 @@ where
 {
     let system = world.register_system(system);
     let entity = system.entity();
+    let mut signals = world
+        .get_resource_mut::<Signals>()
+        .unwrap();
+    
     world.entity_mut(entity).insert((
         SignalRegistrationCount::new(),
         SystemRunner {
@@ -320,6 +402,12 @@ impl LazySystem {
                 signal
             }
             LazySystem::Registered(signal) => {
+                let mut signals = world
+                    .get_resource_mut::<Signals>()
+                    .unwrap();
+                if let Some(data) = signals.signals.get_mut(signal) {
+                    data.register()
+                }
                 if let Ok(mut system) = world.get_entity_mut(**signal) {
                     if let Some(mut registration_count) =
                         system.get_mut::<SignalRegistrationCount>()

@@ -671,6 +671,7 @@ impl SignalBuilder {
         C: Component + FromReflect + GetTypeRegistration + Typed + Clone + SSs,
     {
         Self::from_system(move |_: In<()>, components: Query<&C>| {
+            println!("here");
             components.get(entity.get()).ok().cloned()
         })
     }

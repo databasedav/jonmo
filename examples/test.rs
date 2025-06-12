@@ -48,7 +48,7 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
         numbers
             .filter_signal(|In(n)| {
                 SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
-                    // println!("toggle: {}", toggle.0);
+                    println!("toggle {}: {}", n, toggle.0);
                     if toggle.0 { n % 2 == 0 } else { true }
                 })
             })
@@ -112,5 +112,104 @@ fn toggle(keys: Res<ButtonInput<KeyCode>>, mut toggle: ResMut<ToggleFilter>) {
     if keys.just_pressed(KeyCode::Space) {
         toggle.0 = !toggle.0;
         info!("Toggle filter: {}", toggle.0);
+    }
+}
+
+use bevy::{
+    ecs::system::SystemId,
+    prelude::{
+        App, Commands, Component, DefaultPlugins, Entity, In, Local, Query, Startup, SystemInput,
+        Update, With, World, info,
+    },
+};
+use std::{marker::PhantomData, sync::Arc};
+
+pub struct Plugin;
+impl bevy::prelude::Plugin for Plugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, (startup,));
+        app.add_systems(Update, (run_pipes));
+    }
+}
+
+#[derive(Clone)]
+struct MyStruct {
+    field: i32,
+}
+
+fn sys_1(commands: Commands) -> MyStruct {
+    println!("sys1");
+    MyStruct { field: 1 }
+}
+
+fn sys_2(In(my_struct): In<MyStruct>) {
+    println!("field2: {}", my_struct.field);
+}
+
+fn sys_3(In(my_struct): In<MyStruct>) -> usize {
+    println!("field3: {}", my_struct.field);
+    1
+}
+
+#[derive(Component, Clone)]
+struct Roots(Arc<dyn RunnableBadName<()> + Send + Sync + 'static>);
+
+trait RunnableBadName<I: SystemInput + 'static> {
+    fn run(&self, input: In<I::Inner<'static>>, world: &mut World);
+}
+
+#[derive(Component)]
+struct Piped<I: SystemInput + 'static, O: 'static> {
+    input: PhantomData<I>,
+    input_sys: SystemId<I, O>,
+    outs: Vec<Box<dyn RunnableBadName<In<O>> + Send + Sync + 'static>>,
+}
+
+impl<T: SystemInput + 'static, O: 'static + Clone> RunnableBadName<T> for Piped<T, O> {
+    fn run(&self, input: In<T::Inner<'static>>, world: &mut World) {
+        let res = world.run_system_with(self.input_sys, input.0).unwrap();
+        for out in self.outs.iter() {
+            out.run(In(res.clone()), world)
+        }
+    }
+}
+fn startup(mut commands: Commands) {
+    commands.queue(|world: &mut World| {
+        let id1: SystemId<(), MyStruct> = world.register_system(sys_1);
+
+        let id2: SystemId<In<MyStruct>, ()> = world.register_system(sys_2);
+        let id3: SystemId<In<MyStruct>, ()> = world.register_system(sys_3);
+
+        let pipe_str = Piped {
+            input: PhantomData,
+            input_sys: id1,
+            outs: vec![
+                Box::new(Piped {
+                    input: PhantomData,
+                    input_sys: id2,
+                    outs: vec![],
+                }),
+                Box::new(Piped {
+                    input: PhantomData,
+                    input_sys: id3,
+                    outs: vec![],
+                }),
+            ],
+        };
+        world.spawn(Roots(Arc::new(pipe_str)));
+    });
+}
+
+fn run_pipes(mut commands: Commands, mut local: Local<u32>, pipes: Query<Entity, With<Roots>>) {
+    if *local < 10 {
+        *local += 1;
+
+        info!("Running iteration {}", *local);
+        for pipe in pipes.iter() {
+            commands.queue(move |world: &mut World| {
+                let c = world.entity(pipe).get::<Roots>().cloned();
+                c.unwrap().0.run(In(()), world);
+            });
+        }
     }
 }

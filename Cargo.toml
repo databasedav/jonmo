@@ -17,6 +17,7 @@ bevy_log = "0.16"
 bevy_app = "0.16"
 bevy_derive = "0.16"
 bevy_time = "0.16"
+bevy_platform = "0.16"
 enclose = "1.2"
 
 [dev-dependencies]

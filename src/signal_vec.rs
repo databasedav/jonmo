@@ -145,7 +145,11 @@ where
     type Item = T;
 
     fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world).into()
+        let signal = self.signal.register(world);
+        if let Ok(mut entity) = world.get_entity_mut(*signal) {
+            entity.insert(SignalVecLock);
+        }
+        signal.into()
     }
 }
 
@@ -169,6 +173,12 @@ where
         let SignalHandle(upstream) = self.upstream.register(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
+        // TODO: dry logic with register_non_source_signal_vec
+        if let Some(upstream) = get_direct_upstream(world, signal) {
+            if let Ok(mut entity) = world.get_entity_mut(*upstream) {
+                entity.remove::<SignalVecLock>();
+            }
+        }
         signal.into()
     }
 }
@@ -576,11 +586,14 @@ struct FilterSignalIndex(usize);
 fn create_filter_signal_processor<T: Clone + SSs>(
     parent: Entity,
     entity: LazyEntity,
-) -> impl Fn(In<bool>, Query<'_, '_, &FilterSignalIndex>, Query<'_, '_, &mut FilterSignalData<T>>) -> bool
+) -> impl Fn(In<bool>, Query<&FilterSignalIndex>, Query<&mut FilterSignalData<T>>, Query<&SignalRegistrationCount>) -> bool
 {
     move |In(filter),
           filter_signal_indices: Query<&FilterSignalIndex>,
-          mut filter_signal_datas: Query<&mut FilterSignalData<T>>| {
+          mut filter_signal_datas: Query<&mut FilterSignalData<T>>,
+          signals: Query<&SignalRegistrationCount>| {
+
+        println!("here {}: {}", signals.iter().len(), filter);
         let mut filter_signal_data = filter_signal_datas.get_mut(parent).unwrap();
         let index = filter_signal_indices.get(entity.get()).unwrap().0;
         println!("index: {}, filter: {}", index, filter);
@@ -1445,7 +1458,8 @@ where
     }
 }
 
-/// Marks that a a [`Source`] [`SignalVec`] is ready to flushed because it at least one downstream signal has been registered.
+// TODO: this doesn't work for just a straight up vec of jomnobuilders
+/// Marks that a a [`Source`] [`SignalVec`] is ready to be flushed because it at least one downstream signal has been registered.
 #[derive(Component)]
 struct SignalVecLock;
 
@@ -1498,7 +1512,7 @@ where
             let entity = LazyEntity::new();
             let signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, clone!((entity) move |_: In<()>, world: &mut World| {
                 if !world.entity(entity.get()).contains::<SignalVecLock>() {
-                    let o = world
+                    world
                         .get_entity_mut(entity.get())
                         .ok()
                         .and_then(|mut entity: EntityWorldMut<'_>| {
@@ -1510,14 +1524,7 @@ where
                                         if diffs.is_empty() { None } else { Some(diffs) }
                                     },
                                 )
-                        });
-                    o.as_ref().map(|o| {
-                        match &o[0] {
-                            VecDiff::Replace { values } => println!("Replace: {}", values.len()),
-                            _ => (),
-                        }
-                    });
-                    o
+                        })
                 } else {
                     None
                 }
@@ -1526,7 +1533,6 @@ where
             let mut queued = vec![];
             let init = state.read().unwrap().vec.clone();
             if !init.is_empty() {
-                println!("signal_vec: Initializing with Replace: {}", init.len());
                 queued.push(VecDiff::Replace { values: init });
             }
             world

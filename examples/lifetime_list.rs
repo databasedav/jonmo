@@ -84,9 +84,9 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
         .child(
             JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 SignalBuilder::from_component_lazy(parent)
-                    .map(|In(Lifetime(lifetime))| lifetime.round())
+                    .map(|In(Lifetime(lifetime))| {println!("life: {}", lifetime); lifetime.round()})
                     .dedupe()
-                    .map(|In(lifetime): In<f32>| TextSpan(format!("lifetime: {}", lifetime))),
+                    .map(|In(lifetime): In<f32>| {println!("life: {}", lifetime); TextSpan(format!("lifetime: {}", lifetime))}),
             ),
         )
     })
