@@ -47,9 +47,11 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
     .children_signal_vec(
         numbers
             .filter_signal(|In(n)| {
-                SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
-                    if toggle.0 { n % 2 == 0 } else { true }
-                })
+                SignalBuilder::from_system(
+                    move |_: In<()>, toggle: Res<ToggleFilter>| {
+                        if toggle.0 { n % 2 == 0 } else { true }
+                    },
+                )
             })
             .map(|In(color)| item(color)),
     )
