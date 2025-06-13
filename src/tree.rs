@@ -10,11 +10,10 @@ use bevy_ecs::{
 };
 use bevy_log::prelude::*;
 use bevy_platform::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     prelude::*,
     sync::{
-        Arc, LazyLock, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering}, Arc, LazyLock, Mutex, RwLock
     },
 };
 use core::{any::Any, hash::Hash, marker::PhantomData};
@@ -31,13 +30,6 @@ impl From<Entity> for SignalSystem {
 impl<I: 'static, O> From<SystemId<In<I>, O>> for SignalSystem {
     fn from(system_id: SystemId<In<I>, O>) -> Self {
         system_id.entity().into()
-    }
-}
-
-impl SignalSystem {
-    /// Returns the underlying [`Entity`] of this signal system.
-    pub fn entity(&self) -> Entity {
-        self.0
     }
 }
 
@@ -127,7 +119,36 @@ impl<'a> IntoIterator for &'a Downstream {
     }
 }
 
+fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem) -> bool {
+    if source == target {
+        return true;
+    }
+
+    let mut stack   = vec![target];
+    let mut visited = HashSet::new();
+
+    while let Some(node) = stack.pop() {
+        if node == source {
+            return true;
+        }
+        if visited.insert(node) {
+            if let Some(down) = world.get::<Downstream>(*node) {
+                stack.extend(down.iter().copied());
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: SignalSystem) {
+    if would_create_cycle(world, source, target) {
+        // TODO: panic instead ?
+        error!(
+            "cycle detected when attempting to pipe {:?} → {:?}",
+            source, target
+        );
+        return;
+    }
     if let Ok(mut upstream) = world.get_entity_mut(*source) {
         if let Some(mut downstream) = upstream.get_mut::<Downstream>() {
             downstream.0.insert(target);
@@ -142,7 +163,6 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
             downstream.insert(Upstream(HashSet::from([source])));
         }
     }
-    // let mut signals = world.get_resource_mut::<Signals>().unwrap();
 }
 
 /// Component holding the type-erased system runner function.
@@ -210,7 +230,7 @@ fn clone_downstream(downstream: &Downstream) -> Vec<SignalSystem> {
 
 use dyn_clone::{DynClone, clone_trait_object};
 
-pub(crate) trait AnyClone: Any + DynClone {}
+pub trait AnyClone: Any + DynClone {}
 clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
@@ -564,27 +584,62 @@ pub(crate) fn signal_handle_cleanup_helper(
     }
 }
 
-// TODO: optimize this
 pub fn poll_signal_one_shot(
     In(signal): In<SignalSystem>,
     world: &mut World,
-) -> Option<Box<dyn Any>> {
-    // TODO: implications of this cached system "leaking" ? i guess it will be used for all flattens, but will truly leak if all flattens are dropped ...
-    if let Ok(ancestor_orphans) = world.run_system_cached_with(
-        move |In(signal): In<SignalSystem>, upstreams: Query<&Upstream>| {
-            UpstreamIter::new(&upstreams, signal)
-                .filter(|upstream| !upstreams.contains(**upstream))
-                .collect::<Vec<_>>()
-        },
-        signal,
-    ) {
-        return None;
-        // return process_signals_helper(world, ancestor_orphans, Box::new(()), Some(signal));
+) -> Option<Box<dyn AnyClone>> {
+    fn visit(
+        world: &mut World,
+        node: SignalSystem,
+        cache: &mut HashMap<SignalSystem, Option<Box<dyn AnyClone>>>,
+    ) -> Option<Box<dyn AnyClone>> {
+        // 1. memoisation fast-path
+        if let Some(cached) = cache.get(&node) {
+            return cached.clone();
+        }
+
+        // 2. pull runner + upstream list
+        let runner = match world.get::<SystemRunner>(*node) {
+            Some(r) => r.clone(),
+            None => {
+                cache.insert(node, None);
+                return None;
+            }
+        };
+
+        let upstreams: Vec<SignalSystem> = world
+            .get::<Upstream>(*node)
+            .map(|u| {
+                let mut v: Vec<_> = u.0.iter().copied().collect();
+                v.sort_by_key(|s| **s);
+                v
+            })
+            .unwrap_or_default();
+
+        // 3. run the node (depth-first)
+        let mut last_output = None;
+
+        if upstreams.is_empty() {
+            last_output = runner.run(world, Box::new(()));
+        } else {
+            for up in upstreams {
+                if let Some(input) = visit(world, up, cache) {
+                    if let Some(out) = runner.run(world, input) {
+                        last_output = Some(out);
+                    }
+                }
+            }
+        }
+
+        cache.insert(node, last_output.clone());
+        last_output
     }
-    None
+
+    let mut cache = HashMap::new();
+    visit(world, signal, &mut cache)
 }
 
-pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn Any>> {
+pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn AnyClone>> {
     world
         .run_system_cached_with(poll_signal_one_shot, signal)
         .ok()

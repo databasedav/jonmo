@@ -1,11 +1,10 @@
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
-use bevy_log::prelude::*;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-use core::{fmt::Debug, marker::PhantomData, ops::Deref};
+use core::{any::Any, fmt::Debug, marker::PhantomData, ops::Deref};
 
 use super::{signal::*, tree::*, utils::*};
 
@@ -579,69 +578,38 @@ fn create_filter_signal_processor<T: Clone + SSs>(
     In<bool>,
     Query<&FilterSignalIndex>,
     Query<&mut FilterSignalData<T>>,
-    Query<&SignalRegistrationCount>,
 ) -> bool {
     move |In(filter),
           filter_signal_indices: Query<&FilterSignalIndex>,
-          mut filter_signal_datas: Query<&mut FilterSignalData<T>>,
-          signals: Query<&SignalRegistrationCount>| {
-        info!("here {}: {}", signals.iter().len(), filter);
+          mut filter_signal_datas: Query<&mut FilterSignalData<T>>| {
         let mut filter_signal_data = filter_signal_datas.get_mut(parent).unwrap();
         let index = filter_signal_indices.get(entity.get()).unwrap().0;
-        info!("index: {}, filter: {}", index, filter);
-
-        // First, check if we need to do anything and gather info with immutable access
-        let (should_insert, should_remove, filtered_index, value) = {
-            if let Some(signal) = filter_signal_data.items.get(index) {
-                if signal.filtered != filter {
-                    let old_filtered = signal.filtered;
-
-                    if filter && !old_filtered {
-                        // Item becoming visible - calculate insertion index based on current state
-                        let filtered_index =
-                            find_filter_signal_index(&filter_signal_data.items, index);
-                        (true, false, filtered_index, Some(signal.value.clone()))
-                    } else if !filter && old_filtered {
-                        // Item becoming hidden - calculate removal index based on current state
-                        let filtered_index = filter_signal_data
-                            .items
-                            .iter()
-                            .take(index)
-                            .filter(|item| item.filtered)
-                            .count();
-                        (false, true, filtered_index, None)
-                    } else {
-                        (false, false, 0, None)
-                    }
+        let mut new = None;
+        if let Some(signal) = filter_signal_data.items.get(index) {
+            if signal.filtered != filter {
+                let filtered_index = find_filter_signal_index(&filter_signal_data.items, index);
+                if filter {
+                    new = Some((filtered_index, Some(signal.value.clone())))
                 } else {
-                    (false, false, 0, None)
+                    new = Some((filtered_index, None))
                 }
-            } else {
-                (false, false, 0, None)
-            }
-        };
-
-        // Now update the filtered field with mutable access
-        if should_insert || should_remove {
+            };
+        }
+        if let Some((filtered_index, value_option)) = new {
             if let Some(signal) = filter_signal_data.items.get_mut(index) {
                 signal.filtered = filter;
             }
-        }
-
-        // Finally, push the diffs
-        if should_insert {
-            info!("filter_signal: InsertAt({})", filtered_index);
-            filter_signal_data.diffs.push(VecDiff::InsertAt {
-                index: filtered_index,
-                value: value.unwrap(),
-            });
-        } else if should_remove {
-            info!("filter_signal: RemoveAt({})", filtered_index);
-            filter_signal_data.diffs.push(VecDiff::RemoveAt {
-                index: filtered_index,
+            filter_signal_data.diffs.push(if let Some(value) = value_option {
+                VecDiff::InsertAt {
+                    index: filtered_index,
+                    value,
+                }
+            } else {
+                VecDiff::RemoveAt {
+                    index: filtered_index,
+                }
             });
         }
-
         filter
     }
 }
@@ -664,7 +632,7 @@ fn spawn_filter_signal<T: Clone + SSs>(
 
 fn poll_filter_signal(world: &mut World, signal: SignalSystem) -> bool {
     poll_signal(world, signal)
-        .map(|output| output.downcast::<bool>().ok().as_deref().copied())
+        .map(|output| (output as Box<dyn Any>).downcast::<bool>().ok().as_deref().copied())
         .flatten()
         .unwrap_or(false)
 }
@@ -1067,14 +1035,12 @@ pub trait SignalVecExt: SignalVec {
                 for diff in diffs.into_iter() {
                     let diff_option = match diff {
                         VecDiff::Replace { values } => {
-                            info!("filter_signal: Replace: {}", values.len());
                             let mut items = Vec::with_capacity(values.len());
                             let mut new_values = vec![];
                             for (i, value) in values.into_iter().enumerate() {
                                 if let Ok(signal) = world.run_system_with(system, value.clone()) {
                                     let signal = spawn_filter_signal::<Self::Item>(world, i, signal, parent);
                                     let filtered = poll_filter_signal(world, *signal);
-                                    info!("filter_signal: {}", filtered);
                                     if filtered {
                                         new_values.push(value.clone());
                                     }
@@ -1248,6 +1214,15 @@ pub trait SignalVecExt: SignalVec {
                 diffs
             })).register(world);
             entity.set(*signal);
+            let SignalHandle(flusher) = SignalBuilder::from_entity(*signal)
+                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), filter_signal_datas: Query<&FilterSignalData<Self::Item>>| {
+                    if !filter_signal_datas.get(entity).unwrap().diffs.is_empty() {
+                        Some(vec![])
+                    } else {
+                        None
+                    }
+                }).register(world);
+            pipe_signal(world, flusher, signal);
             world
                 .entity_mut(*signal)
                 .insert(FilterSignalData::<Self::Item> {
@@ -1471,7 +1446,7 @@ where
     }
 }
 
-// TODO: this doesn't work for just a straight up vec of jomnobuilders
+// TODO: this doesn't work for just a straight up vec of jomnobuilders, actually yes it do ??
 /// Marks that a a [`Source`] [`SignalVec`] is ready to be flushed because it at least one downstream signal has been registered.
 #[derive(Component)]
 struct SignalVecLock;

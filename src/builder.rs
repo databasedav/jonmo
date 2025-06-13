@@ -22,8 +22,6 @@ fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: 
     }
 }
 
-/// Component storing handles to reactive systems attached to an entity.
-/// These handles are used to clean up the systems when the entity is despawned.
 #[derive(Component, Default)]
 #[component(on_remove = cleanup_signal_handles)]
 pub struct SignalHandles(Vec<SignalHandle>);
@@ -39,7 +37,6 @@ where
 }
 
 impl SignalHandles {
-    /// Add a signal handle to the component.
     pub fn add(&mut self, handle: SignalHandle) {
         self.0.push(handle);
     }
@@ -69,13 +66,10 @@ impl<T: Bundle> From<T> for JonmoBuilder {
 }
 
 impl JonmoBuilder {
-    /// Create a new, empty [`NodeBuilder`].
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Run a function with mutable access to the [`World`] and this node's [`Entity`]
-    /// immediately after the entity is spawned, but before signal systems are fully registered.
     pub fn on_spawn(
         self, // Remove mut
         on_spawn: impl FnOnce(&mut World, Entity) + SSs,
