@@ -1,7 +1,11 @@
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
-use bevy_platform::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use core::{fmt, marker::PhantomData, ops::Deref};
+use bevy_log::prelude::*;
+use bevy_platform::{
+    prelude::*,
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
+use core::{fmt::Debug, marker::PhantomData, ops::Deref};
 
 use super::{signal::*, tree::*, utils::*};
 
@@ -88,11 +92,11 @@ where
     }
 }
 
-impl<T> std::fmt::Debug for VecDiff<T>
+impl<T> Debug for VecDiff<T>
 where
-    T: std::fmt::Debug,
+    T: Debug,
 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Replace { values } => f.debug_struct("Replace").field("values", values).finish(),
             Self::InsertAt { index, value } => f
@@ -581,10 +585,10 @@ fn create_filter_signal_processor<T: Clone + SSs>(
           filter_signal_indices: Query<&FilterSignalIndex>,
           mut filter_signal_datas: Query<&mut FilterSignalData<T>>,
           signals: Query<&SignalRegistrationCount>| {
-        println!("here {}: {}", signals.iter().len(), filter);
+        info!("here {}: {}", signals.iter().len(), filter);
         let mut filter_signal_data = filter_signal_datas.get_mut(parent).unwrap();
         let index = filter_signal_indices.get(entity.get()).unwrap().0;
-        println!("index: {}, filter: {}", index, filter);
+        info!("index: {}, filter: {}", index, filter);
 
         // First, check if we need to do anything and gather info with immutable access
         let (should_insert, should_remove, filtered_index, value) = {
@@ -626,13 +630,13 @@ fn create_filter_signal_processor<T: Clone + SSs>(
 
         // Finally, push the diffs
         if should_insert {
-            println!("filter_signal: InsertAt({})", filtered_index);
+            info!("filter_signal: InsertAt({})", filtered_index);
             filter_signal_data.diffs.push(VecDiff::InsertAt {
                 index: filtered_index,
                 value: value.unwrap(),
             });
         } else if should_remove {
-            println!("filter_signal: RemoveAt({})", filtered_index);
+            info!("filter_signal: RemoveAt({})", filtered_index);
             filter_signal_data.diffs.push(VecDiff::RemoveAt {
                 index: filtered_index,
             });
@@ -1018,7 +1022,7 @@ pub trait SignalVecExt: SignalVec {
     fn sum(self) -> Sum<Self>
     where
         Self: Sized,
-        Self::Item: for<'a> std::iter::Sum<&'a Self::Item> + Clone + Send + 'static,
+        Self::Item: for<'a> core::iter::Sum<&'a Self::Item> + Clone + Send + 'static,
     {
         Sum {
             signal: self
@@ -1043,14 +1047,14 @@ pub trait SignalVecExt: SignalVec {
                 for diff in diffs.into_iter() {
                     let diff_option = match diff {
                         VecDiff::Replace { values } => {
-                            println!("filter_signal: Replace: {}", values.len());
+                            info!("filter_signal: Replace: {}", values.len());
                             let mut items = Vec::with_capacity(values.len());
                             let mut new_values = vec![];
                             for (i, value) in values.into_iter().enumerate() {
                                 if let Ok(signal) = world.run_system_with(system, value.clone()) {
                                     let signal = spawn_filter_signal::<Self::Item>(world, i, signal, parent);
                                     let filtered = poll_filter_signal(world, *signal);
-                                    println!("filter_signal: {}", filtered);
+                                    info!("filter_signal: {}", filtered);
                                     if filtered {
                                         new_values.push(value.clone());
                                     }
@@ -1573,7 +1577,7 @@ mod tests {
     use super::*;
     use crate::JonmoPlugin;
     use bevy::prelude::*;
-    use std::sync::{Arc, Mutex};
+    use bevy_platform::sync::{Arc, Mutex};
 
     // Helper component and resource for testing (similar to signal.rs tests)
     #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
@@ -1581,7 +1585,7 @@ mod tests {
     struct TestItem(i32);
 
     #[derive(Resource, Default)]
-    struct SignalVecOutput<T: Clone + std::fmt::Debug>(Vec<VecDiff<T>>);
+    struct SignalVecOutput<T: Clone + Debug>(Vec<VecDiff<T>>);
 
     fn create_test_app() -> App {
         let mut app = App::new();
@@ -1596,7 +1600,7 @@ mod tests {
         In(diffs): In<Vec<VecDiff<T>>>,
         mut output: ResMut<SignalVecOutput<T>>,
     ) where
-        T: SSs + Clone + std::fmt::Debug,
+        T: SSs + Clone + Debug,
     {
         debug!(
             "Capture SignalVec Output: Received {:?}, extending resource from {:?} with new diffs",
@@ -1605,19 +1609,17 @@ mod tests {
         output.0.extend(diffs);
     }
 
-    fn get_signal_vec_output<T: SSs + Clone + std::fmt::Debug>(
-        world: &World,
-    ) -> Vec<VecDiff<T>> {
+    fn get_signal_vec_output<T: SSs + Clone + Debug>(world: &World) -> Vec<VecDiff<T>> {
         world.resource::<SignalVecOutput<T>>().0.clone()
     }
 
-    fn clear_signal_vec_output<T: SSs + Clone + std::fmt::Debug>(world: &mut World) {
+    fn clear_signal_vec_output<T: SSs + Clone + Debug>(world: &mut World) {
         if let Some(mut output) = world.get_resource_mut::<SignalVecOutput<T>>() {
             output.0.clear();
         }
     }
 
-    impl<T: SSs + PartialEq + std::fmt::Debug> PartialEq for VecDiff<T> {
+    impl<T: SSs + PartialEq + Debug> PartialEq for VecDiff<T> {
         fn eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (Self::Replace { values: l_values }, Self::Replace { values: r_values }) => {

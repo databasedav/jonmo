@@ -29,6 +29,8 @@
 //! The signal propagation is managed internally by the [`JonmoPlugin`] which should be added
 //! to your Bevy `App`.
 
+#![no_std]
+
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 

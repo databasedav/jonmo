@@ -3,7 +3,7 @@ use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
 use bevy_platform::sync::{Arc, Mutex};
 use bevy_time::{Time, Timer, TimerMode};
-use core::{fmt::Debug, marker::PhantomData, time::Duration};
+use core::{fmt, marker::PhantomData, ops, time::Duration};
 
 /// Represents a value that changes over time and handles internal registration logic.
 ///
@@ -292,24 +292,24 @@ where
 
 /// Represents a node that applies logical negation to a boolean signal. Implements [`Signal`].
 ///
-/// Requires `Upstream::Item` to implement `std::ops::Not`. Typically used with boolean signals.
+/// Requires `Upstream::Item` to implement `ops::Not`. Typically used with boolean signals.
 #[derive(Clone)]
 pub struct Not<Upstream>
 where
     Upstream: Signal,
-    <Upstream as Signal>::Item: std::ops::Not,
-    <<Upstream as Signal>::Item as std::ops::Not>::Output: Clone,
+    <Upstream as Signal>::Item: ops::Not,
+    <<Upstream as Signal>::Item as ops::Not>::Output: Clone,
 {
-    pub(crate) signal: Map<Upstream, <Upstream::Item as std::ops::Not>::Output>,
+    pub(crate) signal: Map<Upstream, <Upstream::Item as ops::Not>::Output>,
 }
 
 impl<Upstream> Signal for Not<Upstream>
 where
     Upstream: Signal,
-    <Upstream as Signal>::Item: std::ops::Not,
-    <<Upstream as Signal>::Item as std::ops::Not>::Output: Clone,
+    <Upstream as Signal>::Item: ops::Not,
+    <<Upstream as Signal>::Item as ops::Not>::Output: Clone,
 {
-    type Item = <Upstream::Item as std::ops::Not>::Output;
+    type Item = <Upstream::Item as ops::Not>::Output;
 
     fn register_signal(self, world: &mut World) -> SignalHandle {
         self.signal.register(world)
@@ -517,14 +517,14 @@ where
 /// This node passes through the upstream value unchanged but logs it using `bevy_log::debug!`
 /// along with the source code location where `.debug()` was called.
 #[derive(Clone)]
-pub struct SignalDebug<Upstream>
+pub struct Debug<Upstream>
 where
     Upstream: Signal,
 {
     pub(crate) signal: Map<Upstream, Upstream::Item>,
 }
 
-impl<Upstream> Signal for SignalDebug<Upstream>
+impl<Upstream> Signal for Debug<Upstream>
 where
     Upstream: Signal,
 {
@@ -1102,7 +1102,7 @@ pub trait SignalExt: Signal {
 
     /// Applies logical negation to the signal's value.
     ///
-    /// Requires `Self::Item: std::ops::Not`. Typically used with boolean signals.
+    /// Requires `Self::Item: ops::Not`. Typically used with boolean signals.
     ///
     /// # Example
     /// ```no_run
@@ -1114,11 +1114,11 @@ pub trait SignalExt: Signal {
     fn not(self) -> Not<Self>
     where
         Self: Sized,
-        <Self as Signal>::Item: std::ops::Not + 'static,
-        <<Self as Signal>::Item as std::ops::Not>::Output: Clone,
+        <Self as Signal>::Item: ops::Not + 'static,
+        <<Self as Signal>::Item as ops::Not>::Output: Clone,
     {
         Not {
-            signal: self.map(|In(item): In<Self::Item>| std::ops::Not::not(item)),
+            signal: self.map(|In(item): In<Self::Item>| ops::Not::not(item)),
         }
     }
 
@@ -1602,13 +1602,13 @@ pub trait SignalExt: Signal {
     ///     .debug() // Logs the value 42
     ///     .map(|In(x): In<i32>| x * 2);
     /// ```
-    fn debug(self) -> SignalDebug<Self>
+    fn debug(self) -> Debug<Self>
     where
         Self: Sized,
-        Self::Item: Debug + Clone + 'static,
+        Self::Item: fmt::Debug + Clone + 'static,
     {
-        let location = std::panic::Location::caller();
-        SignalDebug {
+        let location = core::panic::Location::caller();
+        Debug {
             signal: self.map(move |In(item): In<Self::Item>| {
                 debug!("[{}] {:#?}", location, item);
                 item
@@ -1655,15 +1655,14 @@ mod tests {
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
     use bevy_time::TimeUpdateStrategy;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration; // Add Duration
+    use core::time::Duration; // Add Duration
 
     // Helper component and resource for testing
     #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)] // Add Default
     struct TestData(i32);
 
     #[derive(Resource, Default, Debug)]
-    struct SignalOutput<T: SSs + Clone + Debug>(Option<T>);
+    struct SignalOutput<T: SSs + Clone + fmt::Debug>(Option<T>);
 
     fn create_test_app() -> App {
         let mut app = App::new();
@@ -1673,7 +1672,7 @@ mod tests {
     }
 
     // Helper system to capture signal output
-    fn capture_output<T: SSs + Clone + Debug>(
+    fn capture_output<T: SSs + Clone + fmt::Debug>(
         In(value): In<T>,
         mut output: ResMut<SignalOutput<T>>,
     ) {
@@ -1684,7 +1683,7 @@ mod tests {
         output.0 = Some(value);
     }
 
-    fn get_output<T: SSs + Clone + Debug>(world: &World) -> Option<T> {
+    fn get_output<T: SSs + Clone + fmt::Debug>(world: &World) -> Option<T> {
         world.resource::<SignalOutput<T>>().0.clone()
     }
 

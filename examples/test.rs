@@ -48,7 +48,6 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
         numbers
             .filter_signal(|In(n)| {
                 SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
-                    println!("toggle {}: {}", n, toggle.0);
                     if toggle.0 { n % 2 == 0 } else { true }
                 })
             })
@@ -111,6 +110,5 @@ fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut comman
 fn toggle(keys: Res<ButtonInput<KeyCode>>, mut toggle: ResMut<ToggleFilter>) {
     if keys.just_pressed(KeyCode::Space) {
         toggle.0 = !toggle.0;
-        info!("Toggle filter: {}", toggle.0);
     }
 }

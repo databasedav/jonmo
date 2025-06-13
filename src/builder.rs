@@ -1,8 +1,13 @@
 //! Declarative entity builder using jonmo signals.
 
+use core::cmp::Ordering;
+
 use super::{signal::*, signal_vec::*, tree::*, utils::*};
 use bevy_ecs::{component::HookContext, prelude::*, world::DeferredWorld};
-use bevy_platform::sync::{Arc, Mutex};
+use bevy_platform::{
+    prelude::*,
+    sync::{Arc, Mutex},
+};
 
 fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     if let Some(handles) = world.get_entity_mut(entity).ok().and_then(|mut entity| {
@@ -472,10 +477,10 @@ impl JonmoBuilder {
                             ) {
                                 move_from_to(parent, children_entities, a, b);
                                 match a.cmp(&b) {
-                                    std::cmp::Ordering::Less => {
+                                    Ordering::Less => {
                                         move_from_to(parent, children_entities, b - 1, a);
                                     }
-                                    std::cmp::Ordering::Greater => {
+                                    Ordering::Greater => {
                                         move_from_to(parent, children_entities, b + 1, a)
                                     }
                                     _ => {}

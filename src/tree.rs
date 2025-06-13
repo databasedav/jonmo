@@ -11,6 +11,7 @@ use bevy_ecs::{
 use bevy_log::prelude::*;
 use bevy_platform::{
     collections::HashSet,
+    prelude::*,
     sync::{
         Arc, LazyLock, Mutex, RwLock,
         atomic::{AtomicUsize, Ordering},
@@ -300,7 +301,7 @@ where
     // Wrap the typed node behind NodeErased
     let runner: Arc<Box<dyn Runnable>> = Arc::new(Box::new(SystemHolder::<I, O, IOO> {
         system: sys_id,
-        _marker: std::marker::PhantomData,
+        _marker: PhantomData,
     }));
 
     world.entity_mut(entity).insert((

@@ -2,7 +2,7 @@ mod utils;
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::{prelude::*, utils::LazyEntity};
+use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
