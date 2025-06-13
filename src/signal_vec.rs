@@ -783,6 +783,26 @@ pub trait SignalVecExt: SignalVec {
         }
     }
 
+    fn map_in<O, F>(self, mut function: F) -> Map<Self, O>
+    where
+        Self: Sized,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        F: FnMut(Self::Item) -> O + SSs,
+    {
+        self.map(move |In(item)| function(item))
+    }
+
+    fn map_in_ref<O, F>(self, mut function: F) -> Map<Self, O>
+    where
+        Self: Sized,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        F: FnMut(&Self::Item) -> O + SSs,
+    {
+        self.map(move |In(item)| function(&item))
+    }
+
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, Self::Item>
     where
         Self: Sized,

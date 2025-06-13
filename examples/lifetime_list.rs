@@ -45,7 +45,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
     .children_signal_vec(
         colors
             .enumerate()
-            .map(|In((index, color))| item(index, color)),
+            .map_in(|(index, color)| item(index, color)),
     )
 }
 
@@ -74,18 +74,24 @@ fn item(index: impl Signal<Item = Option<usize>>, color: Color) -> JonmoBuilder 
             Lifetime::default(),
         ))
         .entity_sync(parent.clone())
+        .child((TextColor(Color::BLACK), TextSpan::new("item ")))
         .child(
-            JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(index.map(
-                |In(index): In<Option<usize>>| TextSpan(format!("item {}", index.unwrap_or(0))),
-            )),
+            JonmoBuilder::from(TextColor(Color::BLACK))
+            .component_signal(
+                index
+                .map_in(Option::unwrap_or_default)
+                .map_in_ref(ToString::to_string)
+                .map_in(TextSpan)
+            ),
         )
-        .child((TextColor(Color::BLACK), TextSpan::new(" | ")))
+        .child((TextColor(Color::BLACK), TextSpan::new(" | lifetime: ")))
         .child(
             JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
                 SignalBuilder::from_component_lazy(parent)
-                    .map(|In(Lifetime(lifetime))| lifetime.round())
+                    .map_in(|Lifetime(lifetime)| lifetime.round())
                     .dedupe()
-                    .map(|In(lifetime): In<f32>| TextSpan(format!("lifetime: {}", lifetime))),
+                    .map_in_ref(ToString::to_string)
+                    .map_in(TextSpan),
             ),
         )
     })

@@ -764,6 +764,28 @@ pub trait SignalExt: Signal {
         }
     }
 
+    fn map_in<O, IOO, F>(self, mut function: F) -> Map<Self, O>
+    where
+        Self: Sized,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: FnMut(Self::Item) -> IOO + SSs,
+    {
+        self.map(move |In(item)| function(item))
+    }
+
+    fn map_in_ref<O, IOO, F>(self, mut function: F) -> Map<Self, O>
+    where
+        Self: Sized,
+        Self::Item: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        F: FnMut(&Self::Item) -> IOO + SSs,
+    {
+        self.map(move |In(item)| function(&item))
+    }
+
     /// Extracts a component `C` from a signal emitting `Entity` values.
     ///
     /// This is a shorthand for `.map(|In(entity): In<Entity>, q: Query<&C>| q.get(entity).ok().cloned())`.
