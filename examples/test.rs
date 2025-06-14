@@ -14,7 +14,7 @@ fn main() {
             PostStartup,
             (
                 move |world: &mut World| {
-                    ui_root(numbers.signal_vec()).spawn(world);
+                    ui_root(numbers.clone()).spawn(world);
                 },
                 camera,
             ),
@@ -33,7 +33,7 @@ struct Numbers(MutableVec<i32>);
 #[derive(Component, Default, Clone, Reflect)]
 struct Lifetime(f32);
 
-fn ui_root(numbers: impl SignalVec<Item = i32> + Clone) -> JonmoBuilder {
+fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -45,14 +45,15 @@ fn ui_root(numbers: impl SignalVec<Item = i32> + Clone) -> JonmoBuilder {
     })
     // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
-        numbers.clone()
-            .filter_signal(|In(n)| {
-                SignalBuilder::from_system(
-                    move |_: In<()>, toggle: Res<ToggleFilter>| {
-                        n % 2 == if toggle.0 { 0 } else { 1 }
-                    },
-                )
-            })
+        MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
+        // numbers.clone()
+            // .filter_signal(|In(n)| {
+            //     SignalBuilder::from_system(
+            //         move |_: In<()>, toggle: Res<ToggleFilter>| {
+            //             n % 2 == if toggle.0 { 0 } else { 1 }
+            //         },
+            //     )
+            // })
             // .map_signal(|In(n): In<i32>| {
             //     SignalBuilder::from_system(move |_: In<_>| n + 1)
             // })
@@ -61,6 +62,7 @@ fn ui_root(numbers: impl SignalVec<Item = i32> + Clone) -> JonmoBuilder {
             // .intersperse_with(|_: In<_>| 0)
             // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
             // .sort_by_key(|In(n): In<i32>| -n)
+            .flatten()
             .map(|In(n)| item(n)),
     )
 }

@@ -143,6 +143,15 @@ pub trait SignalVec: SSs {
     }
 }
 
+impl<O: 'static> SignalVec for Box<dyn SignalVec<Item = O> + Send + Sync> {
+    type Item = O;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        let inner_box: Box<dyn SignalVec<Item = O> + Send + Sync> = *self;
+        inner_box.register_boxed_signal_vec(world)
+    }
+}
+
 /// A source node for a `SignalVec` chain. Holds the entity ID of the registered source system.
 #[derive(Clone)]
 pub struct Source<T> {
@@ -857,6 +866,128 @@ where
     Upstream: SignalVec,
 {
     type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+#[derive(Clone)]
+struct FlattenItem<O: SSs + Clone> {
+    processor_handle: SignalHandle,
+    values: Vec<O>,
+    _marker: PhantomData<fn() -> O>,
+}
+
+#[derive(Component)]
+struct FlattenData<O: SSs + Clone> {
+    items: Vec<FlattenItem<O>>,
+    diffs: Vec<VecDiff<O>>,
+}
+
+fn with_flatten_data<O: SSs + Clone, R>(
+    world: &mut World,
+    parent: Entity,
+    f: impl FnOnce(Mut<FlattenData<O>>) -> R,
+) -> R {
+    f(world.get_mut::<FlattenData<O>>(parent).unwrap())
+}
+
+#[derive(Component, Deref, DerefMut)]
+struct FlattenInnerIndex(usize);
+
+fn create_flatten_processor<O: Clone + SSs>(
+    parent: Entity,
+) -> impl Fn(In<Vec<VecDiff<O>>>, Query<&FlattenInnerIndex>, Query<&mut FlattenData<O>>) {
+    move |In(diffs): In<Vec<VecDiff<O>>>,
+          query_self_index: Query<&FlattenInnerIndex>,
+          mut query_parent_data: Query<&mut FlattenData<O>>| {
+        if let Ok(mut parent_data) = query_parent_data.get_mut(parent) {
+            // Use .get_single().ok()
+            if let Ok(&FlattenInnerIndex(self_index)) = query_self_index.single() {
+                if self_index >= parent_data.items.len() { return; }
+                let offset: usize = parent_data.items[..self_index].iter().map(|item| item.values.len()).sum();
+                
+                for diff in diffs {
+                    let apply_and_queue = |pd: &mut Mut<FlattenData<O>>, d: VecDiff<O>| {
+                        let translated_diff = match d {
+                            VecDiff::Replace { values } => {
+                                let old_len = pd.items[self_index].values.len();
+                                for _ in 0..old_len { pd.diffs.push(VecDiff::RemoveAt { index: offset }); }
+                                for (i, v) in values.iter().enumerate() { pd.diffs.push(VecDiff::InsertAt { index: offset + i, value: v.clone() }); }
+                                pd.items[self_index].values = values;
+                                return;
+                            }
+                            VecDiff::InsertAt { index, value } => { pd.items[self_index].values.insert(index, value.clone()); VecDiff::InsertAt { index: index + offset, value } }
+                            VecDiff::UpdateAt { index, value } => { pd.items[self_index].values[index] = value.clone(); VecDiff::UpdateAt { index: index + offset, value } }
+                            VecDiff::RemoveAt { index } => { pd.items[self_index].values.remove(index); VecDiff::RemoveAt { index: index + offset } }
+                            VecDiff::Move { old_index, new_index } => {
+                                let val = pd.items[self_index].values.remove(old_index);
+                                pd.items[self_index].values.insert(new_index, val);
+                                VecDiff::Move { old_index: old_index + offset, new_index: new_index + offset }
+                            }
+                            VecDiff::Push { value } => { let old_len = pd.items[self_index].values.len(); pd.items[self_index].values.push(value.clone()); VecDiff::InsertAt { index: offset + old_len, value } }
+                            VecDiff::Pop => { pd.items[self_index].values.pop(); VecDiff::RemoveAt { index: offset + pd.items[self_index].values.len() } }
+                            VecDiff::Clear {} => {
+                                let old_len = pd.items[self_index].values.len();
+                                pd.items[self_index].values.clear();
+                                for _ in 0..old_len { pd.diffs.push(VecDiff::RemoveAt { index: offset }); }
+                                return;
+                            }
+                        };
+                        pd.diffs.push(translated_diff);
+                    };
+                    apply_and_queue(&mut parent_data, diff);
+                }
+            }
+        }
+    }
+}
+
+fn spawn_flatten_item<O: Clone + SSs>(
+    world: &mut World,
+    parent: Entity,
+    index: usize,
+    // Fix: Add `Clone` bound to allow using the signal twice.
+    inner_signal: impl SignalVec<Item = O> + 'static + Clone,
+) -> (FlattenItem<O>, Vec<O>) {
+    // Use the cloned signal for the temporary state getter.
+    let temp_get_state_signal = inner_signal.clone().to_signal().first();
+    let handle = temp_get_state_signal.register(world);
+    let initial_values = poll_signal(world, *handle)
+        .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<Vec<O>>().ok())
+        .map(|b| *b)
+        .unwrap_or_default();
+    handle.cleanup(world);
+
+    // Use the original signal for the persistent processor.
+    let processor_system = create_flatten_processor(parent);
+    let processor_handle = inner_signal.for_each(processor_system).register(world);
+    world.entity_mut(**processor_handle).insert(FlattenInnerIndex(index)); // Correct deref
+    
+    let item = FlattenItem {
+        processor_handle,
+        values: initial_values.clone(),
+        _marker: PhantomData,
+    };
+    (item, initial_values)
+}
+
+
+/// A node that flattens a `SignalVec` of `SignalVec`s.
+#[derive(Clone)]
+pub struct Flatten<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for Flatten<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: SignalVec + 'static,
+    <Upstream::Item as SignalVec>::Item: Clone + SSs,
+{
+    type Item = <Upstream::Item as SignalVec>::Item;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         register_non_source_signal_vec(world, self.signal)
@@ -2346,6 +2477,162 @@ pub trait SignalVecExt: SignalVec {
         });
 
         SortByKey {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    fn flatten(self) -> Flatten<Self>
+    where
+        Self: Sized,
+        Self::Item: SignalVec + 'static + Clone,
+        <Self::Item as SignalVec>::Item: Clone + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let parent_entity = LazyEntity::new();
+
+            let SignalHandle(output_signal) = self
+                .for_each::<Vec<VecDiff<<Self::Item as SignalVec>::Item>>, _, _, _>(clone!((parent_entity) move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
+                    let parent = parent_entity.get();
+                    let mut new_diffs = vec![];
+
+                    for diff in diffs {
+                        match diff {
+                            VecDiff::Push { value: inner_signal } => {
+                                let index = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items.len());
+                                let (item, initial_values) = spawn_flatten_item(world, parent, index, inner_signal);
+                                let offset: usize = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items.iter().map(|i| i.values.len()).sum());
+                                with_flatten_data(world, parent, |mut data| data.items.push(item));
+
+                                for (i, value) in initial_values.into_iter().enumerate() {
+                                    new_diffs.push(VecDiff::InsertAt { index: offset + i, value });
+                                }
+                            }
+                            VecDiff::InsertAt { index, value: inner_signal } => {
+                                let (item, initial_values) = spawn_flatten_item(world, parent, index, inner_signal);
+                                let offset: usize = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items[..index].iter().map(|i| i.values.len()).sum());
+                                with_flatten_data(world, parent, |mut data| data.items.insert(index, item));
+                                let signals_to_update = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items.iter().map(|i| i.processor_handle.clone()).collect::<Vec<_>>());
+                                for (i, handle) in signals_to_update.into_iter().enumerate() {
+                                    if let Some(mut idx) = world.get_mut::<FlattenInnerIndex>(**handle) {
+                                        idx.0 = i;
+                                    }
+                                }
+                                for (i, value) in initial_values.into_iter().enumerate() {
+                                    new_diffs.push(VecDiff::InsertAt { index: offset + i, value });
+                                }
+                            }
+                            VecDiff::RemoveAt { index } => {
+                                let (item, offset) = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| {
+                                    let offset = data.items[..index].iter().map(|i| i.values.len()).sum();
+                                    (data.items.remove(index), offset)
+                                });
+                                item.processor_handle.cleanup(world);
+                                for _ in 0..item.values.len() {
+                                    new_diffs.push(VecDiff::RemoveAt { index: offset });
+                                }
+                            }
+                            VecDiff::Pop {} => {
+                                let (item, offset) = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| {
+                                    let offset = data.items.iter().map(|i| i.values.len()).sum::<usize>().saturating_sub(data.items.last().map_or(0, |i| i.values.len()));
+                                    (data.items.pop().unwrap(), offset)
+                                });
+                                item.processor_handle.cleanup(world);
+                                for _ in 0..item.values.len() {
+                                    new_diffs.push(VecDiff::RemoveAt { index: offset });
+                                }
+                            }
+                            VecDiff::Clear {} => {
+                                let old_items = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| data.items.drain(..).collect::<Vec<_>>());
+                                for item in old_items {
+                                    item.processor_handle.cleanup(world);
+                                }
+                                new_diffs.push(VecDiff::Clear {});
+                            }
+                            VecDiff::Replace { values } => {
+                                let old_items = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| data.items.drain(..).collect::<Vec<_>>());
+                                for item in old_items {
+                                    item.processor_handle.cleanup(world);
+                                }
+                                new_diffs.push(VecDiff::Clear {});
+
+                                for (i, inner_signal) in values.into_iter().enumerate() {
+                                    let (item, initial_values) = spawn_flatten_item(world, parent, i, inner_signal);
+                                    with_flatten_data(world, parent, |mut data| data.items.push(item));
+                                    for value in initial_values {
+                                        new_diffs.push(VecDiff::Push { value });
+                                    }
+                                }
+                            }
+                            VecDiff::UpdateAt { index, value: inner_signal } => {
+                                let (old_item, offset) = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| {
+                                    let offset = data.items[..index].iter().map(|i| i.values.len()).sum();
+                                    (data.items.remove(index), offset)
+                                });
+                                old_item.processor_handle.cleanup(world);
+                                for _ in 0..old_item.values.len() {
+                                    new_diffs.push(VecDiff::RemoveAt { index: offset });
+                                }
+                                
+                                let (new_item, initial_values) = spawn_flatten_item(world, parent, index, inner_signal);
+                                with_flatten_data(world, parent, |mut data| data.items.insert(index, new_item));
+                                for (i, value) in initial_values.into_iter().enumerate() {
+                                    new_diffs.push(VecDiff::InsertAt { index: offset + i, value });
+                                }
+                            }
+                            VecDiff::Move { old_index, new_index } => {
+                                let (old_offset, moved_item, signals_to_update) = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| {
+                                    let old_offset = data.items[..old_index].iter().map(|i| i.values.len()).sum();
+                                    let moved_item = data.items.remove(old_index);
+                                    data.items.insert(new_index, moved_item);
+                                    let signals_to_update = data.items.iter().map(|i| i.processor_handle.clone()).collect::<Vec<_>>();
+                                    (old_offset, data.items[new_index].clone(), signals_to_update)
+                                });
+
+                                for (i, handle) in signals_to_update.into_iter().enumerate() {
+                                    if let Some(mut fi_index) = world.get_mut::<FlattenInnerIndex>(**handle) {
+                                        fi_index.0 = i;
+                                    }
+                                }
+
+                                for _ in 0..moved_item.values.len() {
+                                    new_diffs.push(VecDiff::RemoveAt { index: old_offset });
+                                }
+                                
+                                let new_offset: usize = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items[..new_index].iter().map(|i| i.values.len()).sum());
+
+                                for (i, value) in moved_item.values.into_iter().enumerate() {
+                                    new_diffs.push(VecDiff::InsertAt { index: new_offset + i, value });
+                                }
+                            }
+                        }
+                    }
+                    
+                    let queued_diffs = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| data.diffs.drain(..).collect::<Vec<_>>());
+                    new_diffs.extend(queued_diffs);
+
+                    if new_diffs.is_empty() { None } else { Some(new_diffs) }
+                }))
+                .register(world);
+            
+            parent_entity.set(*output_signal);
+            
+            let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
+                .map::<Vec<VecDiff<<Self::Item as SignalVec>::Item>>, _, _, _>(move |In(_), data: Query<&FlattenData<<Self::Item as SignalVec>::Item>>| {
+                    if let Ok(data) = data.get(parent_entity.get()) {
+                        if !data.diffs.is_empty() { return Some(vec![]); }
+                    }
+                    None
+                })
+                .register(world);
+            
+            pipe_signal(world, flusher, output_signal);
+            
+            world.entity_mut(*output_signal).insert(FlattenData::<<Self::Item as SignalVec>::Item> { items: vec![], diffs: vec![] });
+            output_signal
+        });
+
+        Flatten {
             signal,
             _marker: PhantomData,
         }
