@@ -1,2 +1,1 @@
-please create a new version of poll_signal_one_shot, which currently naively runs the entire signal graph
-until it finds its target (it's commented out right now due to a different code change), to one which only runs the signal's actual dependencies, take care to correctly coordinate run orders, especially when there are multiple upstreams
+port futures-signals' SignalVec::chain to jonmo, use jonmo's implementation of SignalVec::filter_signal as a reference for what sorta porting translation is required, futures-signals' signal_vec.rs is attached for your reference

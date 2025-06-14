@@ -28,12 +28,12 @@ fn main() {
 }
 
 #[derive(Resource, Clone)]
-struct Numbers(MutableVec<u32>);
+struct Numbers(MutableVec<i32>);
 
 #[derive(Component, Default, Clone, Reflect)]
 struct Lifetime(f32);
 
-fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
+fn ui_root(numbers: impl SignalVec<Item = i32> + Clone) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -45,7 +45,7 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
     })
     // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
-        numbers
+        numbers.clone()
             .filter_signal(|In(n)| {
                 SignalBuilder::from_system(
                     move |_: In<()>, toggle: Res<ToggleFilter>| {
@@ -53,14 +53,22 @@ fn ui_root(numbers: impl SignalVec<Item = u32> + Clone) -> JonmoBuilder {
                     },
                 )
             })
-            .map(|In(color)| item(color)),
+            // .map_signal(|In(n): In<i32>| {
+            //     SignalBuilder::from_system(move |_: In<_>| n + 1)
+            // })
+            // .chain(numbers)
+            // .intersperse(0)
+            // .intersperse_with(|_: In<_>| 0)
+            // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
+            // .sort_by_key(|In(n): In<i32>| -n)
+            .map(|In(n)| item(n)),
     )
 }
 
 #[derive(Resource)]
 struct ToggleFilter(bool);
 
-fn item(number: u32) -> JonmoBuilder {
+fn item(number: i32) -> JonmoBuilder {
     JonmoBuilder::from((
         Node {
             height: Val::Px(40.0),
@@ -98,7 +106,7 @@ fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut comman
     let mut flush = false;
     let mut guard = numbers.0.write();
     if keys.just_pressed(KeyCode::Equal) {
-        guard.push((guard.len() + 1) as u32);
+        guard.push((guard.len() + 1) as i32);
         flush = true;
     } else if keys.just_pressed(KeyCode::Minus) {
         guard.pop();

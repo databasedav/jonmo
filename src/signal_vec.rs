@@ -4,7 +4,7 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-use core::{any::Any, fmt::Debug, marker::PhantomData, ops::Deref};
+use core::{any::Any, fmt::Debug, marker::PhantomData, ops::Deref, cmp::Ordering};
 
 use super::{signal::*, tree::*, utils::*};
 
@@ -132,11 +132,15 @@ pub trait SignalVec: SSs {
     /// The type of items in the vector.
     type Item;
 
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle;
+
     /// Registers the systems associated with this node and its predecessors in the `World`.
     /// Returns a [`SignalHandle`] containing the entities of *all* systems
     /// registered or reference-counted during this specific registration call instance.
     /// **Note:** This method is intended for internal use by the signal combinators and registration process.
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle;
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle where Self: Sized {
+        self.boxed().register_boxed_signal_vec(world)
+    }
 }
 
 /// A source node for a `SignalVec` chain. Holds the entity ID of the registered source system.
@@ -152,7 +156,7 @@ where
 {
     type Item = T;
 
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         let signal = self.signal.register(world);
         if let Ok(mut entity) = world.get_entity_mut(*signal) {
             entity.insert(SignalVecLock);
@@ -175,7 +179,7 @@ where
 {
     type Item = O;
 
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         let SignalHandle(upstream) = self.upstream.register(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
@@ -187,13 +191,6 @@ where
         }
         signal.into()
     }
-}
-
-/// A map node in a `SignalVec` chain.
-#[derive(Clone)]
-pub struct Map<Upstream, O> {
-    pub(crate) signal: LazySignal,
-    _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
 fn get_direct_upstream(world: &mut World, signal: SignalSystem) -> Option<SignalSystem> {
@@ -218,6 +215,13 @@ fn register_non_source_signal_vec(world: &mut World, signal: LazySignal) -> Sign
     signal.into()
 }
 
+/// A map node in a `SignalVec` chain.
+#[derive(Clone)]
+pub struct Map<Upstream, O> {
+    pub(crate) signal: LazySignal,
+    _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
 impl<Upstream, O> SignalVec for Map<Upstream, O>
 where
     Upstream: SignalVec,
@@ -225,165 +229,111 @@ where
 {
     type Item = O;
 
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         register_non_source_signal_vec(world, self.signal)
     }
 }
 
+struct MapSignalItem<S: Signal> where S::Item: Send + Sync {
+    signal: SignalHandle,
+    current_value: S::Item,
+}
+
+#[derive(Component)]
+struct MapSignalData<T, S: Signal> where T: 'static, S::Item: Send + Sync {
+    items: Vec<MapSignalItem<S>>,
+    diffs: Vec<VecDiff<S::Item>>,
+    system: SystemId<In<T>, S>,
+}
+
+fn with_map_signal_data<T: SSs, S: Signal, O>(
+    world: &mut World,
+    entity: Entity,
+    f: impl FnOnce(Mut<MapSignalData<T, S>>) -> O,
+) -> O where S::Item: Send + Sync { // Added bound
+    let data = world.get_mut::<MapSignalData<T, S>>(entity).unwrap();
+    f(data)
+}
+
+#[derive(Component, Deref, DerefMut)]
+struct MapSignalIndex(usize);
+
+fn create_map_signal_processor<T: SSs, S: Signal>(
+    parent: Entity,
+    entity: LazyEntity,
+) -> impl Fn(In<S::Item>, Query<&MapSignalIndex>, Query<&mut MapSignalData<T, S>>)
+where
+    S::Item: Clone + Send + Sync, // Added bound
+{
+    move |In(new_value): In<S::Item>,
+          map_signal_indices: Query<&MapSignalIndex>,
+          mut map_signal_datas: Query<&mut MapSignalData<T, S>>| {
+        if let Ok(mut map_signal_data) = map_signal_datas.get_mut(parent) {
+            if let Ok(&MapSignalIndex(index)) = map_signal_indices.get(entity.get()) {
+                if let Some(item) = map_signal_data.items.get_mut(index) {
+                    item.current_value = new_value.clone();
+                    map_signal_data.diffs.push(VecDiff::UpdateAt {
+                        index,
+                        value: new_value,
+                    });
+                }
+            }
+        }
+    }
+}
+
+// Corrected spawn_map_signal that manually pipes signals instead of using .map()
+fn spawn_map_signal<T: SSs, S: Signal>(
+    world: &mut World,
+    index: usize,
+    signal: S,
+    parent: Entity,
+) -> (SignalHandle, S::Item)
+where
+    S::Item: Clone + Send + Sync,
+{
+    let entity = LazyEntity::new();
+
+    // 1. Create the processor closure.
+    let processor = create_map_signal_processor::<T, S>(parent, entity.clone());
+
+    // 2. Use `.map()` to attach the processor. This is the correct pattern.
+    // The output of the processor is (), so the new mapped signal is a Signal<Item = ()>.
+    let mapped_signal = signal.map(processor);
+
+    // 3. Register the new mapped_signal. The handle now refers to the processor node.
+    let processor_handle = mapped_signal.register(world);
+    entity.set(**processor_handle);
+    world.entity_mut(**processor_handle).insert(MapSignalIndex(index));
+    
+    // 4. To get the initial value, we need to poll the *upstream* of our new processor node.
+    // The upstream is the original inner signal (`signal`).
+    let upstream_handle = world.get::<Upstream>(**processor_handle).unwrap().iter().next().cloned().unwrap();
+
+    let initial_value = poll_signal(world, upstream_handle)
+        .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<S::Item>().ok())
+        .map(|boxed| *boxed)
+        .expect("map_signal's inner signal must emit an initial value upon registration");
+    
+    // 5. The handle for the entire inner chain is the processor handle. Cleaning it up
+    // will correctly cascade to the original inner signal.
+    (processor_handle, initial_value)
+}
+
+/// A node that maps items to signals and flattens the result.
 #[derive(Clone)]
-pub struct Filter<Upstream> {
+pub struct MapSignal<Upstream, S: Signal> {
     signal: LazySignal,
-    _marker: PhantomData<fn() -> Upstream>,
+    _marker: PhantomData<fn() -> (Upstream, S)>,
 }
 
-impl<Upstream> SignalVec for Filter<Upstream>
+impl<Upstream, S: Signal> SignalVec for MapSignal<Upstream, S>
 where
     Upstream: SignalVec,
 {
-    type Item = Upstream::Item;
+    type Item = S::Item;
 
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        register_non_source_signal_vec(world, self.signal)
-    }
-}
-
-#[derive(Clone)]
-pub struct FilterMap<Upstream, O>
-where
-    Upstream: SignalVec,
-{
-    signal: LazySignal,
-
-    _marker: PhantomData<fn() -> (Upstream, O)>,
-}
-
-impl<Upstream, O> SignalVec for FilterMap<Upstream, O>
-where
-    Upstream: SignalVec,
-    O: 'static,
-{
-    type Item = O;
-
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        register_non_source_signal_vec(world, self.signal)
-    }
-}
-
-#[derive(Clone)]
-pub struct Enumerate<Upstream>
-where
-    Upstream: SignalVec,
-{
-    signal: ForEach<
-        Upstream,
-        Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>,
-    >,
-}
-
-impl<Upstream> SignalVec for Enumerate<Upstream>
-where
-    Upstream: SignalVec,
-{
-    type Item = (Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item);
-
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
-    }
-}
-
-#[derive(Clone)]
-pub struct ToSignal<Upstream>
-where
-    Upstream: SignalVec,
-{
-    signal: ForEach<Upstream, Vec<Upstream::Item>>,
-}
-
-impl<Upstream> Signal for ToSignal<Upstream>
-where
-    Upstream: SignalVec,
-{
-    type Item = Vec<Upstream::Item>;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
-    }
-}
-
-#[derive(Clone)]
-pub struct IsEmpty<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Clone,
-{
-    signal: super::signal::Map<ToSignal<Upstream>, bool>,
-}
-
-impl<Upstream> Signal for IsEmpty<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Clone,
-{
-    type Item = bool;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
-    }
-}
-
-#[derive(Clone)]
-pub struct Len<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Clone,
-{
-    signal: super::signal::Map<ToSignal<Upstream>, usize>,
-}
-
-impl<Upstream> Signal for Len<Upstream>
-where
-    Upstream: SignalVec,
-    Upstream::Item: Clone,
-{
-    type Item = usize;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
-    }
-}
-
-#[derive(Clone)]
-pub struct Sum<Upstream>
-where
-    Upstream: SignalVec,
-{
-    signal: super::signal::Map<ToSignal<Upstream>, Upstream::Item>,
-}
-
-impl<Upstream> Signal for Sum<Upstream>
-where
-    Upstream: SignalVec,
-{
-    type Item = Upstream::Item;
-
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
-    }
-}
-
-#[derive(Clone)]
-pub struct FilterSignal<Upstream> {
-    signal: LazySignal,
-    _marker: PhantomData<fn() -> Upstream>,
-}
-
-impl<Upstream> SignalVec for FilterSignal<Upstream>
-where
-    Upstream: SignalVec,
-{
-    type Item = Upstream::Item;
-
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         register_non_source_signal_vec(world, self.signal)
     }
 }
@@ -537,10 +487,43 @@ where
     }
 }
 
-fn index_signal_from_index(
-    index: Arc<Mutex<Option<usize>>>,
-) -> Dedupe<super::signal::Source<Option<usize>>> {
-    SignalBuilder::from_system(move |_: In<_>| *index.lock().unwrap()).dedupe()
+#[derive(Clone)]
+pub struct Filter<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for Filter<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+#[derive(Clone)]
+pub struct FilterMap<Upstream, O>
+where
+    Upstream: SignalVec,
+{
+    signal: LazySignal,
+
+    _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> SignalVec for FilterMap<Upstream, O>
+where
+    Upstream: SignalVec,
+    O: 'static,
+{
+    type Item = O;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
 }
 
 struct FilterSignalItem<T> {
@@ -578,7 +561,7 @@ fn create_filter_signal_processor<T: Clone + SSs>(
     In<bool>,
     Query<&FilterSignalIndex>,
     Query<&mut FilterSignalData<T>>,
-) -> bool {
+) {
     move |In(filter),
           filter_signal_indices: Query<&FilterSignalIndex>,
           mut filter_signal_datas: Query<&mut FilterSignalData<T>>| {
@@ -610,31 +593,274 @@ fn create_filter_signal_processor<T: Clone + SSs>(
                 }
             });
         }
-        filter
     }
 }
 
 fn spawn_filter_signal<T: Clone + SSs>(
     world: &mut World,
     index: usize,
-    signal: impl Signal<Item = bool>,
+    signal: impl Signal<Item = bool> + 'static,
     parent: Entity,
-) -> SignalHandle {
+) -> (SignalHandle, bool) {
     let entity = LazyEntity::new();
-    let signal = signal
-        .dedupe()
-        .map(create_filter_signal_processor::<T>(parent, entity.clone()))
-        .register(world);
-    entity.set(**signal);
-    world.entity_mut(**signal).insert(FilterSignalIndex(index));
-    signal
+    let processor = create_filter_signal_processor::<T>(parent, entity.clone());
+
+    // Use .map() to attach the processor. The dedupe is still important.
+    let mapped_signal = signal.dedupe().map(processor);
+
+    let handle = mapped_signal.register(world);
+    entity.set(**handle);
+    world.entity_mut(**handle).insert(FilterSignalIndex(index));
+
+    // To get the initial value, we must poll the original signal before the map/dedupe.
+    // The upstream of the `map` node is the `dedupe` node.
+    let dedupe_handle = world.get::<Upstream>(**handle).unwrap().iter().next().cloned().unwrap();
+    // The upstream of the `dedupe` node is the original signal.
+    let original_signal_handle = world.get::<Upstream>(*dedupe_handle).unwrap().iter().next().cloned().unwrap();
+
+    let initial_value = poll_signal(world, original_signal_handle)
+        .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<bool>().ok())
+        .map(|boxed| *boxed)
+        .expect("filter_signal's inner signal must emit an initial value upon registration");
+
+    (handle, initial_value)
 }
 
-fn poll_filter_signal(world: &mut World, signal: SignalSystem) -> bool {
-    poll_signal(world, signal)
-        .map(|output| (output as Box<dyn Any>).downcast::<bool>().ok().as_deref().copied())
-        .flatten()
-        .unwrap_or(false)
+#[derive(Clone)]
+pub struct FilterSignal<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for FilterSignal<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+fn index_signal_from_index(
+    index: Arc<Mutex<Option<usize>>>,
+) -> Dedupe<super::signal::Source<Option<usize>>> {
+    SignalBuilder::from_system(move |_: In<_>| *index.lock().unwrap()).dedupe()
+}
+
+#[derive(Clone)]
+pub struct Enumerate<Upstream>
+where
+    Upstream: SignalVec,
+{
+    signal: ForEach<
+        Upstream,
+        Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>,
+    >,
+}
+
+impl<Upstream> SignalVec for Enumerate<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = (Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item);
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+#[derive(Clone)]
+pub struct ToSignal<Upstream>
+where
+    Upstream: SignalVec,
+{
+    signal: ForEach<Upstream, Vec<Upstream::Item>>,
+}
+
+impl<Upstream> Signal for ToSignal<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Vec<Upstream::Item>;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+#[derive(Clone)]
+pub struct IsEmpty<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Clone,
+{
+    signal: super::signal::Map<ToSignal<Upstream>, bool>,
+}
+
+impl<Upstream> Signal for IsEmpty<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Clone,
+{
+    type Item = bool;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+#[derive(Clone)]
+pub struct Len<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Clone,
+{
+    signal: super::signal::Map<ToSignal<Upstream>, usize>,
+}
+
+impl<Upstream> Signal for Len<Upstream>
+where
+    Upstream: SignalVec,
+    Upstream::Item: Clone,
+{
+    type Item = usize;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+#[derive(Clone)]
+pub struct Sum<Upstream>
+where
+    Upstream: SignalVec,
+{
+    signal: super::signal::Map<ToSignal<Upstream>, Upstream::Item>,
+}
+
+impl<Upstream> Signal for Sum<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+#[derive(Clone)]
+enum LrDiff<T> {
+    Left(Vec<VecDiff<T>>),
+    Right(Vec<VecDiff<T>>),
+}
+
+/// A node that chains two `SignalVec`s together.
+#[derive(Clone)]
+pub struct Chain<Left, Right>
+where
+    Left: SignalVec,
+    Right: SignalVec<Item = Left::Item>,
+{
+    left_wrapper: ForEach<Left, LrDiff<Left::Item>>,
+    right_wrapper: ForEach<Right, LrDiff<Left::Item>>,
+    signal: LazySignal,
+}
+
+impl<Left, Right> SignalVec for Chain<Left, Right>
+where
+    Left: SignalVec,
+    Right: SignalVec<Item = Left::Item>,
+{
+    type Item = Left::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        let SignalHandle(left_upstream) = self.left_wrapper.register_signal_vec(world);
+        let SignalHandle(right_upstream) = self.right_wrapper.register_signal_vec(world);
+
+        let signal = self.signal.register(world);
+
+        pipe_signal(world, left_upstream, signal);
+        pipe_signal(world, right_upstream, signal);
+
+        signal.into()
+    }
+}
+
+/// A node that intersperses a separator between adjacent items of a `SignalVec`.
+#[derive(Clone)]
+pub struct Intersperse<Upstream>
+where
+    Upstream: SignalVec,
+{
+    signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+}
+
+impl<Upstream> SignalVec for Intersperse<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+/// A node that intersperses a separator generated by a system between adjacent items of a `SignalVec`.
+#[derive(Clone)]
+pub struct IntersperseWith<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for IntersperseWith<Upstream>
+where
+    Upstream: SignalVec
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+/// A node that sorts the items of a `SignalVec` using a comparison system.
+#[derive(Clone)]
+pub struct SortBy<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for SortBy<Upstream>
+where
+    Upstream: SignalVec
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+/// A node that sorts the items of a `SignalVec` using an extracted key.
+#[derive(Clone)]
+pub struct SortByKey<Upstream> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> SignalVec for SortByKey<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        register_non_source_signal_vec(world, self.signal)
+    }
 }
 
 /// Extension trait providing combinator methods for types implementing [`SignalVec`] and [`Clone`].
@@ -771,29 +997,162 @@ pub trait SignalVecExt: SignalVec {
         self.map(move |In(item)| function(&item))
     }
 
-    fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, Self::Item>
+    /// Creates a new `SignalVec` by mapping each item of the source `SignalVec` to a `Signal`.
+    ///
+    /// For each item in the source vector, the provided `system` is run to produce an
+    /// inner `Signal`. The output vector's value at a given index becomes the latest
+    /// value emitted by the corresponding inner `Signal`.
+    ///
+    /// This is useful for creating dynamic lists where each element has its own
+    /// independent, reactive state.
+    fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
         Self: Sized,
-        Self::Item: Clone + 'static,
-        O: Clone + 'static,
-        F: IntoSystem<In<Self::Item>, Option<O>, M> + SSs,
+        Self::Item: Clone + SSs,
+        S: Signal + 'static,
+        S::Item: Clone + Send + Sync,
+        F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
-            let system = world.register_system(system);
-            let SignalHandle(signal) = self
-                .for_each::<Vec<VecDiff<O>>, _, _, _>(
-                    move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                          world: &mut World,
-                          mut indices: Local<Vec<bool>>| {
-                        filter_helper(world, diffs, system, |_, mapped| mapped, &mut indices)
-                    },
-                )
+            let parent_entity = LazyEntity::new();
+            let system_id = world.register_system(system);
+
+            let SignalHandle(output_signal) = self
+                .for_each::<Vec<VecDiff<S::Item>>, _, _, _>(
+                    clone!((parent_entity) move |In(mut diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
+                        let parent = parent_entity.get();
+                        let mut new_diffs = vec![];
+
+                        for diff in diffs.drain(..) {
+                            match diff {
+                                VecDiff::Replace { values } => {
+                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
+                                    let old_items = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.drain(..).collect::<Vec<_>>());
+
+                                    for item in old_items {
+                                        item.signal.cleanup(world);
+                                    }
+
+                                    let mut new_items = Vec::with_capacity(values.len());
+                                    let mut new_values = Vec::with_capacity(values.len());
+
+                                    for (i, value) in values.into_iter().enumerate() {
+                                        if let Ok(signal) = world.run_system_with(system_id, value) {
+                                            let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, i, signal, parent);
+                                            new_items.push(MapSignalItem {
+                                                signal: handle,
+                                                current_value: initial_value.clone(),
+                                            });
+                                            new_values.push(initial_value);
+                                        }
+                                    }
+                                    with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                                        data.items = new_items;
+                                    });
+                                    new_diffs.push(VecDiff::Replace { values: new_values });
+                                }
+                                VecDiff::InsertAt { index, value } => {
+                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
+                                    if let Ok(signal) = world.run_system_with(system_id, value) {
+                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
+                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                                            data.items.insert(index, MapSignalItem {
+                                                signal: handle,
+                                                current_value: initial_value.clone(),
+                                            });
+                                        });
+                                        new_diffs.push(VecDiff::InsertAt { index, value: initial_value });
+                                    }
+                                }
+                                VecDiff::UpdateAt { index, value } => {
+                                    let (old_item, system_id) = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| (data.items.remove(index), data.system));
+                                    old_item.signal.cleanup(world);
+                                    if let Ok(signal) = world.run_system_with(system_id, value) {
+                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
+                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                                            data.items.insert(index, MapSignalItem {
+                                                signal: handle,
+                                                current_value: initial_value.clone(),
+                                            });
+                                        });
+                                        new_diffs.push(VecDiff::UpdateAt { index, value: initial_value });
+                                    }
+                                }
+                                VecDiff::RemoveAt { index } => {
+                                    let item = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.remove(index));
+                                    item.signal.cleanup(world);
+                                    new_diffs.push(VecDiff::RemoveAt { index });
+                                }
+                                VecDiff::Push { value } => {
+                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
+                                    if let Ok(signal) = world.run_system_with(system_id, value) {
+                                        let index = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.items.len());
+                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
+                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                                            data.items.push(MapSignalItem {
+                                                signal: handle,
+                                                current_value: initial_value.clone(),
+                                            });
+                                        });
+                                        new_diffs.push(VecDiff::Push { value: initial_value });
+                                    }
+                                }
+                                VecDiff::Pop {} => {
+                                    let item = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.pop().unwrap());
+                                    item.signal.cleanup(world);
+                                    new_diffs.push(VecDiff::Pop {});
+                                }
+                                VecDiff::Move { old_index, new_index } => {
+                                    with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                                        let item = data.items.remove(old_index);
+                                        data.items.insert(new_index, item);
+                                    });
+                                    new_diffs.push(VecDiff::Move { old_index, new_index });
+                                }
+                                VecDiff::Clear {} => {
+                                    let old_items = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.drain(..).collect::<Vec<_>>());
+                                    for item in old_items {
+                                        item.signal.cleanup(world);
+                                    }
+                                    new_diffs.push(VecDiff::Clear {});
+                                }
+                            }
+                        }
+
+                        let queued_diffs = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
+                            data.diffs.drain(..).collect::<Vec<_>>()
+                        });
+                        new_diffs.extend(queued_diffs);
+
+                        if new_diffs.is_empty() { None } else { Some(new_diffs) }
+                    }),
+                ).register(world);
+
+            parent_entity.set(*output_signal);
+
+            let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
+                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), data: Query<&MapSignalData<Self::Item, S>>| {
+                    data.get(entity).ok().and_then(|data| {
+                        if !data.diffs.is_empty() { Some(vec![]) } else { None }
+                    })
+                })
                 .register(world);
-            // just attach the system to the lifetime of the signal
-            world.entity_mut(*signal).add_child(system.entity());
-            signal.into()
+
+            pipe_signal(world, flusher, output_signal);
+
+            world
+                .entity_mut(*output_signal)
+                .insert(MapSignalData::<Self::Item, S> {
+                    items: vec![],
+                    diffs: vec![],
+                    system: system_id,
+                })
+                .add_child(system_id.entity());
+
+            output_signal
         });
-        FilterMap {
+
+        MapSignal {
             signal,
             _marker: PhantomData,
         }
@@ -829,6 +1188,231 @@ pub trait SignalVecExt: SignalVec {
             signal.into()
         });
         Filter {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, Self::Item>
+    where
+        Self: Sized,
+        Self::Item: Clone + 'static,
+        O: Clone + 'static,
+        F: IntoSystem<In<Self::Item>, Option<O>, M> + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let system = world.register_system(system);
+            let SignalHandle(signal) = self
+                .for_each::<Vec<VecDiff<O>>, _, _, _>(
+                    move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                          world: &mut World,
+                          mut indices: Local<Vec<bool>>| {
+                        filter_helper(world, diffs, system, |_, mapped| mapped, &mut indices)
+                    },
+                )
+                .register(world);
+            // just attach the system to the lifetime of the signal
+            world.entity_mut(*signal).add_child(system.entity());
+            signal.into()
+        });
+        FilterMap {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + SSs,
+        S: Signal<Item = bool> + 'static,
+        F: IntoSystem<In<Self::Item>, S, M> + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let parent_entity = LazyEntity::new();
+            let system_id = world.register_system(system);
+
+            let SignalHandle(output_signal) = self
+                .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(clone!((parent_entity) move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
+                    let parent = parent_entity.get();
+                    let mut new_diffs = vec![];
+
+                    for diff in diffs.into_iter() {
+                        match diff {
+                            VecDiff::Replace { values } => {
+                                let old_signals = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    data.items.drain(..).map(|item| item.signal).collect::<Vec<_>>()
+                                });
+                                for signal in old_signals {
+                                    signal.cleanup(world);
+                                }
+
+                                let mut new_items = Vec::with_capacity(values.len());
+                                let mut new_values = vec![];
+                                for (i, value) in values.into_iter().enumerate() {
+                                    if let Ok(signal) = world.run_system_with(system_id, value.clone()) {
+                                        let (handle, filtered) = spawn_filter_signal::<Self::Item>(world, i, signal, parent);
+                                        if filtered {
+                                            new_values.push(value.clone());
+                                        }
+                                        new_items.push(FilterSignalItem { signal: handle, value, filtered });
+                                    }
+                                }
+                                with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    data.items = new_items;
+                                    data.diffs.clear();
+                                });
+                                new_diffs.push(VecDiff::Replace { values: new_values });
+                            },
+                            VecDiff::InsertAt { index, value } => {
+                                if let Ok(signal) = world.run_system_with(system_id, value.clone()) {
+                                    let (handle, filtered) = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
+                                    let (new_filtered_index, signals_to_update) = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                        data.items.insert(index, FilterSignalItem { signal: handle, value: value.clone(), filtered });
+                                        (find_filter_signal_index(&data.items, index), data.items.get((index + 1)..).map(|items| items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>()))
+                                    });
+                                    if let Some(to_update) = signals_to_update {
+                                        for signal in to_update {
+                                            if let Some(mut signal_index) = world.get_mut::<FilterSignalIndex>(**signal) {
+                                                **signal_index += 1;
+                                            }
+                                        }
+                                    }
+                                    if filtered {
+                                        new_diffs.push(VecDiff::InsertAt { index: new_filtered_index, value });
+                                    }
+                                }
+                            },
+                            VecDiff::UpdateAt { index, value } => {
+                                let (old_signal, old_filtered, filtered_index) = with_filter_signal_data(world, parent, |data: Mut<FilterSignalData<Self::Item>>| {
+                                    let filtered_index = find_filter_signal_index(&data.items, index);
+                                    let item = &data.items[index];
+                                    (item.signal.clone(), item.filtered, filtered_index)
+                                });
+
+                                if let Ok(signal) = world.run_system_with(system_id, value.clone()) {
+                                    let (new_handle, new_filtered) = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
+                                    old_signal.cleanup(world);
+                                    with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                        let item = &mut data.items[index];
+                                        item.signal = new_handle;
+                                        item.value = value.clone();
+                                        item.filtered = new_filtered;
+                                    });
+                                    if new_filtered {
+                                        if old_filtered {
+                                            new_diffs.push(VecDiff::UpdateAt { index: filtered_index, value });
+                                        } else {
+                                            new_diffs.push(VecDiff::InsertAt { index: filtered_index, value });
+                                        }
+                                    } else if old_filtered {
+                                        new_diffs.push(VecDiff::RemoveAt { index: filtered_index });
+                                    }
+                                }
+                            },
+                            VecDiff::RemoveAt { index } => {
+                                let (signal, filtered, filtered_index, signals_to_update) = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    let filtered_index = find_filter_signal_index(&data.items, index);
+                                    let item = data.items.remove(index);
+                                    let signals_to_update = data.items.get(index..).map(|items| items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>());
+                                    (item.signal, item.filtered, filtered_index, signals_to_update)
+                                });
+                                signal.cleanup(world);
+                                if let Some(to_update) = signals_to_update {
+                                    for signal in to_update {
+                                        if let Some(mut signal_index) = world.get_mut::<FilterSignalIndex>(**signal) {
+                                            **signal_index -= 1;
+                                        }
+                                    }
+                                }
+                                if filtered {
+                                    new_diffs.push(VecDiff::RemoveAt { index: filtered_index });
+                                }
+                            },
+                            VecDiff::Push { value } => {
+                                if let Ok(signal) = world.run_system_with(system_id, value.clone()) {
+                                    let index = with_filter_signal_data(world, parent, |data: Mut<FilterSignalData<Self::Item>>| data.items.len());
+                                    let (handle, filtered) = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
+                                    with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                        data.items.push(FilterSignalItem { signal: handle, value: value.clone(), filtered });
+                                    });
+                                    if filtered {
+                                        new_diffs.push(VecDiff::Push { value });
+                                    }
+                                }
+                            },
+                            VecDiff::Pop {} => {
+                                let (signal, filtered) = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    let item = data.items.pop().expect("can't pop from empty vec");
+                                    (item.signal, item.filtered)
+                                });
+                                signal.cleanup(world);
+                                if filtered {
+                                    new_diffs.push(VecDiff::Pop {});
+                                }
+                            },
+                            VecDiff::Move { old_index, new_index } => {
+                                let (filtered, old_filtered_index, new_filtered_index, items_to_update) = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    let old_filtered_index = find_filter_signal_index(&data.items, old_index);
+                                    let item = data.items.remove(old_index);
+                                    let filtered = item.filtered;
+                                    data.items.insert(new_index, item);
+                                    let new_filtered_index = find_filter_signal_index(&data.items, new_index);
+                                    // Collect the signal handles that need their indices updated.
+                                    let items_to_update = data.items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>();
+                                    (filtered, old_filtered_index, new_filtered_index, items_to_update)
+                                });
+                                
+                                // Now that the borrow from with_filter_signal_data is over, we can mutably access world.
+                                for (i, signal) in items_to_update.into_iter().enumerate() {
+                                    if let Some(mut signal_index) = world.get_mut::<FilterSignalIndex>(**signal) {
+                                        **signal_index = i;
+                                    }
+                                }
+
+                                if filtered {
+                                    new_diffs.push(VecDiff::Move { old_index: old_filtered_index, new_index: new_filtered_index });
+                                }
+                            },
+                            VecDiff::Clear {} => {
+                                let signals = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                    data.diffs.clear();
+                                    data.items.drain(..).map(|item| item.signal).collect::<Vec<_>>()
+                                });
+                                for signal in signals {
+                                    signal.cleanup(world);
+                                }
+                                new_diffs.push(VecDiff::Clear {});
+                            },
+                        }
+                    }
+                    let mut diffs = with_filter_signal_data(world, parent, |mut data: Mut<FilterSignalData<Self::Item>>| data.diffs.drain(..).collect::<Vec<_>>());
+                    diffs.extend(new_diffs);
+                    if diffs.is_empty() { None } else { Some(diffs) }
+                }))
+                .register(world);
+
+            parent_entity.set(*output_signal);
+            let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
+                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), filter_signal_datas: Query<&FilterSignalData<Self::Item>>| {
+                    if let Ok(data) = filter_signal_datas.get(entity) {
+                        if !data.diffs.is_empty() { Some(vec![]) } else { None }
+                    } else {
+                        None
+                    }
+                })
+                .register(world);
+            pipe_signal(world, flusher, output_signal);
+            world
+                .entity_mut(*output_signal)
+                .insert(FilterSignalData::<Self::Item> {
+                    items: vec![],
+                    diffs: vec![],
+                })
+                .add_child(system_id.entity());
+            output_signal
+        });
+        FilterSignal {
             signal,
             _marker: PhantomData,
         }
@@ -1019,223 +1603,757 @@ pub trait SignalVecExt: SignalVec {
         }
     }
 
-    fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
+    /// Chains two `SignalVec`s together.
+    ///
+    /// The output `SignalVec` will contain all of the items in `self`,
+    /// followed by all of the items in `other`.
+    ///
+    /// # Performance
+    ///
+    /// This is a fairly efficient method: it is *guaranteed* constant time, regardless of how big `self` or `other` are.
+    ///
+    /// The only exception is when `self` or `other` notifies with `VecDiff::Replace` or `VecDiff::Clear`,
+    /// in which case it is linear time.
+    fn chain<S>(self, other: S) -> Chain<Self, S>
+    where
+        S: SignalVec<Item = Self::Item>,
+        Self: Sized,
+        Self::Item: SSs + Clone,
+    {
+        let left_wrapper = self.for_each(|In(diffs)| LrDiff::Left(diffs));
+        let right_wrapper = other.for_each(|In(diffs)| LrDiff::Right(diffs));
+
+        let signal = lazy_signal_from_system::<_, Vec<VecDiff<Self::Item>>, _, _, _>(
+            move |In(lr_diff): In<LrDiff<Self::Item>>,
+                  mut left_len: Local<usize>,
+                  mut right_len: Local<usize>| {
+                let mut out_diffs = Vec::new();
+
+                let (is_left, diffs) = match lr_diff {
+                    LrDiff::Left(diffs) => (true, diffs),
+                    LrDiff::Right(diffs) => (false, diffs),
+                };
+
+                for diff in diffs {
+                    if is_left {
+                        match diff {
+                            VecDiff::Replace { values } => {
+                                let removing = *left_len;
+                                *left_len = values.len();
+                                if *right_len == 0 {
+                                    out_diffs.push(VecDiff::Replace { values });
+                                } else {
+                                    for i in (0..removing).rev() {
+                                        out_diffs.push(VecDiff::RemoveAt { index: i });
+                                    }
+                                    for (i, value) in values.into_iter().enumerate() {
+                                        out_diffs.push(VecDiff::InsertAt { index: i, value });
+                                    }
+                                }
+                            }
+                            VecDiff::InsertAt { index, value } => {
+                                *left_len += 1;
+                                out_diffs.push(VecDiff::InsertAt { index, value });
+                            }
+                            VecDiff::UpdateAt { index, value } => {
+                                out_diffs.push(VecDiff::UpdateAt { index, value });
+                            }
+                            VecDiff::Move { old_index, new_index } => {
+                                out_diffs.push(VecDiff::Move { old_index, new_index });
+                            }
+                            VecDiff::RemoveAt { index } => {
+                                *left_len -= 1;
+                                out_diffs.push(VecDiff::RemoveAt { index });
+                            }
+                            VecDiff::Push { value } => {
+                                let index = *left_len;
+                                *left_len += 1;
+                                if *right_len == 0 {
+                                    out_diffs.push(VecDiff::Push { value });
+                                } else {
+                                    out_diffs.push(VecDiff::InsertAt { index, value });
+                                }
+                            }
+                            VecDiff::Pop {} => {
+                                *left_len -= 1;
+                                if *right_len == 0 {
+                                    out_diffs.push(VecDiff::Pop {});
+                                } else {
+                                    out_diffs.push(VecDiff::RemoveAt { index: *left_len });
+                                }
+                            }
+                            VecDiff::Clear {} => {
+                                let removing = *left_len;
+                                *left_len = 0;
+                                if *right_len == 0 {
+                                    out_diffs.push(VecDiff::Clear {});
+                                } else {
+                                    for i in (0..removing).rev() {
+                                        out_diffs.push(VecDiff::RemoveAt { index: i });
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // is_right
+                        match diff {
+                            VecDiff::Replace { values } => {
+                                let removing = *right_len;
+                                *right_len = values.len();
+                                if *left_len == 0 {
+                                    out_diffs.push(VecDiff::Replace { values });
+                                } else {
+                                    for _ in 0..removing {
+                                        out_diffs.push(VecDiff::Pop {});
+                                    }
+                                    for value in values {
+                                        out_diffs.push(VecDiff::Push { value });
+                                    }
+                                }
+                            }
+                            VecDiff::InsertAt { index, value } => {
+                                *right_len += 1;
+                                out_diffs.push(VecDiff::InsertAt {
+                                    index: index + *left_len,
+                                    value,
+                                });
+                            }
+                            VecDiff::UpdateAt { index, value } => {
+                                out_diffs.push(VecDiff::UpdateAt {
+                                    index: index + *left_len,
+                                    value,
+                                });
+                            }
+                            VecDiff::Move {
+                                old_index,
+                                new_index,
+                            } => {
+                                out_diffs.push(VecDiff::Move {
+                                    old_index: old_index + *left_len,
+                                    new_index: new_index + *left_len,
+                                });
+                            }
+                            VecDiff::RemoveAt { index } => {
+                                *right_len -= 1;
+                                out_diffs.push(VecDiff::RemoveAt {
+                                    index: index + *left_len,
+                                });
+                            }
+                            VecDiff::Push { value } => {
+                                *right_len += 1;
+                                out_diffs.push(VecDiff::Push { value });
+                            }
+                            VecDiff::Pop {} => {
+                                *right_len -= 1;
+                                out_diffs.push(VecDiff::Pop {});
+                            }
+                            VecDiff::Clear {} => {
+                                let removing = *right_len;
+                                *right_len = 0;
+                                if *left_len == 0 {
+                                    out_diffs.push(VecDiff::Clear {});
+                                } else {
+                                    for _ in 0..removing {
+                                        out_diffs.push(VecDiff::Pop {});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if out_diffs.is_empty() {
+                    None
+                } else {
+                    Some(out_diffs)
+                }
+            },
+        );
+
+        Chain {
+            left_wrapper,
+            right_wrapper,
+            signal,
+        }
+    }
+
+    /// Creates a new `SignalVec` which places a copy of `separator` between adjacent
+    /// items of the original `SignalVec`.
+    ///
+    /// This behaves like `Iterator::intersperse`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use bevy::prelude::*;
+    /// # use jonmo::prelude::*;
+    /// let numbers = MutableVec::from([1, 2, 3]);
+    /// let interspersed_signal = numbers.signal_vec().intersperse(0);
+    /// // The resulting vector signal will represent: [1, 0, 2, 0, 3]
+    /// ```
+    fn intersperse(self, separator: Self::Item) -> Intersperse<Self>
     where
         Self: Sized,
         Self::Item: Clone + SSs,
-        S: Signal<Item = bool> + 'static,
-        F: IntoSystem<In<Self::Item>, S, M> + SSs,
+    {
+        let signal = self.for_each(
+            move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                    mut local_values: Local<Vec<Self::Item>>| {
+                let mut out_diffs = Vec::new();
+
+                for diff in diffs {
+                    let old_len = local_values.len();
+                    match diff {
+                        VecDiff::Replace { mut values } => {
+                            let new_len = values.len();
+                            
+                            // Correctly set the new state *first*.
+                            local_values.clear();
+                            local_values.append(&mut values);
+
+                            let mut interspersed = Vec::new();
+                            if new_len > 0 {
+                                interspersed.reserve(2 * new_len - 1);
+                                // Iterate over our now-correct local state.
+                                let mut iter = local_values.iter().cloned();
+                                interspersed.push(iter.next().unwrap());
+                                for item in iter {
+                                    interspersed.push(separator.clone());
+                                    interspersed.push(item);
+                                }
+                            }
+                            out_diffs.push(VecDiff::Replace { values: interspersed });
+
+                            // The buggy line `*local_values = values;` is removed.
+                            // `local_values` now correctly holds the state for the next diff.
+                        }
+                        VecDiff::InsertAt { index, value } => {
+                            local_values.insert(index, value.clone());
+                            if old_len == 0 {
+                                out_diffs.push(VecDiff::Push { value });
+                            } else {
+                                out_diffs.push(VecDiff::InsertAt { index: 2 * index, value });
+                                // Insert separator *after* unless the item is at the very end.
+                                if index < old_len {
+                                    out_diffs.push(VecDiff::InsertAt { index: 2 * index + 1, value: separator.clone() });
+                                }
+                            }
+                        }
+                        VecDiff::UpdateAt { index, value } => {
+                            local_values[index] = value.clone();
+                            out_diffs.push(VecDiff::UpdateAt { index: 2 * index, value });
+                        }
+                        VecDiff::RemoveAt { index } => {
+                            local_values.remove(index);
+                            if old_len == 1 {
+                                out_diffs.push(VecDiff::RemoveAt { index: 0 });
+                            } else if index == old_len - 1 {
+                                // Removing the last item: remove the item and the separator *before* it.
+                                out_diffs.push(VecDiff::Pop {}); // item
+                                out_diffs.push(VecDiff::Pop {}); // separator
+                            } else {
+                                // Removing from start/middle: remove the item and the separator *after* it.
+                                out_diffs.push(VecDiff::RemoveAt { index: 2 * index }); // item
+                                out_diffs.push(VecDiff::RemoveAt { index: 2 * index }); // separator
+                            }
+                        }
+                        VecDiff::Move { old_index, new_index } => {
+                            let value = local_values.remove(old_index);
+                            local_values.insert(new_index, value.clone());
+
+                            // Decompose move into remove + insert for robustness.
+                            let mut temp_out = Vec::new();
+                            // 1. Generate remove diffs based on old position
+                            if old_len == 1 { // Nothing to remove
+                            } else if old_index == old_len - 1 {
+                                temp_out.push(VecDiff::Pop {});
+                                temp_out.push(VecDiff::Pop {});
+                            } else {
+                                temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                                temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                            }
+                            
+                            // 2. Generate insert diffs based on new position
+                            let current_len = local_values.len();
+                            if current_len == 1 {
+                                temp_out.push(VecDiff::Push { value });
+                            } else {
+                                temp_out.push(VecDiff::InsertAt { index: 2 * new_index, value });
+                                if new_index < current_len - 1 {
+                                    temp_out.push(VecDiff::InsertAt { index: 2 * new_index + 1, value: separator.clone() });
+                                }
+                            }
+                            out_diffs.extend(temp_out);
+                        }
+                        VecDiff::Push { value } => {
+                            local_values.push(value.clone());
+                            if old_len > 0 {
+                                out_diffs.push(VecDiff::Push { value: separator.clone() });
+                            }
+                            out_diffs.push(VecDiff::Push { value });
+                        }
+                        VecDiff::Pop {} => {
+                            local_values.pop();
+                            // This is guaranteed to be removing the last item.
+                            if old_len > 0 {
+                                out_diffs.push(VecDiff::Pop {}); // The item
+                            }
+                            if old_len > 1 {
+                                out_diffs.push(VecDiff::Pop {}); // The separator before it
+                            }
+                        }
+                        VecDiff::Clear {} => {
+                            local_values.clear();
+                            out_diffs.push(VecDiff::Clear {});
+                        }
+                    }
+                }
+
+                if out_diffs.is_empty() { None } else { Some(out_diffs) }
+            },
+        );
+        Intersperse { signal }
+    }
+
+    /// Creates a new `SignalVec` which places an item generated by a `separator_system`
+    /// between adjacent items of the original `SignalVec`.
+    ///
+    /// The provided system will be run each time a separator is needed. It receives the
+    /// logical `usize` index of the separator as an `In` parameter and must return
+    /// a value of the same type as the vector's items.
+    ///
+    /// The lifecycle of the provided system is tied to the lifecycle of the returned `SignalVec`.
+    fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + SSs,
+        F: IntoSystem<In<usize>, Self::Item, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
-            let entity = LazyEntity::new();
-            let system = world.register_system(system);
-            let SignalHandle(signal) = self.for_each(clone!((entity) move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
-                let parent = entity.get();
-                let mut new_diffs = vec![];
-                for diff in diffs.into_iter() {
-                    let diff_option = match diff {
-                        VecDiff::Replace { values } => {
-                            let mut items = Vec::with_capacity(values.len());
-                            let mut new_values = vec![];
-                            for (i, value) in values.into_iter().enumerate() {
-                                if let Ok(signal) = world.run_system_with(system, value.clone()) {
-                                    let signal = spawn_filter_signal::<Self::Item>(world, i, signal, parent);
-                                    let filtered = poll_filter_signal(world, *signal);
-                                    if filtered {
-                                        new_values.push(value.clone());
+            let separator_system_id = world.register_system(separator_system);
+
+            let SignalHandle(processor_signal) = self
+                .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
+                    move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                            world: &mut World,
+                            mut local_values: Local<Vec<Self::Item>>| {
+                        let mut out_diffs = Vec::new();
+
+                        let mut separator_fn = |index: usize| {
+                            world
+                                .run_system_with(separator_system_id, index)
+                                .unwrap_or_else(|_| panic!("Separator system failed to run for index {}", index))
+                        };
+
+                        for diff in diffs {
+                            let old_len = local_values.len();
+                            match diff {
+                                VecDiff::Replace { mut values } => {
+                                    let new_len = values.len();
+                                    local_values.clear();
+                                    local_values.append(&mut values);
+
+                                    let mut interspersed = Vec::new();
+                                    if new_len > 0 {
+                                        interspersed.reserve(2 * new_len - 1);
+                                        let mut iter = local_values.iter().cloned();
+                                        interspersed.push(iter.next().unwrap());
+                                        for (i, item) in iter.enumerate() {
+                                            interspersed.push(separator_fn(i));
+                                            interspersed.push(item);
+                                        }
                                     }
-                                    items.push(FilterSignalItem {
-                                        signal,
-                                        value,
-                                        filtered,
-                                    });
+                                    out_diffs.push(VecDiff::Replace { values: interspersed });
                                 }
-                            }
-                            let old_signals = with_filter_signal_data(world, parent, |mut data| {
-                                let old_signals = data.items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>();
-                                data.items = items;
-                                data.diffs.clear();
-                                old_signals
-                            });
-                            for signal in old_signals {
-                                signal.cleanup(world);
-                            }
-                            Some(VecDiff::Replace { values: new_values })
-                        },
-                        VecDiff::InsertAt { index, value } => {
-                            if let Ok(signal) = world.run_system_with(system, value.clone()) {
-                                let signal = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
-                                let filtered = poll_filter_signal(world, *signal);
-                                let (index, increment_option) = with_filter_signal_data(world, parent, |mut data| {
-                                    data.items.insert(index, FilterSignalItem {
-                                        signal,
-                                        value: value.clone(),
-                                        filtered,
-                                    });
-                                    (find_filter_signal_index(&data.items, index), data.items.get(index+1..).map(|items| items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>()))
-                                });
-                                if let Some(increment) = increment_option {
-                                    for signal in increment {
-                                        let mut index = world.get_mut::<FilterSignalIndex>(**signal).unwrap();
-                                        **index += 1;
-                                    }
-                                }
-                                if filtered {
-                                    Some(VecDiff::InsertAt { index, value })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        },
-                        VecDiff::UpdateAt { index, value } => {
-                            if let Ok(signal) = world.run_system_with(system, value.clone()) {
-                                let signal = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
-                                let filtered = poll_filter_signal(world, *signal);
-                                let (old_signal, old_filtered, index) = with_filter_signal_data(world, parent, |mut data| {
-                                    let item = &mut data.items[index];
-                                    let old_signal = item.signal.clone();
-                                    let filtered = item.filtered;
-                                    item.signal = signal;
-                                    item.value = value.clone();
-                                    item.filtered = filtered;
-                                    (old_signal, filtered, find_filter_signal_index(&data.items, index))
-                                });
-                                old_signal.cleanup(world);
-                                if filtered {
-                                    if old_filtered {
-                                        Some(VecDiff::UpdateAt { index, value })
+                                VecDiff::InsertAt { index, value } => {
+                                    local_values.insert(index, value.clone());
+                                    if old_len == 0 {
+                                        out_diffs.push(VecDiff::Push { value });
                                     } else {
-                                        Some(VecDiff::InsertAt { index, value })
+                                        out_diffs.push(VecDiff::InsertAt { index: 2 * index, value });
+                                        if index < old_len {
+                                            out_diffs.push(VecDiff::InsertAt { index: 2 * index + 1, value: separator_fn(index) });
+                                        }
                                     }
-                                } else {
-                                    if old_filtered {
-                                        Some(VecDiff::RemoveAt { index })
+                                }
+                                VecDiff::UpdateAt { index, value } => {
+                                    local_values[index] = value.clone();
+                                    out_diffs.push(VecDiff::UpdateAt { index: 2 * index, value });
+                                }
+                                VecDiff::RemoveAt { index } => {
+                                    local_values.remove(index);
+                                    if old_len == 1 {
+                                        out_diffs.push(VecDiff::RemoveAt { index: 0 });
+                                    } else if index == old_len - 1 {
+                                        out_diffs.push(VecDiff::Pop {});
+                                        out_diffs.push(VecDiff::Pop {});
                                     } else {
-                                        None
+                                        out_diffs.push(VecDiff::RemoveAt { index: 2 * index });
+                                        out_diffs.push(VecDiff::RemoveAt { index: 2 * index });
                                     }
                                 }
-                            } else {
-                                None
-                            }
-                        },
-                        VecDiff::Push { value } => {
-                            if let Ok(signal) = world.run_system_with(system, value.clone()) {
-                                let index = with_filter_signal_data::<Self::Item, _>(world, parent, |data| data.items.len());
-                                let signal = spawn_filter_signal::<Self::Item>(world, index, signal, parent);
-                                let filtered = poll_filter_signal(world, *signal);
-                                with_filter_signal_data(world, parent, |mut data| {
-                                    data.items.push(FilterSignalItem {
-                                        signal,
-                                        value: value.clone(),
-                                        filtered,
-                                    });
-                                });
-                                if filtered {
-                                    Some(VecDiff::Push { value })
-                                } else {
-                                    None
+                                VecDiff::Move { old_index, new_index } => {
+                                    let value = local_values.remove(old_index);
+                                    local_values.insert(new_index, value.clone());
+
+                                    let mut temp_out = Vec::new();
+                                    if old_len > 1 {
+                                        if old_index == old_len - 1 {
+                                            temp_out.push(VecDiff::Pop {});
+                                            temp_out.push(VecDiff::Pop {});
+                                        } else {
+                                            temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                                            temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                                        }
+                                    }
+                                    
+                                    let current_len = local_values.len();
+                                    if current_len == 1 {
+                                        temp_out.push(VecDiff::Push { value });
+                                    } else {
+                                        temp_out.push(VecDiff::InsertAt { index: 2 * new_index, value });
+                                        if new_index < current_len - 1 {
+                                            temp_out.push(VecDiff::InsertAt { index: 2 * new_index + 1, value: separator_fn(new_index) });
+                                        }
+                                    }
+                                    out_diffs.extend(temp_out);
                                 }
-                            } else {
-                                None
-                            }
-                        },
-                        VecDiff::Move { old_index, new_index } => {
-                            if old_index != new_index {
-                                let (index_syncs, filtered, old_index, new_index) = with_filter_signal_data::<Self::Item, _>(world, parent, |mut data| {
-                                    let item = data.items.remove(old_index);
-                                    let filtered = item.filtered;
-                                    data.items.insert(new_index, item);
-                                    (data.items[old_index.min(new_index)..old_index.max(new_index)].iter().map(|item| item.signal.clone()).collect::<Vec<_>>(), filtered, find_filter_signal_index(&data.items, old_index), find_filter_signal_index(&data.items, new_index))
-                                });
-                                for (signal, new_index) in index_syncs.into_iter().zip(old_index..=new_index) {
-                                    let mut index = world.get_mut::<FilterSignalIndex>(**signal).unwrap();
-                                    **index = new_index;
+                                VecDiff::Push { value } => {
+                                    local_values.push(value.clone());
+                                    if old_len > 0 {
+                                        out_diffs.push(VecDiff::Push { value: separator_fn(old_len - 1) });
+                                    }
+                                    out_diffs.push(VecDiff::Push { value });
                                 }
-                                if filtered {
-                                    Some(VecDiff::Move { old_index, new_index })
-                                } else {
-                                    None
+                                VecDiff::Pop {} => {
+                                    local_values.pop();
+                                    if old_len > 0 { out_diffs.push(VecDiff::Pop {}); }
+                                    if old_len > 1 { out_diffs.push(VecDiff::Pop {}); }
                                 }
-                            } else {
-                                None
+                                VecDiff::Clear {} => {
+                                    local_values.clear();
+                                    out_diffs.push(VecDiff::Clear {});
+                                }
                             }
-                        },
-                        VecDiff::RemoveAt { index } => {
-                            let (signal, filtered, index) = with_filter_signal_data::<Self::Item, _>(world, parent, |mut data| {
-                                let index = find_filter_signal_index(&data.items, index);
-                                let item = data.items.remove(index);
-                                let signal = item.signal;
-                                let filtered = item.filtered;
-                                (signal, filtered, index)
-                            });
-                            signal.cleanup(world);
-                            if filtered {
-                                Some(VecDiff::RemoveAt { index })
-                            } else {
-                                None
-                            }
-                        },
-                        VecDiff::Pop {} => {
-                            let (signal, filtered) = with_filter_signal_data::<Self::Item, _>(world, parent, |mut data| {
-                                let item = data.items.pop().expect("can't pop from empty vec");
-                                let signal = item.signal;
-                                let filtered = item.filtered;
-                                (signal, filtered)
-                            });
-                            signal.cleanup(world);
-                            if filtered {
-                                Some(VecDiff::Pop {})
-                            } else {
-                                None
-                            }
-                        },
-                        VecDiff::Clear {} => {
-                            let signals = with_filter_signal_data::<Self::Item, _>(world, parent, |mut data| {
-                                let signals = data.items.drain(..).map(|item| item.signal).collect::<Vec<_>>();
-                                data.diffs.clear();
-                                signals
-                            });
-                            for signal in signals {
-                                signal.cleanup(world);
-                            }
-                            Some(VecDiff::Clear {})
-                        },
-                    };
-                    if let Some(diff) = diff_option {
-                        new_diffs.push(diff);
-                    };
-                }
-                let mut diffs = with_filter_signal_data(world, parent, |mut data| {
-                    data.diffs.drain(..).collect::<Vec<_>>()
-                });
-                diffs.extend(new_diffs);
-                diffs
-            })).register(world);
-            entity.set(*signal);
-            let SignalHandle(flusher) = SignalBuilder::from_entity(*signal)
-                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), filter_signal_datas: Query<&FilterSignalData<Self::Item>>| {
-                    if !filter_signal_datas.get(entity).unwrap().diffs.is_empty() {
-                        Some(vec![])
-                    } else {
-                        None
-                    }
-                }).register(world);
-            pipe_signal(world, flusher, signal);
+                        }
+                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                    },
+                )
+                .register(world);
+
+            // Tie the separator system's lifecycle to the main processor's lifecycle.
             world
-                .entity_mut(*signal)
-                .insert(FilterSignalData::<Self::Item> {
-                    items: vec![],
-                    diffs: vec![],
-                })
-                .add_child(system.entity());
-            signal
+                .entity_mut(*processor_signal)
+                .add_child(separator_system_id.entity());
+
+            processor_signal
         });
-        FilterSignal {
+
+        IntersperseWith {
             signal,
             _marker: PhantomData,
         }
+    }
+
+    /// Creates a new `SignalVec` which keeps its items sorted according to a comparison system.
+    ///
+    /// The provided `compare_system` takes a tuple of two items `In<(Self::Item, Self::Item)>`
+    /// and must return a `std::cmp::Ordering`. The output `SignalVec` will always contain the
+    /// same items as the source, but reordered based on the system's logic.
+    ///
+    /// The sort is stable: if the comparison system returns `Ordering::Equal`, the original
+    /// order of the equal items is preserved.
+    fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + SSs,
+        F: IntoSystem<In<(Self::Item, Self::Item)>, Ordering, M> + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let compare_system_id = world.register_system(compare_system);
+
+            struct SortState<T> {
+                values: Vec<T>,
+                sorted_indices: Vec<usize>,
+            }
+
+            impl<T> Default for SortState<T> {
+                fn default() -> Self {
+                    Self {
+                        values: Vec::new(),
+                        sorted_indices: Vec::new(),
+                    }
+                }
+            }
+
+            fn search<T: Clone + SSs>(
+                world: &mut World,
+                system_id: SystemId<In<(T, T)>, Ordering>,
+                state: &SortState<T>,
+                item_idx: usize,
+            ) -> Result<usize, usize> {
+                state.sorted_indices.binary_search_by(|&probe_idx| {
+                    let a = state.values[probe_idx].clone();
+                    let b = state.values[item_idx].clone();
+                    world
+                        .run_system_with(system_id, (a, b))
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| probe_idx.cmp(&item_idx))
+                })
+            }
+
+            let SignalHandle(signal) = self
+                .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
+                    move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                            world: &mut World,
+                            mut state: Local<SortState<Self::Item>>|
+                            -> Option<Vec<VecDiff<Self::Item>>> {
+                        let mut out_diffs = Vec::new();
+
+                        for diff in diffs {
+                            match diff {
+                                VecDiff::Replace { values: new_values } => {
+                                    state.values = new_values;
+                                    state.sorted_indices = (0..state.values.len()).collect();
+                                    
+                                    // Fix: Clone the values *before* the sort to avoid borrow conflict.
+                                    let values_for_sort = state.values.clone();
+                                    state.sorted_indices.sort_unstable_by(|&a, &b| {
+                                        let val_a = values_for_sort[a].clone();
+                                        let val_b = values_for_sort[b].clone();
+                                        world.run_system_with(compare_system_id, (val_a, val_b)).unwrap()
+                                    });
+
+                                    let sorted_values = state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
+                                    out_diffs.push(VecDiff::Replace { values: sorted_values });
+                                }
+                                VecDiff::Push { value } => {
+                                    let new_idx = state.values.len();
+                                    state.values.push(value.clone());
+                                    let insert_pos = search(world, compare_system_id, &*state, new_idx).unwrap_err();
+                                    state.sorted_indices.insert(insert_pos, new_idx);
+                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                }
+                                VecDiff::InsertAt { index, value } => {
+                                    state.values.insert(index, value.clone());
+                                    for i in state.sorted_indices.iter_mut() { if *i >= index { *i += 1; } }
+                                    let insert_pos = search(world, compare_system_id, &*state, index).unwrap_err();
+                                    state.sorted_indices.insert(insert_pos, index);
+                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                }
+                                VecDiff::RemoveAt { index } => {
+                                    // Must search *before* removing from values.
+                                    let remove_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    state.sorted_indices.remove(remove_pos);
+                                    state.values.remove(index);
+                                    for i in state.sorted_indices.iter_mut() { if *i > index { *i -= 1; } }
+                                    out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
+                                }
+                                VecDiff::UpdateAt { index, value } => {
+                                    let old_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    state.sorted_indices.remove(old_pos);
+                                    state.values[index] = value.clone();
+                                    let new_pos = search(world, compare_system_id, &*state, index).unwrap_err();
+                                    state.sorted_indices.insert(new_pos, index);
+
+                                    if old_pos == new_pos {
+                                        out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
+                                    } else {
+                                        out_diffs.push(VecDiff::Move { old_index: old_pos, new_index: new_pos });
+                                    }
+                                }
+                                VecDiff::Move { old_index, new_index } => {
+                                    let val = state.values.remove(old_index);
+                                    state.values.insert(new_index, val);
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i == old_index { *i = new_index; }
+                                        else if *i > old_index && *i <= new_index { *i -= 1; }
+                                        else if *i < old_index && *i >= new_index { *i += 1; }
+                                    }
+                                }
+                                VecDiff::Pop {} => {
+                                    let index = state.values.len() - 1;
+                                    let remove_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    state.sorted_indices.remove(remove_pos);
+                                    state.values.pop();
+                                    out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
+                                }
+                                VecDiff::Clear {} => {
+                                    state.values.clear();
+                                    state.sorted_indices.clear();
+                                    out_diffs.push(VecDiff::Clear {});
+                                }
+                            }
+                        }
+                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                    },
+                ).register(world);
+
+            world.entity_mut(*signal).add_child(compare_system_id.entity());
+            signal
+        });
+
+        SortBy {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    // /// Sorts the `SignalVec` with a key extraction system, preserving the initial order of equal elements.
+    // ///
+    // /// The provided `key_extraction_system` takes an item `In<Self::Item>` and must return a key
+    // /// `K` that implements `Ord`. The output `SignalVec` will be sorted based on this key.
+    // ///
+    // /// This is generally more efficient than `sort_by` if the key extraction is a non-trivial operation,
+    // /// as the system is run only once per item change, rather than on every comparison.
+    fn sort_by_key<K, F, M>(self, key_extraction_system: F) -> SortByKey<Self>
+        where
+            Self: Sized,
+            Self::Item: Clone + SSs,
+            K: Ord + Clone + SSs,
+            F: IntoSystem<In<Self::Item>, K, M> + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let key_system_id = world.register_system(key_extraction_system);
+
+            struct SortState<T, K> {
+                values: Vec<T>,
+                keys: Vec<K>,
+                sorted_indices: Vec<usize>,
+            }
+
+            impl<T, K> Default for SortState<T, K> {
+                fn default() -> Self {
+                    Self {
+                        values: Vec::new(),
+                        keys: Vec::new(),
+                        sorted_indices: Vec::new(),
+                    }
+                }
+            }
+
+            fn search<T, K: Ord>(state: &SortState<T, K>, item_idx: usize) -> Result<usize, usize> {
+                state.sorted_indices.binary_search_by(|&probe_idx| {
+                    state.keys[probe_idx].cmp(&state.keys[item_idx])
+                        .then_with(|| probe_idx.cmp(&item_idx))
+                })
+            }
+
+            let SignalHandle(signal) = self
+                // Fix 1: Add turbofish to specify the generic type for `for_each`.
+                .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
+                    move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                            world: &mut World,
+                            mut state: Local<SortState<Self::Item, K>>|
+                            -> Option<Vec<VecDiff<Self::Item>>> {
+                        let mut out_diffs = Vec::new();
+
+                        let get_key = |world: &mut World, value: Self::Item| {
+                            world.run_system_with(key_system_id, value).unwrap()
+                        };
+
+                        for diff in diffs {
+                            match diff {
+                                VecDiff::Replace { values: new_values } => {
+                                    state.values = new_values;
+                                    state.keys = state.values.iter().map(|v| get_key(world, v.clone())).collect();
+                                    state.sorted_indices = (0..state.values.len()).collect();
+
+                                    // Fix 2: Clone keys before sorting to avoid mutable/immutable borrow conflict.
+                                    let keys_for_sort = state.keys.clone();
+                                    state.sorted_indices.sort_unstable_by(|&a, &b| {
+                                        keys_for_sort[a].cmp(&keys_for_sort[b])
+                                    });
+
+                                    let sorted_values = state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
+                                    out_diffs.push(VecDiff::Replace { values: sorted_values });
+                                }
+                                VecDiff::Push { value } => {
+                                    let new_idx = state.values.len();
+                                    let key = get_key(world, value.clone());
+                                    state.values.push(value.clone());
+                                    state.keys.push(key);
+                                    let insert_pos = search(&*state, new_idx).unwrap_err();
+                                    state.sorted_indices.insert(insert_pos, new_idx);
+                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                }
+                                VecDiff::InsertAt { index, value } => {
+                                    let key = get_key(world, value.clone());
+                                    state.values.insert(index, value.clone());
+                                    state.keys.insert(index, key);
+                                    for i in state.sorted_indices.iter_mut() { if *i >= index { *i += 1; } }
+                                    let insert_pos = search(&*state, index).unwrap_err();
+                                    state.sorted_indices.insert(insert_pos, index);
+                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                }
+                                VecDiff::RemoveAt { index } => {
+                                    let remove_pos = search(&*state, index).unwrap();
+                                    state.sorted_indices.remove(remove_pos);
+                                    state.values.remove(index);
+                                    state.keys.remove(index);
+                                    for i in state.sorted_indices.iter_mut() { if *i > index { *i -= 1; } }
+                                    out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
+                                }
+                                VecDiff::UpdateAt { index, value } => {
+                                    let old_pos = search(&*state, index).unwrap();
+                                    state.sorted_indices.remove(old_pos);
+                                    let new_key = get_key(world, value.clone());
+                                    state.values[index] = value.clone();
+                                    state.keys[index] = new_key;
+                                    let new_pos = search(&*state, index).unwrap_err();
+                                    state.sorted_indices.insert(new_pos, index);
+
+                                    if old_pos == new_pos {
+                                        out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
+                                    } else {
+                                        out_diffs.push(VecDiff::Move { old_index: old_pos, new_index: new_pos });
+                                    }
+                                }
+                                VecDiff::Move { old_index, new_index } => {
+                                    let val = state.values.remove(old_index);
+                                    state.values.insert(new_index, val);
+                                    let key = state.keys.remove(old_index);
+                                    state.keys.insert(new_index, key);
+
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i == old_index { *i = new_index; }
+                                        else if *i > old_index && *i <= new_index { *i -= 1; }
+                                        else if *i < old_index && *i >= new_index { *i += 1; }
+                                    }
+                                }
+                                VecDiff::Pop {} => {
+                                    let index = state.values.len() - 1;
+                                    let remove_pos = search(&*state, index).unwrap();
+                                    state.sorted_indices.remove(remove_pos);
+                                    state.values.pop();
+                                    state.keys.pop();
+                                    out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
+                                }
+                                VecDiff::Clear {} => {
+                                    state.values.clear();
+                                    state.keys.clear();
+                                    state.sorted_indices.clear();
+                                    out_diffs.push(VecDiff::Clear {});
+                                }
+                            }
+                        }
+                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                    },
+                ).register(world);
+
+            world.entity_mut(*signal).add_child(key_system_id.entity());
+            signal
+        });
+
+        SortByKey {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>> where Self: Sized
+    {
+        Box::new(self)
     }
 
     /// Registers all the systems defined in this `SignalVec` chain into the Bevy `World`.
@@ -1249,7 +2367,7 @@ pub trait SignalVecExt: SignalVec {
     }
 }
 
-impl<T> SignalVecExt for T where T: SignalVec {}
+impl<T: ?Sized> SignalVecExt for T where T: SignalVec {}
 
 //-------------------------------------------------------------------------------------------------
 // Lock Guards

@@ -205,7 +205,7 @@ where
                 .map(|o| Box::new(o) as Box<dyn AnyClone>),
             Err(error) => {
                 error!(
-                    "Failed to downcast input for system {:?}: {:?}",
+                    "Failed to downcast input to type for system {:?}: {:?}",
                     self.system, error
                 );
                 None

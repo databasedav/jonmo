@@ -1,7 +1,7 @@
 use super::{tree::*, utils::*};
 use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
-use bevy_platform::sync::{Arc, Mutex};
+use bevy_platform::{prelude::*, sync::{Arc, Mutex}};
 use bevy_time::{Time, Timer, TimerMode};
 use core::{fmt, marker::PhantomData, ops, time::Duration};
 
@@ -14,14 +14,37 @@ use core::{fmt, marker::PhantomData, ops, time::Duration};
 /// This trait defines the fundamental behavior of a signal, including its output type
 /// and the mechanism for registering its underlying systems in the Bevy `World`.
 pub trait Signal: SSs {
-    /// The output type
+    /// The output type of the signal.
     type Item;
 
-    /// Registers the systems associated with this node and its predecessors in the `World`.
-    /// Returns a [`SignalHandle`] containing the entities of *all* systems
-    /// registered or reference-counted during this specific registration call instance.
-    /// **Note:** This method is intended for internal use by the signal combinators and registration process.
-    fn register_signal(self, world: &mut World) -> SignalHandle; // Changed return type
+    /// Registers the systems associated with this signal by consuming its boxed form.
+    ///
+    /// This method is object-safe and is the core registration logic used for dynamic dispatch.
+    /// All concrete signal types must implement this method.
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle;
+
+    /// Registers the systems associated with this signal.
+    ///
+    /// This is a convenience method for `Sized` types that automatically boxes the signal.
+    fn register_signal(self, world: &mut World) -> SignalHandle
+    where
+        Self: Sized,
+    {
+        self.boxed().register_boxed_signal(world)
+    }
+}
+
+impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
+    type Item = U;
+
+    /// The `self` in this context is of type `Box<Box<dyn Signal<...>>>`.
+    /// We unbox it once to get the `Box<dyn Signal<...>>` and then call its
+    /// `register_boxed` method, which will be dynamically dispatched to the
+    /// concrete type's implementation.
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        let inner_box: Box<dyn Signal<Item = U> + Send + Sync> = *self;
+        inner_box.register_boxed_signal(world)
+    }
 }
 
 // --- Signal Node Structs ---
@@ -42,7 +65,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         SignalHandle::new(self.signal.register(world))
     }
 }
@@ -67,7 +90,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         let SignalHandle(upstream) = self.upstream.register(world);
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
@@ -92,7 +115,7 @@ where
 {
     type Item = C;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -113,7 +136,7 @@ where
 {
     type Item = Option<C>;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -135,7 +158,7 @@ where
 {
     type Item = bool;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -158,7 +181,7 @@ where
 {
     type Item = Upstream::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -180,7 +203,7 @@ where
 {
     type Item = Upstream::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -209,7 +232,7 @@ where
 {
     type Item = (Left::Item, Right::Item);
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         let SignalHandle(left_upstream) = self.left_wrapper.register(world);
         let SignalHandle(right_upstream) = self.right_wrapper.register(world);
         let signal = self.signal.register(world);
@@ -243,7 +266,7 @@ where
 {
     type Item = <Upstream::Item as Signal>::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -264,7 +287,7 @@ where
 {
     type Item = bool;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -285,7 +308,7 @@ where
 {
     type Item = bool;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -311,7 +334,7 @@ where
 {
     type Item = <Upstream::Item as ops::Not>::Output;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -333,7 +356,7 @@ where
 {
     type Item = Upstream::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -362,7 +385,7 @@ where
 {
     type Item = Other::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -385,7 +408,7 @@ where
 {
     type Item = Upstream::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -403,7 +426,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -424,7 +447,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -444,7 +467,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -467,7 +490,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -487,7 +510,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -507,7 +530,7 @@ where
 {
     type Item = O;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -530,7 +553,7 @@ where
 {
     type Item = Upstream::Item;
 
-    fn register_signal(self, world: &mut World) -> SignalHandle {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
     }
 }
@@ -702,8 +725,8 @@ where
     R: Signal<Item = T>,
 {
     type Item = T;
-    fn register_signal(self, world: &mut World) -> SignalHandle {
-        match self {
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        match *self {
             SignalEither::Left(left) => left.register_signal(world),
             SignalEither::Right(right) => right.register_signal(world),
         }
@@ -1638,12 +1661,10 @@ pub trait SignalExt: Signal {
         }
     }
 
-    // TODO: how ??
-    // fn type_erase(self) -> Arc<dyn Signal<Item = Self::Item> + Send + Sync + 'static>
-    //     where Self: Sized
-    // {
-    //     Arc::new(self)
-    // }
+    fn boxed(self) -> Box<dyn Signal<Item = Self::Item>> where Self: Sized
+    {
+        Box::new(self)
+    }
 
     /// Registers all the systems defined in this signal chain into the Bevy `World`.
     ///
@@ -1667,7 +1688,7 @@ pub trait SignalExt: Signal {
     }
 }
 
-impl<T> SignalExt for T where T: Signal {}
+impl<T: ?Sized> SignalExt for T where T: Signal {}
 
 #[cfg(test)]
 mod tests {

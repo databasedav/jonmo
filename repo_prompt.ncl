@@ -28,7 +28,9 @@ let prompt = import "repo_prompt_input.md" as 'Text in
 
 {
     output | Output = m%"
-        here is the structure of the repository with the contents of each file:
+        %{ prompt }
+
+        jonmo is a functional reactive signals implementation in rust for the bevy game engine; here is the structure of the jonmo repository with the contents of each file:
         .
         ├── examples/
         │   ├── basic_builder.rs
@@ -45,7 +47,5 @@ let prompt = import "repo_prompt_input.md" as 'Text in
             └── utils.rs
 
         %{ repo_structure |> std.record.map (fun k v => "%{ k }\n```rust\n%{ v }\n```") |> std.record.values |> std.string.join "\n\n" }
-
-        %{ prompt }
     "%
 }
