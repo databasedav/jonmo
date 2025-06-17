@@ -1,1 +1,0 @@
-port futures-signals' SignalVec::chain to jonmo, use jonmo's implementation of SignalVec::filter_signal as a reference for what sorta porting translation is required, futures-signals' signal_vec.rs is attached for your reference

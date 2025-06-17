@@ -13,7 +13,8 @@ use bevy_platform::{
     collections::{HashMap, HashSet},
     prelude::*,
     sync::{
-        atomic::{AtomicUsize, Ordering}, Arc, LazyLock, Mutex, RwLock
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use core::{any::Any, hash::Hash, marker::PhantomData};
@@ -124,7 +125,7 @@ fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem)
         return true;
     }
 
-    let mut stack   = vec![target];
+    let mut stack = vec![target];
     let mut visited = HashSet::new();
 
     while let Some(node) = stack.pop() {
@@ -216,9 +217,6 @@ where
 
 impl SystemRunner {
     /// Executes the stored system function with the given type-erased input.
-    ///
-    /// Takes the `World` and a `Box<dyn PartialReflect>` input, runs the system,
-    /// and returns an optional `Box<dyn PartialReflect>` output.
     pub(crate) fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
         (self.runner)(world, input)
     }

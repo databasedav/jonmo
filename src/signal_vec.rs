@@ -1,10 +1,11 @@
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
+use bevy_log::debug;
 use bevy_platform::{
     prelude::*,
-    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-use core::{any::Any, fmt::Debug, marker::PhantomData, ops::Deref, cmp::Ordering};
+use core::{any::Any, cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
 
 use super::{signal::*, tree::*, utils::*};
 
@@ -12,7 +13,6 @@ use super::{signal::*, tree::*, utils::*};
 ///
 /// This is used by [`SignalVec`] to efficiently represent changes.
 pub enum VecDiff<T> {
-    // Add PartialEq bound
     /// Replaces the entire contents of the `Vec`.
     Replace {
         /// The new values for the vector.
@@ -53,7 +53,6 @@ pub enum VecDiff<T> {
     Pop,
     /// Removes all items from the `Vec`.
     Clear,
-    // NOTE: futures-signals has Truncate, but it's less common and can be represented by multiple RemoveAt/Pop.
 }
 
 impl<T> Clone for VecDiff<T>
@@ -91,9 +90,9 @@ where
     }
 }
 
-impl<T> Debug for VecDiff<T>
+impl<T> fmt::Debug for VecDiff<T>
 where
-    T: Debug,
+    T: fmt::Debug,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -138,7 +137,10 @@ pub trait SignalVec: SSs {
     /// Returns a [`SignalHandle`] containing the entities of *all* systems
     /// registered or reference-counted during this specific registration call instance.
     /// **Note:** This method is intended for internal use by the signal combinators and registration process.
-    fn register_signal_vec(self, world: &mut World) -> SignalHandle where Self: Sized {
+    fn register_signal_vec(self, world: &mut World) -> SignalHandle
+    where
+        Self: Sized,
+    {
         self.boxed().register_boxed_signal_vec(world)
     }
 }
@@ -243,13 +245,20 @@ where
     }
 }
 
-struct MapSignalItem<S: Signal> where S::Item: Send + Sync {
+struct MapSignalItem<S: Signal>
+where
+    S::Item: Send + Sync,
+{
     signal: SignalHandle,
     current_value: S::Item,
 }
 
 #[derive(Component)]
-struct MapSignalData<T, S: Signal> where T: 'static, S::Item: Send + Sync {
+struct MapSignalData<T, S: Signal>
+where
+    T: 'static,
+    S::Item: Send + Sync,
+{
     items: Vec<MapSignalItem<S>>,
     diffs: Vec<VecDiff<S::Item>>,
     system: SystemId<In<T>, S>,
@@ -259,7 +268,11 @@ fn with_map_signal_data<T: SSs, S: Signal, O>(
     world: &mut World,
     entity: Entity,
     f: impl FnOnce(Mut<MapSignalData<T, S>>) -> O,
-) -> O where S::Item: Send + Sync { // Added bound
+) -> O
+where
+    S::Item: Send + Sync,
+{
+    // Added bound
     let data = world.get_mut::<MapSignalData<T, S>>(entity).unwrap();
     f(data)
 }
@@ -313,17 +326,25 @@ where
     // 3. Register the new mapped_signal. The handle now refers to the processor node.
     let processor_handle = mapped_signal.register(world);
     entity.set(**processor_handle);
-    world.entity_mut(**processor_handle).insert(MapSignalIndex(index));
-    
+    world
+        .entity_mut(**processor_handle)
+        .insert(MapSignalIndex(index));
+
     // 4. To get the initial value, we need to poll the *upstream* of our new processor node.
     // The upstream is the original inner signal (`signal`).
-    let upstream_handle = world.get::<Upstream>(**processor_handle).unwrap().iter().next().cloned().unwrap();
+    let upstream_handle = world
+        .get::<Upstream>(**processor_handle)
+        .unwrap()
+        .iter()
+        .next()
+        .cloned()
+        .unwrap();
 
     let initial_value = poll_signal(world, upstream_handle)
         .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<S::Item>().ok())
         .map(|boxed| *boxed)
         .expect("map_signal's inner signal must emit an initial value upon registration");
-    
+
     // 5. The handle for the entire inner chain is the processor handle. Cleaning it up
     // will correctly cascade to the original inner signal.
     (processor_handle, initial_value)
@@ -566,11 +587,7 @@ struct FilterSignalIndex(usize);
 fn create_filter_signal_processor<T: Clone + SSs>(
     parent: Entity,
     entity: LazyEntity,
-) -> impl Fn(
-    In<bool>,
-    Query<&FilterSignalIndex>,
-    Query<&mut FilterSignalData<T>>,
-) {
+) -> impl Fn(In<bool>, Query<&FilterSignalIndex>, Query<&mut FilterSignalData<T>>) {
     move |In(filter),
           filter_signal_indices: Query<&FilterSignalIndex>,
           mut filter_signal_datas: Query<&mut FilterSignalData<T>>| {
@@ -591,16 +608,18 @@ fn create_filter_signal_processor<T: Clone + SSs>(
             if let Some(signal) = filter_signal_data.items.get_mut(index) {
                 signal.filtered = filter;
             }
-            filter_signal_data.diffs.push(if let Some(value) = value_option {
-                VecDiff::InsertAt {
-                    index: filtered_index,
-                    value,
-                }
-            } else {
-                VecDiff::RemoveAt {
-                    index: filtered_index,
-                }
-            });
+            filter_signal_data
+                .diffs
+                .push(if let Some(value) = value_option {
+                    VecDiff::InsertAt {
+                        index: filtered_index,
+                        value,
+                    }
+                } else {
+                    VecDiff::RemoveAt {
+                        index: filtered_index,
+                    }
+                });
         }
     }
 }
@@ -623,9 +642,21 @@ fn spawn_filter_signal<T: Clone + SSs>(
 
     // To get the initial value, we must poll the original signal before the map/dedupe.
     // The upstream of the `map` node is the `dedupe` node.
-    let dedupe_handle = world.get::<Upstream>(**handle).unwrap().iter().next().cloned().unwrap();
+    let dedupe_handle = world
+        .get::<Upstream>(**handle)
+        .unwrap()
+        .iter()
+        .next()
+        .cloned()
+        .unwrap();
     // The upstream of the `dedupe` node is the original signal.
-    let original_signal_handle = world.get::<Upstream>(*dedupe_handle).unwrap().iter().next().cloned().unwrap();
+    let original_signal_handle = world
+        .get::<Upstream>(*dedupe_handle)
+        .unwrap()
+        .iter()
+        .next()
+        .cloned()
+        .unwrap();
 
     let initial_value = poll_signal(world, original_signal_handle)
         .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<bool>().ok())
@@ -652,10 +683,13 @@ where
     }
 }
 
-fn index_signal_from_index(
-    index: Arc<Mutex<Option<usize>>>,
-) -> Dedupe<super::signal::Source<Option<usize>>> {
-    SignalBuilder::from_system(move |_: In<_>| *index.lock().unwrap()).dedupe()
+#[derive(Component, Deref, DerefMut, Clone)]
+pub struct EnumeratedIndex(usize);
+
+fn index_signal_from_entity(
+    entity: Entity,
+) -> Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>> {
+    SignalBuilder::from_component_option::<EnumeratedIndex>(entity).map(|In(opt): In<Option<EnumeratedIndex>>| opt.map(|c| c.0)).dedupe()
 }
 
 #[derive(Clone)]
@@ -665,7 +699,7 @@ where
 {
     signal: ForEach<
         Upstream,
-        Vec<VecDiff<(Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item)>>,
+        Vec<VecDiff<(Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>>, Upstream::Item)>>,
     >,
 }
 
@@ -673,7 +707,7 @@ impl<Upstream> SignalVec for Enumerate<Upstream>
 where
     Upstream: SignalVec,
 {
-    type Item = (Dedupe<super::signal::Source<Option<usize>>>, Upstream::Item);
+    type Item = (Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>>, Upstream::Item);
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
@@ -827,7 +861,7 @@ pub struct IntersperseWith<Upstream> {
 
 impl<Upstream> SignalVec for IntersperseWith<Upstream>
 where
-    Upstream: SignalVec
+    Upstream: SignalVec,
 {
     type Item = Upstream::Item;
 
@@ -845,7 +879,7 @@ pub struct SortBy<Upstream> {
 
 impl<Upstream> SignalVec for SortBy<Upstream>
 where
-    Upstream: SignalVec
+    Upstream: SignalVec,
 {
     type Item = Upstream::Item;
 
@@ -905,33 +939,82 @@ fn create_flatten_processor<O: Clone + SSs>(
         if let Ok(mut parent_data) = query_parent_data.get_mut(parent) {
             // Use .get_single().ok()
             if let Ok(&FlattenInnerIndex(self_index)) = query_self_index.single() {
-                if self_index >= parent_data.items.len() { return; }
-                let offset: usize = parent_data.items[..self_index].iter().map(|item| item.values.len()).sum();
-                
+                if self_index >= parent_data.items.len() {
+                    return;
+                }
+                let offset: usize = parent_data.items[..self_index]
+                    .iter()
+                    .map(|item| item.values.len())
+                    .sum();
+
                 for diff in diffs {
                     let apply_and_queue = |pd: &mut Mut<FlattenData<O>>, d: VecDiff<O>| {
                         let translated_diff = match d {
                             VecDiff::Replace { values } => {
                                 let old_len = pd.items[self_index].values.len();
-                                for _ in 0..old_len { pd.diffs.push(VecDiff::RemoveAt { index: offset }); }
-                                for (i, v) in values.iter().enumerate() { pd.diffs.push(VecDiff::InsertAt { index: offset + i, value: v.clone() }); }
+                                for _ in 0..old_len {
+                                    pd.diffs.push(VecDiff::RemoveAt { index: offset });
+                                }
+                                for (i, v) in values.iter().enumerate() {
+                                    pd.diffs.push(VecDiff::InsertAt {
+                                        index: offset + i,
+                                        value: v.clone(),
+                                    });
+                                }
                                 pd.items[self_index].values = values;
                                 return;
                             }
-                            VecDiff::InsertAt { index, value } => { pd.items[self_index].values.insert(index, value.clone()); VecDiff::InsertAt { index: index + offset, value } }
-                            VecDiff::UpdateAt { index, value } => { pd.items[self_index].values[index] = value.clone(); VecDiff::UpdateAt { index: index + offset, value } }
-                            VecDiff::RemoveAt { index } => { pd.items[self_index].values.remove(index); VecDiff::RemoveAt { index: index + offset } }
-                            VecDiff::Move { old_index, new_index } => {
+                            VecDiff::InsertAt { index, value } => {
+                                pd.items[self_index].values.insert(index, value.clone());
+                                VecDiff::InsertAt {
+                                    index: index + offset,
+                                    value,
+                                }
+                            }
+                            VecDiff::UpdateAt { index, value } => {
+                                pd.items[self_index].values[index] = value.clone();
+                                VecDiff::UpdateAt {
+                                    index: index + offset,
+                                    value,
+                                }
+                            }
+                            VecDiff::RemoveAt { index } => {
+                                pd.items[self_index].values.remove(index);
+                                VecDiff::RemoveAt {
+                                    index: index + offset,
+                                }
+                            }
+                            VecDiff::Move {
+                                old_index,
+                                new_index,
+                            } => {
                                 let val = pd.items[self_index].values.remove(old_index);
                                 pd.items[self_index].values.insert(new_index, val);
-                                VecDiff::Move { old_index: old_index + offset, new_index: new_index + offset }
+                                VecDiff::Move {
+                                    old_index: old_index + offset,
+                                    new_index: new_index + offset,
+                                }
                             }
-                            VecDiff::Push { value } => { let old_len = pd.items[self_index].values.len(); pd.items[self_index].values.push(value.clone()); VecDiff::InsertAt { index: offset + old_len, value } }
-                            VecDiff::Pop => { pd.items[self_index].values.pop(); VecDiff::RemoveAt { index: offset + pd.items[self_index].values.len() } }
+                            VecDiff::Push { value } => {
+                                let old_len = pd.items[self_index].values.len();
+                                pd.items[self_index].values.push(value.clone());
+                                VecDiff::InsertAt {
+                                    index: offset + old_len,
+                                    value,
+                                }
+                            }
+                            VecDiff::Pop => {
+                                pd.items[self_index].values.pop();
+                                VecDiff::RemoveAt {
+                                    index: offset + pd.items[self_index].values.len(),
+                                }
+                            }
                             VecDiff::Clear {} => {
                                 let old_len = pd.items[self_index].values.len();
                                 pd.items[self_index].values.clear();
-                                for _ in 0..old_len { pd.diffs.push(VecDiff::RemoveAt { index: offset }); }
+                                for _ in 0..old_len {
+                                    pd.diffs.push(VecDiff::RemoveAt { index: offset });
+                                }
                                 return;
                             }
                         };
@@ -963,8 +1046,10 @@ fn spawn_flatten_item<O: Clone + SSs>(
     // Use the original signal for the persistent processor.
     let processor_system = create_flatten_processor(parent);
     let processor_handle = inner_signal.for_each(processor_system).register(world);
-    world.entity_mut(**processor_handle).insert(FlattenInnerIndex(index)); // Correct deref
-    
+    world
+        .entity_mut(**processor_handle)
+        .insert(FlattenInnerIndex(index)); // Correct deref
+
     let item = FlattenItem {
         processor_handle,
         values: initial_values.clone(),
@@ -972,7 +1057,6 @@ fn spawn_flatten_item<O: Clone + SSs>(
     };
     (item, initial_values)
 }
-
 
 /// A node that flattens a `SignalVec` of `SignalVec`s.
 #[derive(Clone)]
@@ -991,6 +1075,25 @@ where
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         register_non_source_signal_vec(world, self.signal)
+    }
+}
+
+#[derive(Clone)]
+pub struct Debug<Upstream>
+where
+    Upstream: SignalVec,
+{
+    pub(crate) signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+}
+
+impl<Upstream> SignalVec for Debug<Upstream>
+where
+    Upstream: SignalVec,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
     }
 }
 
@@ -1262,11 +1365,17 @@ pub trait SignalVecExt: SignalVec {
             parent_entity.set(*output_signal);
 
             let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
-                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), data: Query<&MapSignalData<Self::Item, S>>| {
-                    data.get(entity).ok().and_then(|data| {
-                        if !data.diffs.is_empty() { Some(vec![]) } else { None }
-                    })
-                })
+                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(
+                    |In(entity), data: Query<&MapSignalData<Self::Item, S>>| {
+                        data.get(entity).ok().and_then(|data| {
+                            if !data.diffs.is_empty() {
+                                Some(vec![])
+                            } else {
+                                None
+                            }
+                        })
+                    },
+                )
                 .register(world);
 
             pipe_signal(world, flusher, output_signal);
@@ -1493,7 +1602,7 @@ pub trait SignalVecExt: SignalVec {
                                     let items_to_update = data.items.iter().map(|item| item.signal.clone()).collect::<Vec<_>>();
                                     (filtered, old_filtered_index, new_filtered_index, items_to_update)
                                 });
-                                
+
                                 // Now that the borrow from with_filter_signal_data is over, we can mutably access world.
                                 for (i, signal) in items_to_update.into_iter().enumerate() {
                                     if let Some(mut signal_index) = world.get_mut::<FilterSignalIndex>(**signal) {
@@ -1525,13 +1634,19 @@ pub trait SignalVecExt: SignalVec {
 
             parent_entity.set(*output_signal);
             let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
-                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(|In(entity), filter_signal_datas: Query<&FilterSignalData<Self::Item>>| {
-                    if let Ok(data) = filter_signal_datas.get(entity) {
-                        if !data.diffs.is_empty() { Some(vec![]) } else { None }
-                    } else {
-                        None
-                    }
-                })
+                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(
+                    |In(entity), filter_signal_datas: Query<&FilterSignalData<Self::Item>>| {
+                        if let Ok(data) = filter_signal_datas.get(entity) {
+                            if !data.diffs.is_empty() {
+                                Some(vec![])
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    },
+                )
                 .register(world);
             pipe_signal(world, flusher, output_signal);
             world
@@ -1554,105 +1669,103 @@ pub trait SignalVecExt: SignalVec {
         Self: Sized,
         Self::Item: Clone + 'static,
     {
-        fn increment_indices(range: &[Arc<Mutex<Option<usize>>>]) {
-            for index in range {
-                let mut guard = index.lock().unwrap();
-                *guard = guard.as_ref().map(|value| value + 1)
-            }
-        }
-
-        fn decrement_indices(range: &[Arc<Mutex<Option<usize>>>]) {
-            for index in range {
-                let mut guard = index.lock().unwrap();
-                *guard = guard.as_ref().map(|value| value - 1)
-            }
-        }
+        // The inner system that manages the index entities.
         let signal = self.for_each(
-            |In(diffs), mut indices: Local<Vec<Arc<Mutex<Option<usize>>>>>| {
-                let mut output = vec![];
+            |In(diffs): In<Vec<VecDiff<Self::Item>>>,
+                world: &mut World,
+                mut index_entities: Local<Vec<Entity>>|
+            {
+                let mut out_diffs = vec![];
+
                 for diff in diffs {
-                    let diff = match diff {
+                    match diff {
                         VecDiff::Replace { values } => {
-                            for signal in indices.drain(..) {
-                                signal.lock().unwrap().take();
+                            // Despawn all old entities.
+                            for entity in index_entities.drain(..) {
+                                if let Ok(entity) = world.get_entity_mut(entity) {
+                                    entity.despawn();
+                                }
                             }
-                            *indices = Vec::with_capacity(values.len());
-                            VecDiff::Replace {
-                                values: values
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, value)| {
-                                        let index = Arc::new(Mutex::new(Some(index)));
-                                        indices.push(index.clone());
-                                        (index_signal_from_index(index), value)
-                                    })
-                                    .collect(),
+                            
+                            let mut new_values = Vec::with_capacity(values.len());
+                            for (i, value) in values.into_iter().enumerate() {
+                                let entity = world.spawn(EnumeratedIndex(i)).id();
+                                index_entities.push(entity);
+                                new_values.push((index_signal_from_entity(entity), value));
                             }
+                            out_diffs.push(VecDiff::Replace { values: new_values });
                         }
-                        VecDiff::InsertAt { index: i, value } => {
-                            let index = Arc::new(Mutex::new(Some(i)));
-                            indices.insert(i, index.clone());
-                            increment_indices(&indices[(i + 1)..]);
-                            VecDiff::InsertAt {
-                                index: i,
-                                value: (index_signal_from_index(index), value),
+                        VecDiff::InsertAt { index, value } => {
+                            let entity = world.spawn(EnumeratedIndex(index)).id();
+                            index_entities.insert(index, entity);
+
+                            // Increment indices of all subsequent items.
+                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(index + 1) {
+                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                                    component.0 = i;
+                                }
                             }
+
+                            out_diffs.push(VecDiff::InsertAt { index, value: (index_signal_from_entity(entity), value) });
                         }
-                        VecDiff::UpdateAt { index, value } => VecDiff::UpdateAt {
-                            index,
-                            value: (index_signal_from_index(indices[index].clone()), value),
-                        },
+                        VecDiff::UpdateAt { index, value } => {
+                            let entity = index_entities[index];
+                            out_diffs.push(VecDiff::UpdateAt { index, value: (index_signal_from_entity(entity), value) });
+                        }
+                        VecDiff::RemoveAt { index } => {
+                            let entity = index_entities.remove(index);
+                            if let Ok(entity) = world.get_entity_mut(entity) {
+                                entity.despawn();
+                            }
+                            
+                            // Decrement indices of all subsequent items.
+                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(index) {
+                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                                    component.0 = i;
+                                }
+                            }
+                            out_diffs.push(VecDiff::RemoveAt { index });
+                        }
+                        VecDiff::Move { old_index, new_index } => {
+                            let entity = index_entities.remove(old_index);
+                            index_entities.insert(new_index, entity);
+
+                            // Update all indices between the move points.
+                            let start = old_index.min(new_index);
+                            let end = old_index.max(new_index) + 1;
+                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(start).take(end - start) {
+                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                                    component.0 = i;
+                                }
+                            }
+                            out_diffs.push(VecDiff::Move { old_index, new_index });
+                        }
                         VecDiff::Push { value } => {
-                            let index = Arc::new(Mutex::new(Some(indices.len())));
-                            indices.push(index.clone());
-                            VecDiff::Push {
-                                value: (index_signal_from_index(index), value),
-                            }
-                        }
-                        VecDiff::Move {
-                            old_index,
-                            new_index,
-                        } => {
-                            let index = indices.remove(old_index);
-                            indices.insert(new_index, index.clone());
-                            if old_index < new_index {
-                                decrement_indices(&indices[old_index..new_index]);
-                            } else if new_index < old_index {
-                                increment_indices(&indices[(new_index + 1)..(old_index + 1)]);
-                            }
-                            *index.lock().unwrap() = Some(new_index);
-                            VecDiff::Move {
-                                old_index,
-                                new_index,
-                            }
-                        }
-                        VecDiff::RemoveAt { index: i } => {
-                            let index = indices.remove(i);
-                            decrement_indices(&indices[i..]);
-                            *index.lock().unwrap() = None;
-                            VecDiff::RemoveAt { index: i }
+                            let index = index_entities.len();
+                            let entity = world.spawn(EnumeratedIndex(index)).id();
+                            index_entities.push(entity);                                
+                            out_diffs.push(VecDiff::Push { value: (index_signal_from_entity(entity), value) });
                         }
                         VecDiff::Pop {} => {
-                            let index = indices.pop().expect("can't pop from empty vec");
-                            *index.lock().unwrap() = None;
-                            VecDiff::Pop {}
-                        }
-
-                        VecDiff::Clear {} => {
-                            for index in indices.drain(..) {
-                                *index.lock().unwrap() = None;
+                            if let Some(entity) = index_entities.pop() {
+                                if let Ok(entity) = world.get_entity_mut(entity) {
+                                    entity.despawn();
+                                }
+                                out_diffs.push(VecDiff::Pop {});
                             }
-                            VecDiff::Clear {}
                         }
-                    };
-                    output.push(diff);
+                        VecDiff::Clear {} => {
+                            for entity in index_entities.drain(..) {
+                                if let Ok(entity) = world.get_entity_mut(entity) {
+                                    entity.despawn();
+                                }
+                            }
+                            out_diffs.push(VecDiff::Clear {});
+                        }
+                    }
                 }
-                if output.is_empty() {
-                    None
-                } else {
-                    Some(output)
-                }
-            },
+                if out_diffs.is_empty() { None } else { Some(out_diffs) }
+            }
         );
         Enumerate { signal }
     }
@@ -1789,8 +1902,14 @@ pub trait SignalVecExt: SignalVec {
                             VecDiff::UpdateAt { index, value } => {
                                 out_diffs.push(VecDiff::UpdateAt { index, value });
                             }
-                            VecDiff::Move { old_index, new_index } => {
-                                out_diffs.push(VecDiff::Move { old_index, new_index });
+                            VecDiff::Move {
+                                old_index,
+                                new_index,
+                            } => {
+                                out_diffs.push(VecDiff::Move {
+                                    old_index,
+                                    new_index,
+                                });
                             }
                             VecDiff::RemoveAt { index } => {
                                 *left_len -= 1;
@@ -1929,7 +2048,7 @@ pub trait SignalVecExt: SignalVec {
     {
         let signal = self.for_each(
             move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                    mut local_values: Local<Vec<Self::Item>>| {
+                  mut local_values: Local<Vec<Self::Item>>| {
                 let mut out_diffs = Vec::new();
 
                 for diff in diffs {
@@ -1937,7 +2056,7 @@ pub trait SignalVecExt: SignalVec {
                     match diff {
                         VecDiff::Replace { mut values } => {
                             let new_len = values.len();
-                            
+
                             // Correctly set the new state *first*.
                             local_values.clear();
                             local_values.append(&mut values);
@@ -1953,7 +2072,9 @@ pub trait SignalVecExt: SignalVec {
                                     interspersed.push(item);
                                 }
                             }
-                            out_diffs.push(VecDiff::Replace { values: interspersed });
+                            out_diffs.push(VecDiff::Replace {
+                                values: interspersed,
+                            });
 
                             // The buggy line `*local_values = values;` is removed.
                             // `local_values` now correctly holds the state for the next diff.
@@ -1963,16 +2084,25 @@ pub trait SignalVecExt: SignalVec {
                             if old_len == 0 {
                                 out_diffs.push(VecDiff::Push { value });
                             } else {
-                                out_diffs.push(VecDiff::InsertAt { index: 2 * index, value });
+                                out_diffs.push(VecDiff::InsertAt {
+                                    index: 2 * index,
+                                    value,
+                                });
                                 // Insert separator *after* unless the item is at the very end.
                                 if index < old_len {
-                                    out_diffs.push(VecDiff::InsertAt { index: 2 * index + 1, value: separator.clone() });
+                                    out_diffs.push(VecDiff::InsertAt {
+                                        index: 2 * index + 1,
+                                        value: separator.clone(),
+                                    });
                                 }
                             }
                         }
                         VecDiff::UpdateAt { index, value } => {
                             local_values[index] = value.clone();
-                            out_diffs.push(VecDiff::UpdateAt { index: 2 * index, value });
+                            out_diffs.push(VecDiff::UpdateAt {
+                                index: 2 * index,
+                                value,
+                            });
                         }
                         VecDiff::RemoveAt { index } => {
                             local_values.remove(index);
@@ -1988,7 +2118,10 @@ pub trait SignalVecExt: SignalVec {
                                 out_diffs.push(VecDiff::RemoveAt { index: 2 * index }); // separator
                             }
                         }
-                        VecDiff::Move { old_index, new_index } => {
+                        VecDiff::Move {
+                            old_index,
+                            new_index,
+                        } => {
                             let value = local_values.remove(old_index);
                             local_values.insert(new_index, value.clone());
 
@@ -2000,18 +2133,28 @@ pub trait SignalVecExt: SignalVec {
                                 temp_out.push(VecDiff::Pop {});
                                 temp_out.push(VecDiff::Pop {});
                             } else {
-                                temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
-                                temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                                temp_out.push(VecDiff::RemoveAt {
+                                    index: 2 * old_index,
+                                });
+                                temp_out.push(VecDiff::RemoveAt {
+                                    index: 2 * old_index,
+                                });
                             }
-                            
+
                             // 2. Generate insert diffs based on new position
                             let current_len = local_values.len();
                             if current_len == 1 {
                                 temp_out.push(VecDiff::Push { value });
                             } else {
-                                temp_out.push(VecDiff::InsertAt { index: 2 * new_index, value });
+                                temp_out.push(VecDiff::InsertAt {
+                                    index: 2 * new_index,
+                                    value,
+                                });
                                 if new_index < current_len - 1 {
-                                    temp_out.push(VecDiff::InsertAt { index: 2 * new_index + 1, value: separator.clone() });
+                                    temp_out.push(VecDiff::InsertAt {
+                                        index: 2 * new_index + 1,
+                                        value: separator.clone(),
+                                    });
                                 }
                             }
                             out_diffs.extend(temp_out);
@@ -2019,7 +2162,9 @@ pub trait SignalVecExt: SignalVec {
                         VecDiff::Push { value } => {
                             local_values.push(value.clone());
                             if old_len > 0 {
-                                out_diffs.push(VecDiff::Push { value: separator.clone() });
+                                out_diffs.push(VecDiff::Push {
+                                    value: separator.clone(),
+                                });
                             }
                             out_diffs.push(VecDiff::Push { value });
                         }
@@ -2040,7 +2185,11 @@ pub trait SignalVecExt: SignalVec {
                     }
                 }
 
-                if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                if out_diffs.is_empty() {
+                    None
+                } else {
+                    Some(out_diffs)
+                }
             },
         );
         Intersperse { signal }
@@ -2066,14 +2215,16 @@ pub trait SignalVecExt: SignalVec {
             let SignalHandle(processor_signal) = self
                 .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                            world: &mut World,
-                            mut local_values: Local<Vec<Self::Item>>| {
+                          world: &mut World,
+                          mut local_values: Local<Vec<Self::Item>>| {
                         let mut out_diffs = Vec::new();
 
                         let mut separator_fn = |index: usize| {
                             world
                                 .run_system_with(separator_system_id, index)
-                                .unwrap_or_else(|_| panic!("Separator system failed to run for index {}", index))
+                                .unwrap_or_else(|_| {
+                                    panic!("Separator system failed to run for index {}", index)
+                                })
                         };
 
                         for diff in diffs {
@@ -2094,22 +2245,33 @@ pub trait SignalVecExt: SignalVec {
                                             interspersed.push(item);
                                         }
                                     }
-                                    out_diffs.push(VecDiff::Replace { values: interspersed });
+                                    out_diffs.push(VecDiff::Replace {
+                                        values: interspersed,
+                                    });
                                 }
                                 VecDiff::InsertAt { index, value } => {
                                     local_values.insert(index, value.clone());
                                     if old_len == 0 {
                                         out_diffs.push(VecDiff::Push { value });
                                     } else {
-                                        out_diffs.push(VecDiff::InsertAt { index: 2 * index, value });
+                                        out_diffs.push(VecDiff::InsertAt {
+                                            index: 2 * index,
+                                            value,
+                                        });
                                         if index < old_len {
-                                            out_diffs.push(VecDiff::InsertAt { index: 2 * index + 1, value: separator_fn(index) });
+                                            out_diffs.push(VecDiff::InsertAt {
+                                                index: 2 * index + 1,
+                                                value: separator_fn(index),
+                                            });
                                         }
                                     }
                                 }
                                 VecDiff::UpdateAt { index, value } => {
                                     local_values[index] = value.clone();
-                                    out_diffs.push(VecDiff::UpdateAt { index: 2 * index, value });
+                                    out_diffs.push(VecDiff::UpdateAt {
+                                        index: 2 * index,
+                                        value,
+                                    });
                                 }
                                 VecDiff::RemoveAt { index } => {
                                     local_values.remove(index);
@@ -2123,7 +2285,10 @@ pub trait SignalVecExt: SignalVec {
                                         out_diffs.push(VecDiff::RemoveAt { index: 2 * index });
                                     }
                                 }
-                                VecDiff::Move { old_index, new_index } => {
+                                VecDiff::Move {
+                                    old_index,
+                                    new_index,
+                                } => {
                                     let value = local_values.remove(old_index);
                                     local_values.insert(new_index, value.clone());
 
@@ -2133,18 +2298,28 @@ pub trait SignalVecExt: SignalVec {
                                             temp_out.push(VecDiff::Pop {});
                                             temp_out.push(VecDiff::Pop {});
                                         } else {
-                                            temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
-                                            temp_out.push(VecDiff::RemoveAt { index: 2 * old_index });
+                                            temp_out.push(VecDiff::RemoveAt {
+                                                index: 2 * old_index,
+                                            });
+                                            temp_out.push(VecDiff::RemoveAt {
+                                                index: 2 * old_index,
+                                            });
                                         }
                                     }
-                                    
+
                                     let current_len = local_values.len();
                                     if current_len == 1 {
                                         temp_out.push(VecDiff::Push { value });
                                     } else {
-                                        temp_out.push(VecDiff::InsertAt { index: 2 * new_index, value });
+                                        temp_out.push(VecDiff::InsertAt {
+                                            index: 2 * new_index,
+                                            value,
+                                        });
                                         if new_index < current_len - 1 {
-                                            temp_out.push(VecDiff::InsertAt { index: 2 * new_index + 1, value: separator_fn(new_index) });
+                                            temp_out.push(VecDiff::InsertAt {
+                                                index: 2 * new_index + 1,
+                                                value: separator_fn(new_index),
+                                            });
                                         }
                                     }
                                     out_diffs.extend(temp_out);
@@ -2152,14 +2327,20 @@ pub trait SignalVecExt: SignalVec {
                                 VecDiff::Push { value } => {
                                     local_values.push(value.clone());
                                     if old_len > 0 {
-                                        out_diffs.push(VecDiff::Push { value: separator_fn(old_len - 1) });
+                                        out_diffs.push(VecDiff::Push {
+                                            value: separator_fn(old_len - 1),
+                                        });
                                     }
                                     out_diffs.push(VecDiff::Push { value });
                                 }
                                 VecDiff::Pop {} => {
                                     local_values.pop();
-                                    if old_len > 0 { out_diffs.push(VecDiff::Pop {}); }
-                                    if old_len > 1 { out_diffs.push(VecDiff::Pop {}); }
+                                    if old_len > 0 {
+                                        out_diffs.push(VecDiff::Pop {});
+                                    }
+                                    if old_len > 1 {
+                                        out_diffs.push(VecDiff::Pop {});
+                                    }
                                 }
                                 VecDiff::Clear {} => {
                                     local_values.clear();
@@ -2167,7 +2348,11 @@ pub trait SignalVecExt: SignalVec {
                                 }
                             }
                         }
-                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                        if out_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(out_diffs)
+                        }
                     },
                 )
                 .register(world);
@@ -2236,9 +2421,9 @@ pub trait SignalVecExt: SignalVec {
             let SignalHandle(signal) = self
                 .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                            world: &mut World,
-                            mut state: Local<SortState<Self::Item>>|
-                            -> Option<Vec<VecDiff<Self::Item>>> {
+                          world: &mut World,
+                          mut state: Local<SortState<Self::Item>>|
+                          -> Option<Vec<VecDiff<Self::Item>>> {
                         let mut out_diffs = Vec::new();
 
                         for diff in diffs {
@@ -2246,65 +2431,108 @@ pub trait SignalVecExt: SignalVec {
                                 VecDiff::Replace { values: new_values } => {
                                     state.values = new_values;
                                     state.sorted_indices = (0..state.values.len()).collect();
-                                    
+
                                     // Fix: Clone the values *before* the sort to avoid borrow conflict.
                                     let values_for_sort = state.values.clone();
                                     state.sorted_indices.sort_unstable_by(|&a, &b| {
                                         let val_a = values_for_sort[a].clone();
                                         let val_b = values_for_sort[b].clone();
-                                        world.run_system_with(compare_system_id, (val_a, val_b)).unwrap()
+                                        world
+                                            .run_system_with(compare_system_id, (val_a, val_b))
+                                            .unwrap()
                                     });
 
-                                    let sorted_values = state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
-                                    out_diffs.push(VecDiff::Replace { values: sorted_values });
+                                    let sorted_values = state
+                                        .sorted_indices
+                                        .iter()
+                                        .map(|&i| state.values[i].clone())
+                                        .collect();
+                                    out_diffs.push(VecDiff::Replace {
+                                        values: sorted_values,
+                                    });
                                 }
                                 VecDiff::Push { value } => {
                                     let new_idx = state.values.len();
                                     state.values.push(value.clone());
-                                    let insert_pos = search(world, compare_system_id, &*state, new_idx).unwrap_err();
+                                    let insert_pos =
+                                        search(world, compare_system_id, &*state, new_idx)
+                                            .unwrap_err();
                                     state.sorted_indices.insert(insert_pos, new_idx);
-                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                    out_diffs.push(VecDiff::InsertAt {
+                                        index: insert_pos,
+                                        value,
+                                    });
                                 }
                                 VecDiff::InsertAt { index, value } => {
                                     state.values.insert(index, value.clone());
-                                    for i in state.sorted_indices.iter_mut() { if *i >= index { *i += 1; } }
-                                    let insert_pos = search(world, compare_system_id, &*state, index).unwrap_err();
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i >= index {
+                                            *i += 1;
+                                        }
+                                    }
+                                    let insert_pos =
+                                        search(world, compare_system_id, &*state, index)
+                                            .unwrap_err();
                                     state.sorted_indices.insert(insert_pos, index);
-                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                    out_diffs.push(VecDiff::InsertAt {
+                                        index: insert_pos,
+                                        value,
+                                    });
                                 }
                                 VecDiff::RemoveAt { index } => {
                                     // Must search *before* removing from values.
-                                    let remove_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    let remove_pos =
+                                        search(world, compare_system_id, &*state, index).unwrap();
                                     state.sorted_indices.remove(remove_pos);
                                     state.values.remove(index);
-                                    for i in state.sorted_indices.iter_mut() { if *i > index { *i -= 1; } }
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i > index {
+                                            *i -= 1;
+                                        }
+                                    }
                                     out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
                                 }
                                 VecDiff::UpdateAt { index, value } => {
-                                    let old_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    let old_pos =
+                                        search(world, compare_system_id, &*state, index).unwrap();
                                     state.sorted_indices.remove(old_pos);
                                     state.values[index] = value.clone();
-                                    let new_pos = search(world, compare_system_id, &*state, index).unwrap_err();
+                                    let new_pos = search(world, compare_system_id, &*state, index)
+                                        .unwrap_err();
                                     state.sorted_indices.insert(new_pos, index);
 
                                     if old_pos == new_pos {
-                                        out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
+                                        out_diffs.push(VecDiff::UpdateAt {
+                                            index: old_pos,
+                                            value,
+                                        });
                                     } else {
-                                        out_diffs.push(VecDiff::Move { old_index: old_pos, new_index: new_pos });
+                                        out_diffs.push(VecDiff::Move {
+                                            old_index: old_pos,
+                                            new_index: new_pos,
+                                        });
                                     }
                                 }
-                                VecDiff::Move { old_index, new_index } => {
+                                VecDiff::Move {
+                                    old_index,
+                                    new_index,
+                                } => {
                                     let val = state.values.remove(old_index);
                                     state.values.insert(new_index, val);
                                     for i in state.sorted_indices.iter_mut() {
-                                        if *i == old_index { *i = new_index; }
-                                        else if *i > old_index && *i <= new_index { *i -= 1; }
-                                        else if *i < old_index && *i >= new_index { *i += 1; }
+                                        if *i == old_index {
+                                            *i = new_index;
+                                        } else if *i > old_index && *i <= new_index {
+                                            *i -= 1;
+                                        } else if *i < old_index && *i >= new_index {
+                                            *i += 1;
+                                        }
                                     }
                                 }
                                 VecDiff::Pop {} => {
                                     let index = state.values.len() - 1;
-                                    let remove_pos = search(world, compare_system_id, &*state, index).unwrap();
+                                    let remove_pos =
+                                        search(world, compare_system_id, &*state, index).unwrap();
                                     state.sorted_indices.remove(remove_pos);
                                     state.values.pop();
                                     out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
@@ -2316,11 +2544,18 @@ pub trait SignalVecExt: SignalVec {
                                 }
                             }
                         }
-                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                        if out_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(out_diffs)
+                        }
                     },
-                ).register(world);
+                )
+                .register(world);
 
-            world.entity_mut(*signal).add_child(compare_system_id.entity());
+            world
+                .entity_mut(*signal)
+                .add_child(compare_system_id.entity());
             signal
         });
 
@@ -2338,11 +2573,11 @@ pub trait SignalVecExt: SignalVec {
     // /// This is generally more efficient than `sort_by` if the key extraction is a non-trivial operation,
     // /// as the system is run only once per item change, rather than on every comparison.
     fn sort_by_key<K, F, M>(self, key_extraction_system: F) -> SortByKey<Self>
-        where
-            Self: Sized,
-            Self::Item: Clone + SSs,
-            K: Ord + Clone + SSs,
-            F: IntoSystem<In<Self::Item>, K, M> + SSs,
+    where
+        Self: Sized,
+        Self::Item: Clone + SSs,
+        K: Ord + Clone + SSs,
+        F: IntoSystem<In<Self::Item>, K, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let key_system_id = world.register_system(key_extraction_system);
@@ -2365,7 +2600,8 @@ pub trait SignalVecExt: SignalVec {
 
             fn search<T, K: Ord>(state: &SortState<T, K>, item_idx: usize) -> Result<usize, usize> {
                 state.sorted_indices.binary_search_by(|&probe_idx| {
-                    state.keys[probe_idx].cmp(&state.keys[item_idx])
+                    state.keys[probe_idx]
+                        .cmp(&state.keys[item_idx])
                         .then_with(|| probe_idx.cmp(&item_idx))
                 })
             }
@@ -2374,9 +2610,9 @@ pub trait SignalVecExt: SignalVec {
                 // Fix 1: Add turbofish to specify the generic type for `for_each`.
                 .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                            world: &mut World,
-                            mut state: Local<SortState<Self::Item, K>>|
-                            -> Option<Vec<VecDiff<Self::Item>>> {
+                          world: &mut World,
+                          mut state: Local<SortState<Self::Item, K>>|
+                          -> Option<Vec<VecDiff<Self::Item>>> {
                         let mut out_diffs = Vec::new();
 
                         let get_key = |world: &mut World, value: Self::Item| {
@@ -2387,7 +2623,11 @@ pub trait SignalVecExt: SignalVec {
                             match diff {
                                 VecDiff::Replace { values: new_values } => {
                                     state.values = new_values;
-                                    state.keys = state.values.iter().map(|v| get_key(world, v.clone())).collect();
+                                    state.keys = state
+                                        .values
+                                        .iter()
+                                        .map(|v| get_key(world, v.clone()))
+                                        .collect();
                                     state.sorted_indices = (0..state.values.len()).collect();
 
                                     // Fix 2: Clone keys before sorting to avoid mutable/immutable borrow conflict.
@@ -2396,8 +2636,14 @@ pub trait SignalVecExt: SignalVec {
                                         keys_for_sort[a].cmp(&keys_for_sort[b])
                                     });
 
-                                    let sorted_values = state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
-                                    out_diffs.push(VecDiff::Replace { values: sorted_values });
+                                    let sorted_values = state
+                                        .sorted_indices
+                                        .iter()
+                                        .map(|&i| state.values[i].clone())
+                                        .collect();
+                                    out_diffs.push(VecDiff::Replace {
+                                        values: sorted_values,
+                                    });
                                 }
                                 VecDiff::Push { value } => {
                                     let new_idx = state.values.len();
@@ -2406,23 +2652,37 @@ pub trait SignalVecExt: SignalVec {
                                     state.keys.push(key);
                                     let insert_pos = search(&*state, new_idx).unwrap_err();
                                     state.sorted_indices.insert(insert_pos, new_idx);
-                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                    out_diffs.push(VecDiff::InsertAt {
+                                        index: insert_pos,
+                                        value,
+                                    });
                                 }
                                 VecDiff::InsertAt { index, value } => {
                                     let key = get_key(world, value.clone());
                                     state.values.insert(index, value.clone());
                                     state.keys.insert(index, key);
-                                    for i in state.sorted_indices.iter_mut() { if *i >= index { *i += 1; } }
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i >= index {
+                                            *i += 1;
+                                        }
+                                    }
                                     let insert_pos = search(&*state, index).unwrap_err();
                                     state.sorted_indices.insert(insert_pos, index);
-                                    out_diffs.push(VecDiff::InsertAt { index: insert_pos, value });
+                                    out_diffs.push(VecDiff::InsertAt {
+                                        index: insert_pos,
+                                        value,
+                                    });
                                 }
                                 VecDiff::RemoveAt { index } => {
                                     let remove_pos = search(&*state, index).unwrap();
                                     state.sorted_indices.remove(remove_pos);
                                     state.values.remove(index);
                                     state.keys.remove(index);
-                                    for i in state.sorted_indices.iter_mut() { if *i > index { *i -= 1; } }
+                                    for i in state.sorted_indices.iter_mut() {
+                                        if *i > index {
+                                            *i -= 1;
+                                        }
+                                    }
                                     out_diffs.push(VecDiff::RemoveAt { index: remove_pos });
                                 }
                                 VecDiff::UpdateAt { index, value } => {
@@ -2435,21 +2695,34 @@ pub trait SignalVecExt: SignalVec {
                                     state.sorted_indices.insert(new_pos, index);
 
                                     if old_pos == new_pos {
-                                        out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
+                                        out_diffs.push(VecDiff::UpdateAt {
+                                            index: old_pos,
+                                            value,
+                                        });
                                     } else {
-                                        out_diffs.push(VecDiff::Move { old_index: old_pos, new_index: new_pos });
+                                        out_diffs.push(VecDiff::Move {
+                                            old_index: old_pos,
+                                            new_index: new_pos,
+                                        });
                                     }
                                 }
-                                VecDiff::Move { old_index, new_index } => {
+                                VecDiff::Move {
+                                    old_index,
+                                    new_index,
+                                } => {
                                     let val = state.values.remove(old_index);
                                     state.values.insert(new_index, val);
                                     let key = state.keys.remove(old_index);
                                     state.keys.insert(new_index, key);
 
                                     for i in state.sorted_indices.iter_mut() {
-                                        if *i == old_index { *i = new_index; }
-                                        else if *i > old_index && *i <= new_index { *i -= 1; }
-                                        else if *i < old_index && *i >= new_index { *i += 1; }
+                                        if *i == old_index {
+                                            *i = new_index;
+                                        } else if *i > old_index && *i <= new_index {
+                                            *i -= 1;
+                                        } else if *i < old_index && *i >= new_index {
+                                            *i += 1;
+                                        }
                                     }
                                 }
                                 VecDiff::Pop {} => {
@@ -2468,9 +2741,14 @@ pub trait SignalVecExt: SignalVec {
                                 }
                             }
                         }
-                        if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                        if out_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(out_diffs)
+                        }
                     },
-                ).register(world);
+                )
+                .register(world);
 
             world.entity_mut(*signal).add_child(key_system_id.entity());
             signal
@@ -2573,7 +2851,7 @@ pub trait SignalVecExt: SignalVec {
                                 for _ in 0..old_item.values.len() {
                                     new_diffs.push(VecDiff::RemoveAt { index: offset });
                                 }
-                                
+
                                 let (new_item, initial_values) = spawn_flatten_item(world, parent, index, inner_signal);
                                 with_flatten_data(world, parent, |mut data| data.items.insert(index, new_item));
                                 for (i, value) in initial_values.into_iter().enumerate() {
@@ -2598,7 +2876,7 @@ pub trait SignalVecExt: SignalVec {
                                 for _ in 0..moved_item.values.len() {
                                     new_diffs.push(VecDiff::RemoveAt { index: old_offset });
                                 }
-                                
+
                                 let new_offset: usize = with_flatten_data::<<Self::Item as SignalVec>::Item, _>(world, parent, |data| data.items[..new_index].iter().map(|i| i.values.len()).sum());
 
                                 for (i, value) in moved_item.values.into_iter().enumerate() {
@@ -2607,28 +2885,37 @@ pub trait SignalVecExt: SignalVec {
                             }
                         }
                     }
-                    
+
                     let queued_diffs = with_flatten_data(world, parent, |mut data: Mut<FlattenData<<Self::Item as SignalVec>::Item>>| data.diffs.drain(..).collect::<Vec<_>>());
                     new_diffs.extend(queued_diffs);
 
                     if new_diffs.is_empty() { None } else { Some(new_diffs) }
                 }))
                 .register(world);
-            
+
             parent_entity.set(*output_signal);
-            
+
             let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
-                .map::<Vec<VecDiff<<Self::Item as SignalVec>::Item>>, _, _, _>(move |In(_), data: Query<&FlattenData<<Self::Item as SignalVec>::Item>>| {
-                    if let Ok(data) = data.get(parent_entity.get()) {
-                        if !data.diffs.is_empty() { return Some(vec![]); }
-                    }
-                    None
-                })
+                .map::<Vec<VecDiff<<Self::Item as SignalVec>::Item>>, _, _, _>(
+                    move |In(_), data: Query<&FlattenData<<Self::Item as SignalVec>::Item>>| {
+                        if let Ok(data) = data.get(parent_entity.get()) {
+                            if !data.diffs.is_empty() {
+                                return Some(vec![]);
+                            }
+                        }
+                        None
+                    },
+                )
                 .register(world);
-            
+
             pipe_signal(world, flusher, output_signal);
-            
-            world.entity_mut(*output_signal).insert(FlattenData::<<Self::Item as SignalVec>::Item> { items: vec![], diffs: vec![] });
+
+            world.entity_mut(*output_signal).insert(
+                FlattenData::<<Self::Item as SignalVec>::Item> {
+                    items: vec![],
+                    diffs: vec![],
+                },
+            );
             output_signal
         });
 
@@ -2638,7 +2925,23 @@ pub trait SignalVecExt: SignalVec {
         }
     }
 
-    fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>> where Self: Sized
+    fn debug(self) -> Debug<Self>
+    where
+        Self: Sized,
+        Self::Item: fmt::Debug + Clone + 'static,
+    {
+        let location = core::panic::Location::caller();
+        Debug {
+            signal: self.for_each(move |In(item)| {
+                debug!("[{}] {:#?}", location, item);
+                item
+            }),
+        }
+    }
+
+    fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>>
+    where
+        Self: Sized,
     {
         Box::new(self)
     }
@@ -2977,21 +3280,17 @@ mod tests {
     use super::*;
     use crate::JonmoPlugin;
     use bevy::prelude::*;
-    use bevy_platform::sync::{Arc, Mutex};
 
     // Helper component and resource for testing (similar to signal.rs tests)
-    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
-    #[reflect(Clone)]
+    #[derive(Component, Clone, Debug, PartialEq, Default)]
     struct TestItem(i32);
 
     #[derive(Resource, Default)]
-    struct SignalVecOutput<T: Clone + Debug>(Vec<VecDiff<T>>);
+    struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
 
     fn create_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
-        app.register_type::<TestItem>();
-        app.register_type::<VecDiff<TestItem>>();
         app
     }
 
@@ -3000,7 +3299,7 @@ mod tests {
         In(diffs): In<Vec<VecDiff<T>>>,
         mut output: ResMut<SignalVecOutput<T>>,
     ) where
-        T: SSs + Clone + Debug,
+        T: SSs + Clone + fmt::Debug,
     {
         debug!(
             "Capture SignalVec Output: Received {:?}, extending resource from {:?} with new diffs",
@@ -3009,17 +3308,17 @@ mod tests {
         output.0.extend(diffs);
     }
 
-    fn get_signal_vec_output<T: SSs + Clone + Debug>(world: &World) -> Vec<VecDiff<T>> {
+    fn get_signal_vec_output<T: SSs + Clone + fmt::Debug>(world: &World) -> Vec<VecDiff<T>> {
         world.resource::<SignalVecOutput<T>>().0.clone()
     }
 
-    fn clear_signal_vec_output<T: SSs + Clone + Debug>(world: &mut World) {
+    fn clear_signal_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) {
         if let Some(mut output) = world.get_resource_mut::<SignalVecOutput<T>>() {
             output.0.clear();
         }
     }
 
-    impl<T: SSs + PartialEq + Debug> PartialEq for VecDiff<T> {
+    impl<T: SSs + PartialEq + fmt::Debug> PartialEq for VecDiff<T> {
         fn eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (Self::Replace { values: l_values }, Self::Replace { values: r_values }) => {
@@ -3083,7 +3382,7 @@ mod tests {
         let initial_output = get_signal_vec_output::<u32>(app.world());
         assert_eq!(initial_output.len(), 0);
 
-        mutable_vec.push(1u32);
+        mutable_vec.write().push(1u32);
         mutable_vec.flush_into_world(app.world_mut());
         app.update();
 

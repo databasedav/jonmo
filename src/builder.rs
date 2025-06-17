@@ -71,7 +71,7 @@ impl JonmoBuilder {
     }
 
     pub fn on_spawn(
-        self, // Remove mut
+        self,
         on_spawn: impl FnOnce(&mut World, Entity) + SSs,
     ) -> Self {
         self.on_spawns.lock().unwrap().push(Box::new(on_spawn)); // Direct access
@@ -135,7 +135,6 @@ impl JonmoBuilder {
         C: Component + Clone,
         S: Signal<Item = O>,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
-        // O: FromReflect + GetTypeRegistration + Typed + SSs,
     {
         self.signal_from_entity(|signal| {
             f(signal.map(|In(entity): In<Entity>, components: Query<&C>| {
@@ -224,6 +223,21 @@ impl JonmoBuilder {
         self.component_signal_from_entity(|signal| {
             f(signal.map(|In(entity): In<Entity>, components: Query<&I>| {
                 components.get(entity).ok().cloned()
+            }))
+        })
+    }
+
+    pub fn component_signal_from_component_option<I, O, IOO, S, F>(self, f: F) -> Self
+    where
+        I: Component + Clone,
+        O: Component,
+        IOO: Into<Option<O>> + 'static,
+        S: Signal<Item = IOO> + SSs,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<I>>) -> S + SSs,
+    {
+        self.component_signal_from_entity(|signal| {
+            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| {
+                Some(components.get(entity).ok().cloned())
             }))
         })
     }

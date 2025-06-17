@@ -30,7 +30,7 @@ fn main() {
 #[derive(Resource, Clone)]
 struct Numbers(MutableVec<i32>);
 
-#[derive(Component, Default, Clone, Reflect)]
+#[derive(Component, Default, Clone)]
 struct Lifetime(f32);
 
 fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
@@ -45,8 +45,9 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     })
     // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
-        MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
-        // numbers.clone()
+        // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
+        numbers
+            .signal_vec()
             // .filter_signal(|In(n)| {
             //     SignalBuilder::from_system(
             //         move |_: In<()>, toggle: Res<ToggleFilter>| {
@@ -54,15 +55,13 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //         },
             //     )
             // })
-            // .map_signal(|In(n): In<i32>| {
-            //     SignalBuilder::from_system(move |_: In<_>| n + 1)
-            // })
+            .map_signal(|In(n): In<i32>| SignalBuilder::from_system(move |_: In<_>| n + 1))
             // .chain(numbers)
             // .intersperse(0)
             // .intersperse_with(|_: In<_>| 0)
             // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
             // .sort_by_key(|In(n): In<i32>| -n)
-            .flatten()
+            // .flatten()
             .map(|In(n)| item(n)),
     )
 }

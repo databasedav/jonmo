@@ -14,7 +14,7 @@ fn main() {
 #[derive(Resource, Deref, DerefMut)]
 struct ValueTicker(Timer);
 
-#[derive(Component, Reflect, Clone, Default, PartialEq)]
+#[derive(Component, Clone, Default, PartialEq)]
 struct Value(i32);
 
 fn ui(world: &mut World) {

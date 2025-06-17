@@ -1,9 +1,9 @@
 use super::{tree::*, utils::*};
 use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
-use bevy_platform::{prelude::*, sync::{Arc, Mutex}};
+use bevy_platform::prelude::*;
 use bevy_time::{Time, Timer, TimerMode};
-use core::{fmt, marker::PhantomData, ops, time::Duration};
+use core::{any::Any, fmt, marker::PhantomData, ops, time::Duration};
 
 /// Represents a value that changes over time and handles internal registration logic.
 ///
@@ -242,6 +242,12 @@ where
     }
 }
 
+#[derive(Component)]
+struct FlattenState<T> {
+    // This component holds the value passed from the inner signal to the outer one.
+    value: Option<T>,
+}
+
 /// Represents a node that flattens a signal of signals. Implements [`Signal`].
 ///
 /// If the upstream signal emits values that are themselves signals (`Upstream::Item: Signal`),
@@ -253,9 +259,9 @@ pub struct Flatten<Upstream>
 where
     Upstream: Signal,
     Upstream::Item: Signal,
-    <Upstream::Item as Signal>::Item: Clone,
 {
-    pub(crate) signal: Map<Upstream, <Upstream::Item as Signal>::Item>,
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> (Upstream, Upstream::Item)>,
 }
 
 impl<Upstream> Signal for Flatten<Upstream>
@@ -267,7 +273,7 @@ where
     type Item = <Upstream::Item as Signal>::Item;
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
+        self.signal.register(world).into()
     }
 }
 
@@ -1071,33 +1077,87 @@ pub trait SignalExt: Signal {
     /// let flattened_signal = outer_signal.flatten(); // Emits 10 or 20 based on the SwitchSignal resource
     /// ```
     fn flatten(self) -> Flatten<Self>
-    where
-        Self: Sized,
-        Self::Item: Signal + Clone + 'static,
-        <Self::Item as Signal>::Item: Clone + Send,
-    {
-        // TODO: forward with observer instead of mutex ?
-        // TODO: instead of mutex, sync the signal's downstreams with self
-        let cur = Arc::new(Mutex::new(None));
-        Flatten { signal: self.map(move |In(signal): In<Self::Item>, world: &mut World, mut prev_system_option: Local<Option<(SignalSystem, SignalHandle)>>| {
-            // TODO: is this registering/cleanup too expensive ?
-            let signal_handle = signal.clone().register(world);
-            let cur_system = signal_handle.0;
-            signal_handle.cleanup(world);
-            if !prev_system_option.as_ref().is_some_and(|&(prev_system, _)| prev_system == cur_system) {
-                if let Some((_, prev_forwarder)) = prev_system_option.take() {
-                    prev_forwarder.cleanup(world);
+where
+    Self: Sized,
+    Self::Item: Signal + Clone + 'static,
+    <Self::Item as Signal>::Item: Clone + Send + Sync,
+{
+    let signal = LazySignal::new(move |world: &mut World| {
+        // 1. The state entity that holds the latest value.
+        let state_entity = world.spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None }).id();
+
+        // 2. The final output signal. Its ONLY job is to read the state.
+        // It does not need any upstream pipes. It will be run manually.
+        let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
+            move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                if let Ok(mut state) = query.get_mut(state_entity) {
+                    state.value.take()
+                } else {
+                    None
                 }
-                let forwarder = signal.map(clone!((cur) move |In(item)| {
-                    *cur.lock().unwrap() = Some(item);
-                }));
-                let forwarder = forwarder.register(world);
-                poll_signal(world, forwarder.0);
-                *prev_system_option = Some((cur_system, forwarder.clone()));
-            }
-            cur.lock().unwrap().take()
-        }) }
+            },
+        ).register(world);
+
+        // This is the "subscription manager". It reacts to the outer signal.
+        let manager_system = self.map(
+            move |In(inner_signal): In<Self::Item>,
+                  world: &mut World,
+                  mut active_forwarder: Local<Option<SignalHandle>>| {
+                if let Some(old_handle) = active_forwarder.take() {
+                    old_handle.cleanup(world);
+                }
+
+                // ================== The Core Logic ==================
+
+                // A. Get the initial value of the new inner signal, synchronously.
+                let temp_handle = inner_signal.clone().first().register(world);
+                let initial_value = poll_signal(world, *temp_handle)
+                    .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<<Self::Item as Signal>::Item>().ok())
+                    .map(|b| *b);
+                temp_handle.cleanup(world);
+
+                // B. Write this initial value directly into the state component.
+                if let Some(value) = initial_value {
+                    if let Some(mut state) = world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity) {
+                        state.value = Some(value);
+                    }
+                }
+                
+                // C. Set up a forwarder for all *subsequent* updates.
+                let forwarder = inner_signal.map(
+                    move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                        if let Ok(mut state) = query.get_mut(state_entity) {
+                            state.value = Some(value);
+                        }
+                    },
+                )
+                .map(move |_, world: &mut World| {
+                    // After writing, we MUST trigger the reader to run.
+                    process_signals_helper(world, [reader_system].into_iter(), Box::new(()));
+                })
+                .register(world);
+                
+                // D. Store the handle for future cleanup.
+                *active_forwarder = Some(forwarder);
+
+                // E. Manually trigger the reader to run RIGHT NOW to consume the initial value.
+                process_signals_helper(world, [reader_system].into_iter(), Box::new(()));
+            },
+        ).register(world);
+
+        world
+            .entity_mut(*reader_system)
+            .add_child(state_entity)
+            .add_child(**manager_system);
+
+        reader_system
+    });
+
+    Flatten {
+        signal,
+        _marker: PhantomData,
     }
+}
 
     /// Compares the signal's value for equality with a fixed `value`.
     ///
@@ -1260,7 +1320,7 @@ pub trait SignalExt: Signal {
         Self: Sized,
         Self::Item: 'static,
         S: Signal + Clone + 'static,
-        S::Item: Clone + Send,
+        S::Item: Clone + Send + Sync,
         F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
         Switch {
@@ -1654,14 +1714,16 @@ pub trait SignalExt: Signal {
     {
         let location = core::panic::Location::caller();
         Debug {
-            signal: self.map(move |In(item): In<Self::Item>| {
+            signal: self.map(move |In(item)| {
                 debug!("[{}] {:#?}", location, item);
                 item
             }),
         }
     }
 
-    fn boxed(self) -> Box<dyn Signal<Item = Self::Item>> where Self: Sized
+    fn boxed(self) -> Box<dyn Signal<Item = Self::Item>>
+    where
+        Self: Sized,
     {
         Box::new(self)
     }
@@ -1697,6 +1759,7 @@ mod tests {
     use super::*;
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
+    use bevy_platform::sync::*;
     use bevy_time::TimeUpdateStrategy;
     use core::time::Duration; // Add Duration
 
@@ -1918,7 +1981,7 @@ mod tests {
         .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
-
+        
         app.world_mut().resource_mut::<SignalSelector>().0 = true;
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(1));

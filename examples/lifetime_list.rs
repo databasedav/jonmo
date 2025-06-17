@@ -29,7 +29,7 @@ fn main() {
 #[derive(Resource, Clone)]
 struct Colors(MutableVec<Color>);
 
-#[derive(Component, Default, Clone, Reflect)]
+#[derive(Component, Default, Clone)]
 struct Lifetime(f32);
 
 fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
