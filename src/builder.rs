@@ -2,7 +2,7 @@
 
 use core::cmp::Ordering;
 
-use super::{signal::*, signal_vec::*, tree::*, utils::*};
+use super::{signal::*, signal_vec::*, graph::*, utils::*};
 use bevy_ecs::{component::HookContext, prelude::*, world::DeferredWorld};
 use bevy_platform::{
     prelude::*,
@@ -70,10 +70,7 @@ impl JonmoBuilder {
         Self::default()
     }
 
-    pub fn on_spawn(
-        self,
-        on_spawn: impl FnOnce(&mut World, Entity) + SSs,
-    ) -> Self {
+    pub fn on_spawn(self, on_spawn: impl FnOnce(&mut World, Entity) + SSs) -> Self {
         self.on_spawns.lock().unwrap().push(Box::new(on_spawn)); // Direct access
         self
     }

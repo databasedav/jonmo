@@ -2,12 +2,11 @@ use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
 use bevy_log::debug;
 use bevy_platform::{
-    prelude::*,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    collections::HashSet, prelude::*, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}
 };
 use core::{any::Any, cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
 
-use super::{signal::*, tree::*, utils::*};
+use super::{signal::*, graph::*, utils::*};
 
 /// Describes the changes to a `Vec`.
 ///
@@ -192,14 +191,11 @@ where
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         let SignalHandle(upstream) = self.upstream.register(world);
+        if let Ok(mut entity) = world.get_entity_mut(*upstream) {
+            entity.remove::<SignalVecLock>();
+        }
         let signal = self.signal.register(world);
         pipe_signal(world, upstream, signal);
-        // TODO: dry logic with register_non_source_signal_vec
-        if let Some(upstream) = get_direct_upstream(world, signal) {
-            if let Ok(mut entity) = world.get_entity_mut(*upstream) {
-                entity.remove::<SignalVecLock>();
-            }
-        }
         signal.into()
     }
 }
@@ -245,109 +241,34 @@ where
     }
 }
 
-struct MapSignalItem<S: Signal>
-where
-    S::Item: Send + Sync,
-{
-    signal: SignalHandle,
-    current_value: S::Item,
+#[derive(Clone)]
+pub(crate) struct MappedSignalItem<S: Signal> {
+    pub(crate) processor_handle: SignalHandle,
+    pub(crate) inner_signal_id: SignalSystem,
+    _marker: PhantomData<fn() -> S>,
 }
 
+// Fix for E0310: Add the 'static lifetime bound to T
 #[derive(Component)]
-struct MapSignalData<T, S: Signal>
-where
-    T: 'static,
-    S::Item: Send + Sync,
-{
-    items: Vec<MapSignalItem<S>>,
-    diffs: Vec<VecDiff<S::Item>>,
-    system: SystemId<In<T>, S>,
-}
-
-fn with_map_signal_data<T: SSs, S: Signal, O>(
-    world: &mut World,
-    entity: Entity,
-    f: impl FnOnce(Mut<MapSignalData<T, S>>) -> O,
-) -> O
-where
-    S::Item: Send + Sync,
-{
-    // Added bound
-    let data = world.get_mut::<MapSignalData<T, S>>(entity).unwrap();
-    f(data)
+pub(crate) struct MapSignalManager<T: 'static, S: Signal> {
+    pub(crate) items: Vec<MappedSignalItem<S>>,
+    pub(crate) system_id: SystemId<In<T>, S>,
 }
 
 #[derive(Component, Deref, DerefMut)]
-struct MapSignalIndex(usize);
+struct MappedSignalIndex(usize);
 
-fn create_map_signal_processor<T: SSs, S: Signal>(
-    parent: Entity,
-    entity: LazyEntity,
-) -> impl Fn(In<S::Item>, Query<&MapSignalIndex>, Query<&mut MapSignalData<T, S>>)
-where
-    S::Item: Clone + Send + Sync, // Added bound
-{
-    move |In(new_value): In<S::Item>,
-          map_signal_indices: Query<&MapSignalIndex>,
-          mut map_signal_datas: Query<&mut MapSignalData<T, S>>| {
-        if let Ok(mut map_signal_data) = map_signal_datas.get_mut(parent) {
-            if let Ok(&MapSignalIndex(index)) = map_signal_indices.get(entity.get()) {
-                if let Some(item) = map_signal_data.items.get_mut(index) {
-                    item.current_value = new_value.clone();
-                    map_signal_data.diffs.push(VecDiff::UpdateAt {
-                        index,
-                        value: new_value,
-                    });
-                }
-            }
-        }
-    }
-}
-
-// Corrected spawn_map_signal that manually pipes signals instead of using .map()
-fn spawn_map_signal<T: SSs, S: Signal>(
+fn with_map_signal_data<T, S, O>(
     world: &mut World,
-    index: usize,
-    signal: S,
-    parent: Entity,
-) -> (SignalHandle, S::Item)
+    entity: Entity,
+    f: impl FnOnce(Mut<MapSignalManager<T, S>>) -> O,
+) -> O
 where
-    S::Item: Clone + Send + Sync,
+    T: 'static,
+    S: Signal,
+    S::Item: Send + Sync,
 {
-    let entity = LazyEntity::new();
-
-    // 1. Create the processor closure.
-    let processor = create_map_signal_processor::<T, S>(parent, entity.clone());
-
-    // 2. Use `.map()` to attach the processor. This is the correct pattern.
-    // The output of the processor is (), so the new mapped signal is a Signal<Item = ()>.
-    let mapped_signal = signal.map(processor);
-
-    // 3. Register the new mapped_signal. The handle now refers to the processor node.
-    let processor_handle = mapped_signal.register(world);
-    entity.set(**processor_handle);
-    world
-        .entity_mut(**processor_handle)
-        .insert(MapSignalIndex(index));
-
-    // 4. To get the initial value, we need to poll the *upstream* of our new processor node.
-    // The upstream is the original inner signal (`signal`).
-    let upstream_handle = world
-        .get::<Upstream>(**processor_handle)
-        .unwrap()
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
-
-    let initial_value = poll_signal(world, upstream_handle)
-        .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<S::Item>().ok())
-        .map(|boxed| *boxed)
-        .expect("map_signal's inner signal must emit an initial value upon registration");
-
-    // 5. The handle for the entire inner chain is the processor handle. Cleaning it up
-    // will correctly cascade to the original inner signal.
-    (processor_handle, initial_value)
+    f(world.get_mut::<MapSignalManager<T, S>>(entity).unwrap())
 }
 
 /// A node that maps items to signals and flattens the result.
@@ -689,7 +610,9 @@ pub struct EnumeratedIndex(usize);
 fn index_signal_from_entity(
     entity: Entity,
 ) -> Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>> {
-    SignalBuilder::from_component_option::<EnumeratedIndex>(entity).map(|In(opt): In<Option<EnumeratedIndex>>| opt.map(|c| c.0)).dedupe()
+    SignalBuilder::from_component_option::<EnumeratedIndex>(entity)
+        .map(|In(opt): In<Option<EnumeratedIndex>>| opt.map(|c| c.0))
+        .dedupe()
 }
 
 #[derive(Clone)]
@@ -699,7 +622,17 @@ where
 {
     signal: ForEach<
         Upstream,
-        Vec<VecDiff<(Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>>, Upstream::Item)>>,
+        Vec<
+            VecDiff<(
+                Dedupe<
+                    super::signal::Map<
+                        super::signal::Source<Option<EnumeratedIndex>>,
+                        Option<usize>,
+                    >,
+                >,
+                Upstream::Item,
+            )>,
+        >,
     >,
 }
 
@@ -707,7 +640,10 @@ impl<Upstream> SignalVec for Enumerate<Upstream>
 where
     Upstream: SignalVec,
 {
-    type Item = (Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>>, Upstream::Item);
+    type Item = (
+        Dedupe<super::signal::Map<super::signal::Source<Option<EnumeratedIndex>>, Option<usize>>>,
+        Upstream::Item,
+    );
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
@@ -931,14 +867,14 @@ fn with_flatten_data<O: SSs + Clone, R>(
 struct FlattenInnerIndex(usize);
 
 fn create_flatten_processor<O: Clone + SSs>(
+    entity: LazyEntity,
     parent: Entity,
 ) -> impl Fn(In<Vec<VecDiff<O>>>, Query<&FlattenInnerIndex>, Query<&mut FlattenData<O>>) {
     move |In(diffs): In<Vec<VecDiff<O>>>,
           query_self_index: Query<&FlattenInnerIndex>,
           mut query_parent_data: Query<&mut FlattenData<O>>| {
         if let Ok(mut parent_data) = query_parent_data.get_mut(parent) {
-            // Use .get_single().ok()
-            if let Ok(&FlattenInnerIndex(self_index)) = query_self_index.single() {
+            if let Ok(&FlattenInnerIndex(self_index)) = query_self_index.get(entity.get()) {
                 if self_index >= parent_data.items.len() {
                     return;
                 }
@@ -1044,11 +980,12 @@ fn spawn_flatten_item<O: Clone + SSs>(
     handle.cleanup(world);
 
     // Use the original signal for the persistent processor.
-    let processor_system = create_flatten_processor(parent);
+    let entity = LazyEntity::new();
+    let processor_system = create_flatten_processor(entity.clone(), parent);
     let processor_handle = inner_signal.for_each(processor_system).register(world);
-    world
+    entity.set(world
         .entity_mut(**processor_handle)
-        .insert(FlattenInnerIndex(index)); // Correct deref
+        .insert(FlattenInnerIndex(index)).id());
 
     let item = FlattenItem {
         processor_handle,
@@ -1243,153 +1180,168 @@ pub trait SignalVecExt: SignalVec {
     where
         Self: Sized,
         Self::Item: Clone + SSs,
-        S: Signal + 'static,
+        S: Signal + 'static + Clone,
         S::Item: Clone + Send + Sync,
         F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
+        /// A helper to spawn a forwarding processor for a new inner signal.
+        /// Returns a handle for cleanup, the inner signal's canonical ID, and its initial value.
+        fn spawn_processor<S: Signal + Clone>(
+            world: &mut World,
+            output_system: SignalSystem,
+            index: usize,
+            inner_signal: S,
+        ) -> (SignalHandle, SignalSystem, S::Item)
+        where
+            S::Item: Clone + Send + Sync,
+        {
+            let inner_signal_id = inner_signal.clone().register(world);
+
+            let temp_handle = inner_signal.clone().first().register(world);
+            let initial_value = poll_signal(world, *temp_handle)
+                .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<S::Item>().ok())
+                .map(|b| *b)
+                .expect("map_signal's inner signal must emit an initial value");
+            temp_handle.cleanup(world);
+
+            let self_entity = LazyEntity::new();
+
+            let processor = clone!((self_entity) move |In(value): In<S::Item>, world: &mut World| {
+                if let Some(&MappedSignalIndex(index)) = world.get::<MappedSignalIndex>(self_entity.get()) {
+                    let diff = VecDiff::UpdateAt { index, value };
+                    process_signals_helper(world, [output_system].into_iter(), Box::new(vec![diff]));
+                }
+                None::<()>
+            });
+
+            let processor_handle = inner_signal.map::<(), _, _, _>(processor).register(world);
+            self_entity.set(**processor_handle);
+            world.entity_mut(**processor_handle).insert(MappedSignalIndex(index));
+
+            // Fix E0308: Return the `SignalSystem` ID directly.
+            (processor_handle, *inner_signal_id, initial_value)
+        }
+
         let signal = LazySignal::new(move |world: &mut World| {
-            let parent_entity = LazyEntity::new();
             let system_id = world.register_system(system);
+            let output_system = lazy_signal_from_system(|In(diffs): In<Vec<VecDiff<S::Item>>>| diffs).register(world);
+            world.entity_mut(*output_system).insert(Upstream(HashSet::new()));  // we don't want this to be run as a root system
 
-            let SignalHandle(output_signal) = self
-                .for_each::<Vec<VecDiff<S::Item>>, _, _, _>(
-                    clone!((parent_entity) move |In(mut diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
-                        let parent = parent_entity.get();
-                        let mut new_diffs = vec![];
+            /// Local state for the manager system.
+            #[derive(Clone)]
+            struct ProcessorState {
+                handle: SignalHandle,
+                inner_signal_id: SignalSystem,
+            }
+            
+            let manager_system = self.for_each(
+                move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World, mut processors: Local<Vec<ProcessorState>>, mut is_not_initial: Local<bool>| {
+                    let mut new_diffs: Vec<VecDiff<S::Item>> = vec![];
 
-                        for diff in diffs.drain(..) {
-                            match diff {
-                                VecDiff::Replace { values } => {
-                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
-                                    let old_items = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.drain(..).collect::<Vec<_>>());
-
-                                    for item in old_items {
-                                        item.signal.cleanup(world);
-                                    }
-
-                                    let mut new_items = Vec::with_capacity(values.len());
-                                    let mut new_values = Vec::with_capacity(values.len());
-
-                                    for (i, value) in values.into_iter().enumerate() {
-                                        if let Ok(signal) = world.run_system_with(system_id, value) {
-                                            let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, i, signal, parent);
-                                            new_items.push(MapSignalItem {
-                                                signal: handle,
-                                                current_value: initial_value.clone(),
-                                            });
-                                            new_values.push(initial_value);
-                                        }
-                                    }
-                                    with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                                        data.items = new_items;
-                                    });
-                                    new_diffs.push(VecDiff::Replace { values: new_values });
-                                }
-                                VecDiff::InsertAt { index, value } => {
-                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
+                    for diff in diffs {
+                        match diff {
+                            VecDiff::Replace { values } => {
+                                for processor in processors.drain(..) { processor.handle.cleanup(world); }
+                                
+                                let mut new_values = Vec::new();
+                                for (i, value) in values.into_iter().enumerate() {
                                     if let Ok(signal) = world.run_system_with(system_id, value) {
-                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
-                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                                            data.items.insert(index, MapSignalItem {
-                                                signal: handle,
-                                                current_value: initial_value.clone(),
-                                            });
-                                        });
-                                        new_diffs.push(VecDiff::InsertAt { index, value: initial_value });
+                                        let (handle, inner_signal_id, initial_value) = spawn_processor(world, output_system, i, signal);
+                                        processors.push(ProcessorState { handle, inner_signal_id });
+                                        new_values.push(initial_value);
                                     }
                                 }
-                                VecDiff::UpdateAt { index, value } => {
-                                    let (old_item, system_id) = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| (data.items.remove(index), data.system));
-                                    old_item.signal.cleanup(world);
-                                    if let Ok(signal) = world.run_system_with(system_id, value) {
-                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
-                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                                            data.items.insert(index, MapSignalItem {
-                                                signal: handle,
-                                                current_value: initial_value.clone(),
-                                            });
-                                        });
+                                new_diffs.push(VecDiff::Replace { values: new_values });
+                            }
+                            VecDiff::InsertAt { index, value } => {
+                                if let Ok(signal) = world.run_system_with(system_id, value) {
+                                    let (handle, inner_signal_id, initial_value) = spawn_processor(world, output_system, index, signal);
+                                    processors.insert(index, ProcessorState { handle, inner_signal_id });
+
+                                    // Fix E0308: Dereference twice to get the Entity ID.
+                                    for (i, item_to_update) in processors.iter().enumerate().skip(index + 1) {
+                                        if let Some(mut idx) = world.get_mut::<MappedSignalIndex>(**item_to_update.handle) { idx.0 = i; }
+                                    }
+                                    new_diffs.push(VecDiff::InsertAt { index, value: initial_value });
+                                }
+                            }
+                            VecDiff::UpdateAt { index, value } => {
+                                if let Ok(new_inner_signal) = world.run_system_with(system_id, value) {
+                                    let new_inner_id = new_inner_signal.clone().register(world);
+
+                                    // Fix E0308: Compare SignalSystem to SignalSystem.
+                                    if processors[index].inner_signal_id == *new_inner_id {
+                                        // Fix E0308: Construct handle from the system ID.
+                                        new_inner_id.cleanup(world);
+                                    } else {
+                                        let old_processor = processors.remove(index);
+                                        old_processor.handle.cleanup(world);
+                                        
+                                        let (new_handle, new_id, initial_value) = spawn_processor(world, output_system, index, new_inner_signal);
+                                        processors.insert(index, ProcessorState { handle: new_handle, inner_signal_id: new_id });
                                         new_diffs.push(VecDiff::UpdateAt { index, value: initial_value });
                                     }
                                 }
-                                VecDiff::RemoveAt { index } => {
-                                    let item = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.remove(index));
-                                    item.signal.cleanup(world);
-                                    new_diffs.push(VecDiff::RemoveAt { index });
+                            }
+                            VecDiff::RemoveAt { index } => {
+                                let processor = processors.remove(index);
+                                processor.handle.cleanup(world);
+                                
+                                // Fix E0308: Dereference twice to get the Entity ID.
+                                for (i, item_to_update) in processors.iter().enumerate().skip(index) {
+                                    if let Some(mut idx) = world.get_mut::<MappedSignalIndex>(**item_to_update.handle) { idx.0 = i; }
                                 }
-                                VecDiff::Push { value } => {
-                                    let system_id = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.system);
-                                    if let Ok(signal) = world.run_system_with(system_id, value) {
-                                        let index = with_map_signal_data(world, parent, |data: Mut<MapSignalData<Self::Item, S>>| data.items.len());
-                                        let (handle, initial_value) = spawn_map_signal::<Self::Item, S>(world, index, signal, parent);
-                                        with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                                            data.items.push(MapSignalItem {
-                                                signal: handle,
-                                                current_value: initial_value.clone(),
-                                            });
-                                        });
-                                        new_diffs.push(VecDiff::Push { value: initial_value });
-                                    }
+                                new_diffs.push(VecDiff::RemoveAt { index });
+                            }
+                            VecDiff::Move { old_index, new_index } => {
+                                let processor = processors.remove(old_index);
+                                processors.insert(new_index, processor);
+
+                                let start = old_index.min(new_index);
+                                let end = old_index.max(new_index) + 1;
+                                // Fix E0308: Dereference twice to get the Entity ID.
+                                for (i, item_to_update) in processors.iter().enumerate().skip(start).take(end - start) {
+                                    if let Some(mut idx) = world.get_mut::<MappedSignalIndex>(**item_to_update.handle) { idx.0 = i; }
                                 }
-                                VecDiff::Pop {} => {
-                                    let item = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.pop().unwrap());
-                                    item.signal.cleanup(world);
-                                    new_diffs.push(VecDiff::Pop {});
+                                new_diffs.push(VecDiff::Move { old_index, new_index });
+                            }
+                            VecDiff::Push { value } => {
+                                let index = processors.len();
+                                if let Ok(signal) = world.run_system_with(system_id, value) {
+                                    let (handle, inner_signal_id, initial_value) = spawn_processor(world, output_system, index, signal);
+                                    processors.push(ProcessorState { handle, inner_signal_id });
+                                    new_diffs.push(VecDiff::Push { value: initial_value });
                                 }
-                                VecDiff::Move { old_index, new_index } => {
-                                    with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                                        let item = data.items.remove(old_index);
-                                        data.items.insert(new_index, item);
-                                    });
-                                    new_diffs.push(VecDiff::Move { old_index, new_index });
+                            }
+                            VecDiff::Pop {} => {
+                                if let Some(processor) = processors.pop() {
+                                    processor.handle.cleanup(world);
+                                    new_diffs.push(VecDiff::Pop{});
                                 }
-                                VecDiff::Clear {} => {
-                                    let old_items = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| data.items.drain(..).collect::<Vec<_>>());
-                                    for item in old_items {
-                                        item.signal.cleanup(world);
-                                    }
-                                    new_diffs.push(VecDiff::Clear {});
-                                }
+                            }
+                            VecDiff::Clear {} => {
+                                for processor in processors.drain(..) { processor.handle.cleanup(world); }
+                                new_diffs.push(VecDiff::Clear {});
                             }
                         }
+                    }
+                    
+                    if !new_diffs.is_empty() {
+                        if *is_not_initial {
+                            process_signals_helper(world, [output_system].into_iter(), Box::new(new_diffs));
+                        } else {
+                            *is_not_initial = true;
+                            world.commands().queue(move |world: &mut World| {
+                                process_signals_helper(world, [output_system].into_iter(), Box::new(new_diffs));
+                            })
+                        }
+                    }
+                }
+            ).register(world);
 
-                        let queued_diffs = with_map_signal_data(world, parent, |mut data: Mut<MapSignalData<Self::Item, S>>| {
-                            data.diffs.drain(..).collect::<Vec<_>>()
-                        });
-                        new_diffs.extend(queued_diffs);
+            world.entity_mut(*output_system).add_child(**manager_system);
 
-                        if new_diffs.is_empty() { None } else { Some(new_diffs) }
-                    }),
-                ).register(world);
-
-            parent_entity.set(*output_signal);
-
-            let SignalHandle(flusher) = SignalBuilder::from_entity(*output_signal)
-                .map::<Vec<VecDiff<Self::Item>>, _, _, _>(
-                    |In(entity), data: Query<&MapSignalData<Self::Item, S>>| {
-                        data.get(entity).ok().and_then(|data| {
-                            if !data.diffs.is_empty() {
-                                Some(vec![])
-                            } else {
-                                None
-                            }
-                        })
-                    },
-                )
-                .register(world);
-
-            pipe_signal(world, flusher, output_signal);
-
-            world
-                .entity_mut(*output_signal)
-                .insert(MapSignalData::<Self::Item, S> {
-                    items: vec![],
-                    diffs: vec![],
-                    system: system_id,
-                })
-                .add_child(system_id.entity());
-
-            output_signal
+            output_system
         });
 
         MapSignal {
@@ -1672,9 +1624,8 @@ pub trait SignalVecExt: SignalVec {
         // The inner system that manages the index entities.
         let signal = self.for_each(
             |In(diffs): In<Vec<VecDiff<Self::Item>>>,
-                world: &mut World,
-                mut index_entities: Local<Vec<Entity>>|
-            {
+             world: &mut World,
+             mut index_entities: Local<Vec<Entity>>| {
                 let mut out_diffs = vec![];
 
                 for diff in diffs {
@@ -1686,7 +1637,7 @@ pub trait SignalVecExt: SignalVec {
                                     entity.despawn();
                                 }
                             }
-                            
+
                             let mut new_values = Vec::with_capacity(values.len());
                             for (i, value) in values.into_iter().enumerate() {
                                 let entity = world.spawn(EnumeratedIndex(i)).id();
@@ -1700,51 +1651,80 @@ pub trait SignalVecExt: SignalVec {
                             index_entities.insert(index, entity);
 
                             // Increment indices of all subsequent items.
-                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(index + 1) {
-                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                            for (i, &entity_to_update) in
+                                index_entities.iter().enumerate().skip(index + 1)
+                            {
+                                if let Some(mut component) =
+                                    world.get_mut::<EnumeratedIndex>(entity_to_update)
+                                {
                                     component.0 = i;
                                 }
                             }
 
-                            out_diffs.push(VecDiff::InsertAt { index, value: (index_signal_from_entity(entity), value) });
+                            out_diffs.push(VecDiff::InsertAt {
+                                index,
+                                value: (index_signal_from_entity(entity), value),
+                            });
                         }
                         VecDiff::UpdateAt { index, value } => {
                             let entity = index_entities[index];
-                            out_diffs.push(VecDiff::UpdateAt { index, value: (index_signal_from_entity(entity), value) });
+                            out_diffs.push(VecDiff::UpdateAt {
+                                index,
+                                value: (index_signal_from_entity(entity), value),
+                            });
                         }
                         VecDiff::RemoveAt { index } => {
                             let entity = index_entities.remove(index);
                             if let Ok(entity) = world.get_entity_mut(entity) {
                                 entity.despawn();
                             }
-                            
+
                             // Decrement indices of all subsequent items.
-                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(index) {
-                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                            for (i, &entity_to_update) in
+                                index_entities.iter().enumerate().skip(index)
+                            {
+                                if let Some(mut component) =
+                                    world.get_mut::<EnumeratedIndex>(entity_to_update)
+                                {
                                     component.0 = i;
                                 }
                             }
                             out_diffs.push(VecDiff::RemoveAt { index });
                         }
-                        VecDiff::Move { old_index, new_index } => {
+                        VecDiff::Move {
+                            old_index,
+                            new_index,
+                        } => {
                             let entity = index_entities.remove(old_index);
                             index_entities.insert(new_index, entity);
 
                             // Update all indices between the move points.
                             let start = old_index.min(new_index);
                             let end = old_index.max(new_index) + 1;
-                            for (i, &entity_to_update) in index_entities.iter().enumerate().skip(start).take(end - start) {
-                                if let Some(mut component) = world.get_mut::<EnumeratedIndex>(entity_to_update) {
+                            for (i, &entity_to_update) in index_entities
+                                .iter()
+                                .enumerate()
+                                .skip(start)
+                                .take(end - start)
+                            {
+                                if let Some(mut component) =
+                                    world.get_mut::<EnumeratedIndex>(entity_to_update)
+                                {
                                     component.0 = i;
                                 }
                             }
-                            out_diffs.push(VecDiff::Move { old_index, new_index });
+                            out_diffs.push(VecDiff::Move {
+                                old_index,
+                                new_index,
+                            });
                         }
                         VecDiff::Push { value } => {
                             let index = index_entities.len();
                             let entity = world.spawn(EnumeratedIndex(index)).id();
-                            index_entities.push(entity);                                
-                            out_diffs.push(VecDiff::Push { value: (index_signal_from_entity(entity), value) });
+                            index_entities.push(entity);
+                            out_diffs.push(VecDiff::Push {
+                                value: (index_signal_from_entity(entity), value),
+                            });
                         }
                         VecDiff::Pop {} => {
                             if let Some(entity) = index_entities.pop() {
@@ -1764,8 +1744,12 @@ pub trait SignalVecExt: SignalVec {
                         }
                     }
                 }
-                if out_diffs.is_empty() { None } else { Some(out_diffs) }
-            }
+                if out_diffs.is_empty() {
+                    None
+                } else {
+                    Some(out_diffs)
+                }
+            },
         );
         Enumerate { signal }
     }

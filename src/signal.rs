@@ -1,4 +1,4 @@
-use super::{tree::*, utils::*};
+use super::{graph::*, utils::*};
 use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
 use bevy_platform::prelude::*;
@@ -1077,87 +1077,133 @@ pub trait SignalExt: Signal {
     /// let flattened_signal = outer_signal.flatten(); // Emits 10 or 20 based on the SwitchSignal resource
     /// ```
     fn flatten(self) -> Flatten<Self>
-where
-    Self: Sized,
-    Self::Item: Signal + Clone + 'static,
-    <Self::Item as Signal>::Item: Clone + Send + Sync,
-{
-    let signal = LazySignal::new(move |world: &mut World| {
-        // 1. The state entity that holds the latest value.
-        let state_entity = world.spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None }).id();
+    where
+        Self: Sized,
+        Self::Item: Signal + Clone + 'static,
+        <Self::Item as Signal>::Item: Clone + Send + Sync,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            // 1. The state entity that holds the latest value. This is the communication
+            //    channel between the dynamic inner signals and the static output signal.
+            let state_entity = world
+                .spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None })
+                .id();
 
-        // 2. The final output signal. Its ONLY job is to read the state.
-        // It does not need any upstream pipes. It will be run manually.
-        let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
-            move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                if let Ok(mut state) = query.get_mut(state_entity) {
-                    state.value.take()
-                } else {
-                    None
-                }
-            },
-        ).register(world);
-
-        // This is the "subscription manager". It reacts to the outer signal.
-        let manager_system = self.map(
-            move |In(inner_signal): In<Self::Item>,
-                  world: &mut World,
-                  mut active_forwarder: Local<Option<SignalHandle>>| {
-                if let Some(old_handle) = active_forwarder.take() {
-                    old_handle.cleanup(world);
-                }
-
-                // ================== The Core Logic ==================
-
-                // A. Get the initial value of the new inner signal, synchronously.
-                let temp_handle = inner_signal.clone().first().register(world);
-                let initial_value = poll_signal(world, *temp_handle)
-                    .and_then(|any_val| (any_val as Box<dyn Any>).downcast::<<Self::Item as Signal>::Item>().ok())
-                    .map(|b| *b);
-                temp_handle.cleanup(world);
-
-                // B. Write this initial value directly into the state component.
-                if let Some(value) = initial_value {
-                    if let Some(mut state) = world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity) {
-                        state.value = Some(value);
+            // 2. The final output signal (reader). Its ONLY job is to read the state component
+            //    and propagate the value. It has no upstream dependencies in the graph; it is
+            //    triggered manually by the forwarder.
+            let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
+                move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                    if let Ok(mut state) = query.get_mut(state_entity) {
+                        state.value.take()
+                    } else {
+                        None
                     }
-                }
-                
-                // C. Set up a forwarder for all *subsequent* updates.
-                let forwarder = inner_signal.map(
-                    move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                        if let Ok(mut state) = query.get_mut(state_entity) {
-                            state.value = Some(value);
+                },
+            ).register(world);
+
+            // 3. This is the "subscription manager" system. It reacts to the outer signal
+            //    emitting new inner signals.
+            let manager_system = self
+                .map(
+                    // This closure contains the core logic for switching subscriptions.
+                    move |In(inner_signal): In<Self::Item>,
+                        world: &mut World,
+                        mut active_forwarder: Local<Option<SignalHandle>>,
+                        mut active_signal_id: Local<Option<SignalSystem>>| {
+
+                        // A. Get the canonical ID of the newly emitted inner signal.
+                        //    `register` is idempotent; it just increments the ref-count if the system exists.
+                        let new_signal_id = inner_signal.clone().register(world);
+
+                        // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
+                        if Some(*new_signal_id) == *active_signal_id {
+                            // The signal is the same. Do nothing.
+                            // IMPORTANT: We must cleanup the handle from our `.register()` call above
+                            // to balance the reference count, otherwise it will leak.
+                            new_signal_id.cleanup(world);
+                            return;
                         }
+
+                        // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
+                        if let Some(old_handle) = active_forwarder.take() {
+                            old_handle.cleanup(world);
+                        }
+                        // The old signal ID handle is implicitly dropped when overwritten.
+                        
+                        // ================== The Core Setup Logic for the NEW Signal ==================
+
+                        // D. Get the initial value of the new inner signal, synchronously.
+                        //    This is done by creating a temporary one-shot signal.
+                        let temp_handle = inner_signal.clone().first().register(world);
+                        let initial_value = poll_signal(world, *temp_handle)
+                            .and_then(|any_val| {
+                                (any_val as Box<dyn Any>)
+                                    .downcast::<<Self::Item as Signal>::Item>()
+                                    .ok()
+                            })
+                            .map(|b| *b);
+                        // The temporary handle must be cleaned up immediately.
+                        temp_handle.cleanup(world);
+
+                        // E. Write this initial value directly into the state component.
+                        if let Some(value) = initial_value {
+                            if let Some(mut state) = world
+                                .get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity)
+                            {
+                                state.value = Some(value);
+                            }
+                        }
+
+                        // F. Set up a persistent forwarder for all *subsequent* updates from the new signal.
+                        let forwarder_handle = inner_signal
+                            .map(
+                                // This first map writes the value to the state component.
+                                move |In(value),
+                                    mut query: Query<
+                                    &mut FlattenState<<Self::Item as Signal>::Item>,
+                                >| {
+                                    if let Ok(mut state) = query.get_mut(state_entity) {
+                                        state.value = Some(value);
+                                    }
+                                },
+                            )
+                            .map(
+                                // This second map triggers the reader to run immediately after the state is written.
+                                move |_, world: &mut World| {
+                                process_signals_helper(
+                                    world,
+                                    [reader_system].into_iter(),
+                                    Box::new(()),
+                                );
+                            })
+                            .register(world);
+
+                        // G. Store the new forwarder's handle and the new signal's ID for the next frame.
+                        *active_forwarder = Some(forwarder_handle);
+                        *active_signal_id = Some(*new_signal_id);
+
+                        // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
+                        process_signals_helper(world, [reader_system].into_iter(), Box::new(()));
                     },
                 )
-                .map(move |_, world: &mut World| {
-                    // After writing, we MUST trigger the reader to run.
-                    process_signals_helper(world, [reader_system].into_iter(), Box::new(()));
-                })
                 .register(world);
-                
-                // D. Store the handle for future cleanup.
-                *active_forwarder = Some(forwarder);
 
-                // E. Manually trigger the reader to run RIGHT NOW to consume the initial value.
-                process_signals_helper(world, [reader_system].into_iter(), Box::new(()));
-            },
-        ).register(world);
+            // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final
+            //    output) is cleaned up, it will also despawn its children.
+            world
+                .entity_mut(*reader_system)
+                .add_child(state_entity)
+                .add_child(**manager_system);
 
-        world
-            .entity_mut(*reader_system)
-            .add_child(state_entity)
-            .add_child(**manager_system);
+            reader_system
+        });
 
-        reader_system
-    });
-
-    Flatten {
-        signal,
-        _marker: PhantomData,
+        Flatten {
+            signal,
+            _marker: PhantomData,
+        }
     }
-}
 
     /// Compares the signal's value for equality with a fixed `value`.
     ///
@@ -1981,7 +2027,7 @@ mod tests {
         .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
-        
+
         app.world_mut().resource_mut::<SignalSelector>().0 = true;
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(1));

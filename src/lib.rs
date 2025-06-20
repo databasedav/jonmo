@@ -37,10 +37,10 @@ use bevy_ecs::prelude::*;
 pub mod builder;
 pub mod signal;
 pub mod signal_vec;
-pub mod tree;
+pub mod graph;
 pub mod utils;
 
-use tree::*;
+use graph::*;
 
 /// The Bevy plugin required for `jonmo` signals to function.
 ///
