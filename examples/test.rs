@@ -19,10 +19,7 @@ fn main() {
                 camera,
             ),
         )
-        .add_systems(
-            Update,
-            (live.run_if(any_with_component::<Lifetime>), hotkeys, toggle),
-        )
+        .add_systems(Update, (live.run_if(any_with_component::<Lifetime>), hotkeys, toggle))
         .insert_resource(ToggleFilter(true))
         .run();
 }
@@ -34,6 +31,8 @@ struct Numbers(MutableVec<i32>);
 struct Lifetime(f32);
 
 fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
+    let list_a = MutableVec::from([1, 2, 3, 4, 5]).signal_vec();
+    let list_b = MutableVec::from([3, 4, 5]).signal_vec();
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -46,7 +45,21 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
         // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
-        numbers.signal_vec()
+        // numbers.signal_vec()
+        // SignalBuilder::from_system(|_: In<()>| 1)
+        SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
+            // .dedupe()
+            .switch_signal_vec(move |In(toggle)| {
+                if toggle {
+                    // println!("toggled to A");
+                    list_a.clone()
+                } else {
+                    // println!("toggled to B");
+                    list_b.clone()
+                }
+            })
+            // .dedupe()
+            // .to_signal_vec()
             // .filter_signal(|In(n)| {
             //     SignalBuilder::from_system(
             //         move |_: In<()>, toggle: Res<ToggleFilter>| {
@@ -54,9 +67,9 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //         },
             //     )
             // })
-            .map_signal(|In(n): In<i32>| {
-                SignalBuilder::from_system(move |_: In<()>| n + 1)
-            })
+            // .map_signal(|In(n): In<i32>| {
+            //     SignalBuilder::from_system(move |_: In<()>| n + 1)
+            // })
             // .flatten()
             // .chain(numbers)
             // .intersperse(0)

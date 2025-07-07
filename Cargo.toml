@@ -3,12 +3,16 @@ name = "jonmo"
 version = "0.1.5"
 edition = "2024"
 categories = ["asynchronous", "gui", "game-development"]
-description = "ergonomic Bevy-native reactivity powered by FRP signals"
+description = "ergonomic Bevy-native general-purpose reactivity powered by FRP signals"
 exclude = ["assets/", ".github/", "crates/"]
 keywords = ["reactive", "signals", "gamedev", "bevy"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/databasedav/jonmo"
 documentation = "https://docs.rs/jonmo"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
 
 [dependencies]
 bevy_app = { version = "0.16", default-features = false }

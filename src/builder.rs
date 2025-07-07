@@ -2,56 +2,24 @@
 
 use core::cmp::Ordering;
 
-use super::{signal::*, signal_vec::*, graph::*, utils::*};
+use super::{graph::*, signal::*, signal_vec::*, utils::*};
 use bevy_ecs::{component::HookContext, prelude::*, world::DeferredWorld};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
 };
 
-fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    if let Some(handles) = world.get_entity_mut(entity).ok().and_then(|mut entity| {
-        entity
-            .get_mut::<SignalHandles>()
-            .map(|mut handles| handles.0.drain(..).collect::<Vec<_>>())
-    }) {
-        let mut commands = world.commands();
-        for handle in handles {
-            commands.queue(|world: &mut World| handle.cleanup(world));
-        }
-    }
-}
-
-#[derive(Component, Default)]
-#[component(on_remove = cleanup_signal_handles)]
-pub struct SignalHandles(Vec<SignalHandle>);
-
-impl<T> From<T> for SignalHandles
-where
-    Vec<SignalHandle>: From<T>,
-{
-    #[inline]
-    fn from(values: T) -> Self {
-        SignalHandles(values.into())
-    }
-}
-
-impl SignalHandles {
-    pub fn add(&mut self, handle: SignalHandle) {
-        self.0.push(handle);
-    }
-}
-
 fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
-    if let Ok(mut entity) = world.get_entity_mut(entity) {
-        if let Some(mut handlers) = entity.get_mut::<SignalHandles>() {
-            handlers.add(handle);
-        }
+    if let Ok(mut entity) = world.get_entity_mut(entity)
+        && let Some(mut handlers) = entity.get_mut::<SignalHandles>()
+    {
+        handlers.add(handle);
     }
 }
 
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive systems and
-/// children using a declarative builder pattern. Inspired by Dominator's DomBuilder and Haalka's NodeBuilder.
+/// children using a declarative builder pattern. Inspired by Dominator's DomBuilder and Haalka's
+/// NodeBuilder.
 #[derive(Default, Clone)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
@@ -86,9 +54,7 @@ impl JonmoBuilder {
 
     /// Sync the entity with an [`OnceLock<Entity>`].
     pub fn entity_sync(self, entity: LazyEntity) -> Self {
-        self.on_spawn(move |_, e| {
-            let _ = entity.set(e);
-        })
+        self.on_spawn(move |_, e| entity.set(e))
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
@@ -102,12 +68,8 @@ impl JonmoBuilder {
         F: IntoSystem<In<(Entity, I)>, (), M> + SSs,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
-            let handle = Signal::register_signal(
-                signal
-                    .map(move |In(input): In<I>| (entity, input))
-                    .map(system),
-                world,
-            );
+            let handle =
+                Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
             add_handle(world, entity, handle);
         };
         self.on_spawn(on_spawn)
@@ -134,9 +96,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
     {
         self.signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&C>| {
-                components.get(entity).ok().cloned()
-            }))
+            f(signal.map(|In(entity): In<Entity>, components: Query<&C>| components.get(entity).ok().cloned()))
         })
     }
 
@@ -146,13 +106,9 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_entity(move |signal| {
-            f(
-                signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
-                    parents
-                        .iter_ancestors(entity)
-                        .nth(generations.saturating_sub(1))
-                }),
-            )
+            f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
+                parents.iter_ancestors(entity).nth(generations.saturating_sub(1))
+            }))
         })
     }
 
@@ -194,18 +150,17 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
-        self.entity_sync(entity.clone())
-            .signal_from_entity(move |signal| {
-                f(signal).map(move |In(component_option): In<IOC>, world: &mut World| {
-                    if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
-                        if let Some(component) = component_option.into() {
-                            entity.insert(component);
-                        } else {
-                            entity.remove::<C>();
-                        }
+        self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
+            f(signal).map(move |In(component_option): In<IOC>, world: &mut World| {
+                if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
+                    if let Some(component) = component_option.into() {
+                        entity.insert(component);
+                    } else {
+                        entity.remove::<C>();
                     }
-                })
+                }
             })
+        })
     }
 
     /// Register a reactive system that runs when the given [`Signal`] emits a value.
@@ -218,9 +173,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| {
-                components.get(entity).ok().cloned()
-            }))
+            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| components.get(entity).ok().cloned()))
         })
     }
 
@@ -233,9 +186,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<I>>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| {
-                Some(components.get(entity).ok().cloned())
-            }))
+            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| Some(components.get(entity).ok().cloned())))
         })
     }
 
@@ -252,33 +203,26 @@ impl JonmoBuilder {
                 // need to call like this to avoid type ambiguity
                 EntityWorldMut::insert_children(parent, offset, &[child_entity]);
                 child.spawn_on_entity(world, child_entity);
-            } else {
-                if let Ok(child) = world.get_entity_mut(child_entity) {
-                    child.despawn();
-                }
+            } else if let Ok(child) = world.get_entity_mut(child_entity) {
+                child.despawn();
             }
         };
         self.on_spawn(on_spawn)
     }
 
     /// Declare a reactive child. When the [`Signal`] outputs [`None`], the child is removed.
-    pub fn child_signal<T: Into<Option<JonmoBuilder>> + 'static>(
-        self,
-        child_option: impl Signal<Item = T> + SSs,
-    ) -> Self {
+    pub fn child_signal<T: Into<Option<JonmoBuilder>> + 'static>(self, child_option: impl Signal<Item = T>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(0);
         let child_block_populations = self.child_block_populations.clone();
         let on_spawn = move |world: &mut World, parent: Entity| {
             let system =
-                move |In(child_option): In<T>,
-                      world: &mut World,
-                      mut existing_child_option: Local<Option<Entity>>| {
+                move |In(child_option): In<T>, world: &mut World, mut existing_child_option: Local<Option<Entity>>| {
                     if let Some(child) = child_option.into() {
-                        if let Some(existing_child) = existing_child_option.take() {
-                            if let Ok(entity) = world.get_entity_mut(existing_child) {
-                                entity.despawn();
-                            }
+                        if let Some(existing_child) = existing_child_option.take()
+                            && let Ok(entity) = world.get_entity_mut(existing_child)
+                        {
+                            entity.despawn();
                         }
                         let child_entity = world.spawn_empty().id();
                         if let Ok(mut parent) = world.get_entity_mut(parent) {
@@ -286,17 +230,15 @@ impl JonmoBuilder {
                             parent.insert_children(offset, &[child_entity]);
                             child.spawn_on_entity(world, child_entity);
                             *existing_child_option = Some(child_entity);
-                        } else {
-                            if let Ok(child) = world.get_entity_mut(child_entity) {
-                                child.despawn();
-                            }
+                        } else if let Ok(child) = world.get_entity_mut(child_entity) {
+                            child.despawn();
                         }
                         child_block_populations.lock().unwrap()[block] = 1;
                     } else {
-                        if let Some(existing_child) = existing_child_option.take() {
-                            if let Ok(entity) = world.get_entity_mut(existing_child) {
-                                entity.despawn();
-                            }
+                        if let Some(existing_child) = existing_child_option.take()
+                            && let Ok(entity) = world.get_entity_mut(existing_child)
+                        {
+                            entity.despawn();
                         }
                         child_block_populations.lock().unwrap()[block] = 0;
                     }
@@ -308,17 +250,11 @@ impl JonmoBuilder {
     }
 
     /// Declare static children.
-    pub fn children(
-        self,
-        children: impl IntoIterator<Item = impl Into<JonmoBuilder>> + Send + 'static,
-    ) -> Self {
+    pub fn children(self, children: impl IntoIterator<Item = impl Into<JonmoBuilder>> + Send + 'static) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         let children_vec: Vec<JonmoBuilder> = children.into_iter().map(Into::into).collect(); // Collect into Vec
         let population = children_vec.len();
-        self.child_block_populations
-            .lock()
-            .unwrap()
-            .push(population);
+        self.child_block_populations.lock().unwrap().push(population);
         let child_block_populations = self.child_block_populations.clone(); // Clone Arc
 
         let on_spawn = move |world: &mut World, parent: Entity| {
@@ -330,10 +266,7 @@ impl JonmoBuilder {
             if let Ok(mut parent) = world.get_entity_mut(parent) {
                 let offset = offset(block, &child_block_populations.lock().unwrap()); // Recalculate offset
                 parent.insert_children(offset, &children_entities);
-                for (child, child_entity) in children_vec
-                    .into_iter()
-                    .zip(children_entities.iter().copied())
-                {
+                for (child, child_entity) in children_vec.into_iter().zip(children_entities.iter().copied()) {
                     // Use copied iterator
                     child.spawn_on_entity(world, child_entity);
                 }
@@ -350,10 +283,7 @@ impl JonmoBuilder {
     }
 
     /// Declare reactive children based on a `SignalVec`.
-    pub fn children_signal_vec(
-        self,
-        children_signal_vec: impl SignalVec<Item = JonmoBuilder> + SSs,
-    ) -> Self {
+    pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = JonmoBuilder>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(0);
         let child_block_populations = self.child_block_populations.clone();
@@ -369,34 +299,25 @@ impl JonmoBuilder {
                                     child.despawn();
                                 }
                             }
-                            *children_entities =
-                                children.iter().map(|_| world.spawn_empty().id()).collect();
+                            *children_entities = children.iter().map(|_| world.spawn_empty().id()).collect();
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                let offset =
-                                    offset(block, &child_block_populations.lock().unwrap());
+                                let offset = offset(block, &child_block_populations.lock().unwrap());
                                 parent.insert_children(offset, &children_entities);
-                                for (child, child_entity) in
-                                    children.into_iter().zip(children_entities.iter().copied())
+                                for (child, child_entity) in children.into_iter().zip(children_entities.iter().copied())
                                 {
                                     child.spawn_on_entity(world, child_entity);
                                 }
-                                child_block_populations.lock().unwrap()[block] =
-                                    children_entities.len();
+                                child_block_populations.lock().unwrap()[block] = children_entities.len();
                             }
                         }
-                        VecDiff::InsertAt {
-                            index,
-                            value: child,
-                        } => {
+                        VecDiff::InsertAt { index, value: child } => {
                             let child_entity = world.spawn_empty().id();
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                let offset =
-                                    offset(block, &child_block_populations.lock().unwrap());
+                                let offset = offset(block, &child_block_populations.lock().unwrap());
                                 parent.insert_children(offset + index, &[child_entity]);
                                 child.spawn_on_entity(world, child_entity);
                                 children_entities.insert(index, child_entity);
-                                child_block_populations.lock().unwrap()[block] =
-                                    children_entities.len();
+                                child_block_populations.lock().unwrap()[block] = children_entities.len();
                             } else {
                                 // Parent despawned during child insertion
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
@@ -409,16 +330,11 @@ impl JonmoBuilder {
                             let mut push_child_entity = false;
                             {
                                 if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                    let offset =
-                                        offset(block, &child_block_populations.lock().unwrap());
-                                    parent.insert_children(
-                                        offset + children_entities.len(),
-                                        &[child_entity],
-                                    );
+                                    let offset = offset(block, &child_block_populations.lock().unwrap());
+                                    parent.insert_children(offset + children_entities.len(), &[child_entity]);
                                     child.spawn_on_entity(world, child_entity);
                                     push_child_entity = true;
-                                    child_block_populations.lock().unwrap()[block] =
-                                        children_entities.len();
+                                    child_block_populations.lock().unwrap()[block] = children_entities.len();
                                 } else {
                                     // parent despawned during child spawning
                                     if let Ok(child) = world.get_entity_mut(child_entity) {
@@ -431,17 +347,16 @@ impl JonmoBuilder {
                             }
                         }
                         VecDiff::UpdateAt { index, value: node } => {
-                            if let Some(existing_child) = children_entities.get(index).copied() {
-                                if let Ok(child) = world.get_entity_mut(existing_child) {
-                                    child.despawn(); // removes from parent
-                                }
+                            if let Some(existing_child) = children_entities.get(index).copied()
+                                && let Ok(child) = world.get_entity_mut(existing_child)
+                            {
+                                child.despawn(); // removes from parent
                             }
                             let child_entity = world.spawn_empty().id();
                             let mut set_child_entity = false;
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
                                 set_child_entity = true;
-                                let offset =
-                                    offset(block, &child_block_populations.lock().unwrap());
+                                let offset = offset(block, &child_block_populations.lock().unwrap());
                                 parent.insert_children(offset + index, &[child_entity]);
                                 node.spawn_on_entity(world, child_entity);
                             } else {
@@ -454,10 +369,7 @@ impl JonmoBuilder {
                                 children_entities[index] = child_entity;
                             }
                         }
-                        VecDiff::Move {
-                            old_index,
-                            new_index,
-                        } => {
+                        VecDiff::Move { old_index, new_index } => {
                             children_entities.swap(old_index, new_index);
                             fn move_from_to(
                                 parent: &mut EntityWorldMut,
@@ -465,41 +377,26 @@ impl JonmoBuilder {
                                 old_index: usize,
                                 new_index: usize,
                             ) {
-                                if old_index != new_index {
-                                    if let Some(old_entity) =
-                                        children_entities.get(old_index).copied()
-                                    {
-                                        parent.remove_children(&[old_entity]);
-                                        parent.insert_children(new_index, &[old_entity]);
-                                    }
+                                if old_index != new_index
+                                    && let Some(old_entity) = children_entities.get(old_index).copied()
+                                {
+                                    parent.remove_children(&[old_entity]);
+                                    parent.insert_children(new_index, &[old_entity]);
                                 }
                             }
-                            fn swap(
-                                parent: &mut EntityWorldMut,
-                                children_entities: &[Entity],
-                                a: usize,
-                                b: usize,
-                            ) {
+                            fn swap(parent: &mut EntityWorldMut, children_entities: &[Entity], a: usize, b: usize) {
                                 move_from_to(parent, children_entities, a, b);
                                 match a.cmp(&b) {
                                     Ordering::Less => {
                                         move_from_to(parent, children_entities, b - 1, a);
                                     }
-                                    Ordering::Greater => {
-                                        move_from_to(parent, children_entities, b + 1, a)
-                                    }
+                                    Ordering::Greater => move_from_to(parent, children_entities, b + 1, a),
                                     _ => {}
                                 }
                             }
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                let offset =
-                                    offset(block, &child_block_populations.lock().unwrap());
-                                swap(
-                                    &mut parent,
-                                    &children_entities,
-                                    offset + old_index,
-                                    offset + new_index,
-                                );
+                                let offset = offset(block, &child_block_populations.lock().unwrap());
+                                swap(&mut parent, &children_entities, offset + old_index, offset + new_index);
                             }
                         }
                         VecDiff::RemoveAt { index } => {
@@ -508,8 +405,7 @@ impl JonmoBuilder {
                                     child.despawn(); // removes from parent
                                 }
                                 children_entities.remove(index);
-                                child_block_populations.lock().unwrap()[block] =
-                                    children_entities.len();
+                                child_block_populations.lock().unwrap()[block] = children_entities.len();
                             }
                         }
                         VecDiff::Pop => {
@@ -517,8 +413,7 @@ impl JonmoBuilder {
                                 if let Ok(child) = world.get_entity_mut(child_entity) {
                                     child.despawn();
                                 }
-                                child_block_populations.lock().unwrap()[block] =
-                                    children_entities.len();
+                                child_block_populations.lock().unwrap()[block] = children_entities.len();
                             }
                         }
                         VecDiff::Clear => {
@@ -527,8 +422,7 @@ impl JonmoBuilder {
                                     child.despawn();
                                 }
                             }
-                            child_block_populations.lock().unwrap()[block] =
-                                children_entities.len();
+                            child_block_populations.lock().unwrap()[block] = children_entities.len();
                         }
                     }
                 }

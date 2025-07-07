@@ -19,10 +19,7 @@ fn main() {
                 camera,
             ),
         )
-        .add_systems(
-            Update,
-            (live.run_if(any_with_component::<Lifetime>), hotkeys),
-        )
+        .add_systems(Update, (live.run_if(any_with_component::<Lifetime>), hotkeys))
         .run();
 }
 
@@ -42,11 +39,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    .children_signal_vec(
-        colors
-            .enumerate()
-            .map_in(|(index, color)| item(index, color)),
-    )
+    .children_signal_vec(colors.enumerate().map_in(|(index, color)| item(index, color)))
 }
 
 #[derive(Component, Clone)]

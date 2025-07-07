@@ -18,7 +18,9 @@ use bevy_platform::{
     },
 };
 use core::{any::Any, hash::Hash, marker::PhantomData};
+use dyn_clone::{DynClone, clone_trait_object};
 
+/// Newtype wrapper for [`Entity`]s that hold systems in the signal graph.
 #[derive(Clone, Copy, Deref, Debug, PartialEq, Eq, Hash)]
 pub struct SignalSystem(pub Entity);
 
@@ -34,30 +36,24 @@ impl<I: 'static, O> From<SystemId<In<I>, O>> for SignalSystem {
     }
 }
 
-// /// Component storing metadata for signal system nodes, primarily for reference counting.
 #[derive(Component, Deref)]
 pub(crate) struct SignalRegistrationCount(i32);
 
 impl SignalRegistrationCount {
-    /// Creates metadata with an initial reference count of 1.
     pub(crate) fn new() -> Self {
         Self(1)
     }
 
     pub(crate) fn increment(&mut self) {
-        self.0 += 1;
+        self.0 += 1
     }
 
     pub(crate) fn decrement(&mut self) {
-        self.0 -= 1;
+        self.0 -= 1
     }
 }
 
-/// Helper to register a system, add the [`SystemRunner`] component, and manage [`SignalNodeMetadata`].
-///
-/// Ensures the system is registered, attaches a runner component, and handles the
-/// reference counting via `SignalNodeMetadata`. Returns the `SystemId`.
-pub fn register_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
+pub(crate) fn register_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
     I: 'static,
     O: Clone + 'static,
@@ -70,17 +66,15 @@ where
 fn downstream_syncer(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
     world.commands().queue(move |world: &mut World| {
         let _ = world.run_system_once(
-            move |upstreams: Query<&Upstream>,
-                  mut downstreams: Query<&mut Downstream>,
-                  mut commands: Commands| {
+            move |upstreams: Query<&Upstream>, mut downstreams: Query<&mut Downstream>, mut commands: Commands| {
                 if let Ok(upstream) = upstreams.get(entity) {
                     for &upstream_system in upstream.iter() {
                         if let Ok(mut downstreams) = downstreams.get_mut(*upstream_system) {
                             downstreams.0.remove(&SignalSystem(entity));
-                            if downstreams.0.is_empty() {
-                                if let Ok(mut entity) = commands.get_entity(*upstream_system) {
-                                    entity.remove::<Downstream>();
-                                }
+                            if downstreams.0.is_empty()
+                                && let Ok(mut entity) = commands.get_entity(*upstream_system)
+                            {
+                                entity.remove::<Downstream>();
                             }
                         }
                     }
@@ -90,7 +84,7 @@ fn downstream_syncer(mut world: DeferredWorld, HookContext { entity, .. }: HookC
     });
 }
 
-// TODO: 0.16 relationships
+// TODO: many to many relationships
 #[derive(Component, Deref, Clone)]
 #[component(on_remove = downstream_syncer)]
 pub(crate) struct Upstream(pub(crate) HashSet<SignalSystem>);
@@ -106,7 +100,8 @@ impl<'a> IntoIterator for &'a Upstream {
     }
 }
 
-#[derive(Component, Deref)]
+// TODO: many to many relationships
+#[derive(Component, Deref, Clone)]
 pub(crate) struct Downstream(HashSet<SignalSystem>);
 
 impl<'a> IntoIterator for &'a Downstream {
@@ -120,6 +115,7 @@ impl<'a> IntoIterator for &'a Downstream {
     }
 }
 
+// TODO: this isn't sensitive to switchers ?
 fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem) -> bool {
     if source == target {
         return true;
@@ -132,10 +128,10 @@ fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem)
         if node == source {
             return true;
         }
-        if visited.insert(node) {
-            if let Some(down) = world.get::<Downstream>(*node) {
-                stack.extend(down.iter().copied());
-            }
+        if visited.insert(node)
+            && let Some(down) = world.get::<Downstream>(*node)
+        {
+            stack.extend(down.iter().copied());
         }
     }
     false
@@ -144,10 +140,7 @@ fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem)
 pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: SignalSystem) {
     if would_create_cycle(world, source, target) {
         // TODO: panic instead ?
-        error!(
-            "cycle detected when attempting to pipe {:?} → {:?}",
-            source, target
-        );
+        error!("cycle detected when attempting to pipe {:?} → {:?}", source, target);
         return;
     }
     if let Ok(mut upstream) = world.get_entity_mut(*source) {
@@ -166,15 +159,10 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
     }
 }
 
-/// Component holding the type-erased system runner function.
-///
-/// This component is attached to the entity associated with each registered signal system.
-/// It contains an `Arc<Box<dyn Fn(...)>>` that captures the specific `SystemId` and
-/// handles the type-erased execution logic, including downcasting inputs and boxing outputs.
 #[derive(Component, Clone)]
 pub(crate) struct SystemRunner {
-    pub(crate) runner:
-        Arc<Box<dyn Fn(&mut World, Box<dyn Any>) -> Option<Box<dyn AnyClone>> + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
+    pub(crate) runner: Arc<Box<dyn Fn(&mut World, Box<dyn Any>) -> Option<Box<dyn AnyClone>> + Send + Sync>>,
 }
 
 trait Runnable: Send + Sync {
@@ -206,7 +194,7 @@ where
                 .map(|o| Box::new(o) as Box<dyn AnyClone>),
             Err(error) => {
                 error!(
-                    "Failed to downcast input to type for system {:?}: {:?}",
+                    "failed to downcast input to type for system {:?}: {:?}",
                     self.system, error
                 );
                 None
@@ -216,24 +204,20 @@ where
 }
 
 impl SystemRunner {
-    /// Executes the stored system function with the given type-erased input.
     pub(crate) fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
         (self.runner)(world, input)
     }
 }
 
-fn clone_downstream(downstream: &Downstream) -> Vec<SignalSystem> {
-    downstream.iter().cloned().collect()
-}
-
-use dyn_clone::{DynClone, clone_trait_object};
-
-pub trait AnyClone: Any + DynClone {}
+pub(crate) trait AnyClone: Any + DynClone {}
 clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
 
-pub(crate) fn process_signals_helper(
+#[derive(Component)]
+pub(crate) struct SkipOnce;
+
+pub(crate) fn process_signals(
     world: &mut World,
     signals: impl IntoIterator<Item = SignalSystem>,
     input: Box<dyn AnyClone>,
@@ -243,37 +227,43 @@ pub(crate) fn process_signals_helper(
             .get_entity(*signal)
             .ok()
             .and_then(|entity| entity.get::<SystemRunner>().cloned())
+            && let Some(output) = runner.run(world, input.clone())
+            && let Some(downstream) = world.get::<Downstream>(*signal).cloned()
         {
-            if let Some(output) = runner.run(world, input.clone()) {
-                if let Some(downstream) = world.get::<Downstream>(*signal).map(clone_downstream) {
-                    process_signals_helper(world, downstream, output);
-                }
-            }
+            let targets = downstream
+                .iter()
+                .copied()
+                // .filter(|&signal| {
+                //     let mut entity = world.entity_mut(*signal);
+                //     let filter = entity.get::<SkipOnce>().is_none();
+                //     if !filter {
+                //         entity.remove::<SkipOnce>();
+                //     }
+                //     filter
+                // })
+                .collect::<Vec<_>>();
+            process_signals(world, targets, output);
         }
     }
 }
 
-/// System that drives signal propagation by calling [`SignalPropagator::execute`].
-/// Added to the `Update` schedule by the [`JonmoPlugin`]. This system runs once per frame.
-/// It temporarily removes the [`SignalPropagator`] resource to allow mutable access to the `World`
-/// during system execution within the propagator.
-pub(crate) fn process_signals(world: &mut World) {
-    let mut orphan_parents = SystemState::<
-        Query<Entity, (With<SystemRunner>, Without<Upstream>, With<Downstream>)>,
-    >::new(world);
+pub(crate) fn process_signal_graph(world: &mut World) {
+    let mut orphan_parents =
+        SystemState::<Query<Entity, (With<SystemRunner>, Without<Upstream>, With<Downstream>)>>::new(world);
     let orphan_parents = orphan_parents.get(world);
     let orphan_parents = orphan_parents.iter().map(SignalSystem).collect::<Vec<_>>();
-    process_signals_helper(world, orphan_parents, Box::new(()));
+    process_signals(world, orphan_parents, Box::new(()));
 }
 
-/// Handle returned by [`SignalExt::register`] used for managing the lifecycle of a registered signal chain.
-///
-/// Contains the [`SignalSystem`] entity representing the final node of the signal chain
-/// registered by a specific `register` call.
-///
-/// Dropping the handle does *not* automatically clean up the underlying systems.
-/// Use the [`cleanup`](SignalHandle::cleanup) method for explicit cleanup, which decrements
-/// reference counts and potentially despawns systems if their count reaches zero.
+/// Handle to a particular node of the signal graph, returned by
+/// [`SignalExt::register`](super::signal::SignalExt),
+/// [`SignalVecExt::register`](super::signal_vec::SignalVecExt::register), and
+/// [`SignalMap::register`](super::signal_map::SignalMapExt::register). In order for signals to be
+/// appropriately cleaned up, for every call to `.register` made to some particular signal or its
+/// clones, [`SignalHandle::cleanup`] must be called on a corresponding [`SignalHandle`] or a
+/// downstream [`SignalHandle`]. Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`]
+/// will take care of this when the corresponding [`Entity`] is despawned, and using the
+/// [`JonmoBuilder`](super::builder::JonmoBuilder) will manage this internally.
 #[derive(Clone, Deref, DerefMut, Debug)]
 pub struct SignalHandle(pub SignalSystem);
 
@@ -284,25 +274,48 @@ impl From<SignalSystem> for SignalHandle {
 }
 
 impl SignalHandle {
-    /// Creates a new SignalHandle.
-    /// This is crate-public to allow construction from other modules.
+    #[allow(missing_docs)]
     pub(crate) fn new(signal: SignalSystem) -> Self {
         Self(signal)
     }
 
-    /// Cleans up the registered signal chain associated with this handle.
-    ///
-    /// This method traverses upstream from the signal system entity stored in the handle.
-    /// For each system encountered (including the starting one), it decrements its
-    /// [`SignalRegistrationCount`]. If a system's count reaches zero, its [`Upstream`]
-    /// and [`Downstream`] components are removed, effectively disconnecting it from the
-    /// signal graph and allowing it to be potentially despawned later if unused elsewhere.
-    ///
-    /// **Note:** This performs reference counting. The actual systems are only fully removed
-    /// when their registration count drops to zero, meaning no other active `SignalHandle`
-    /// is still referencing them.
+    /// Decrements the usage tracking of the corresponding [`Signal`] and all its [`Upstream`]s,
+    /// potentially despawning the backing [`System`], see [`SignalHandle`].
     pub fn cleanup(self, world: &mut World) {
         signal_handle_cleanup_helper(world, [self.0]);
+    }
+}
+
+fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+    if let Some(handles) = world.get_entity_mut(entity).ok().and_then(|mut entity| {
+        entity
+            .get_mut::<SignalHandles>()
+            .map(|mut handles| handles.0.drain(..).collect::<Vec<_>>())
+    }) {
+        let mut commands = world.commands();
+        for handle in handles {
+            commands.queue(|world: &mut World| handle.cleanup(world));
+        }
+    }
+}
+
+#[derive(Component, Default)]
+#[component(on_remove = cleanup_signal_handles)]
+pub struct SignalHandles(Vec<SignalHandle>);
+
+impl<T> From<T> for SignalHandles
+where
+    Vec<SignalHandle>: From<T>,
+{
+    #[inline]
+    fn from(values: T) -> Self {
+        SignalHandles(values.into())
+    }
+}
+
+impl SignalHandles {
+    pub fn add(&mut self, handle: SignalHandle) {
+        self.0.push(handle);
     }
 }
 
@@ -335,10 +348,11 @@ where
 /// Internal enum used by `RegisterOnceSignal` to track registration state.
 pub(crate) struct LazySignalState {
     references: AtomicUsize,
-    system: RwLock<LazySystem>,
+    pub(crate) system: RwLock<LazySystem>,
 }
 
-enum LazySystem {
+pub(crate) enum LazySystem {
+    #[allow(clippy::type_complexity)]
     System(Option<Box<dyn FnOnce(&mut World) -> SignalSystem + Send + Sync>>),
     Registered(SignalSystem),
 }
@@ -349,23 +363,15 @@ impl LazySystem {
     pub fn register(&mut self, world: &mut World) -> SignalSystem {
         match self {
             LazySystem::System(f) => {
-                let signal = f.take().unwrap()(world).into();
+                let signal = f.take().unwrap()(world);
                 *self = LazySystem::Registered(signal);
                 signal
             }
             LazySystem::Registered(signal) => {
-                // let mut signals = world
-                //     .get_resource_mut::<Signals>()
-                //     .unwrap();
-                // if let Some(data) = signals.signals.get_mut(signal) {
-                //     data.register()
-                // }
-                if let Ok(mut system) = world.get_entity_mut(**signal) {
-                    if let Some(mut registration_count) =
-                        system.get_mut::<SignalRegistrationCount>()
-                    {
-                        registration_count.increment();
-                    }
+                if let Ok(mut system) = world.get_entity_mut(**signal)
+                    && let Some(mut registration_count) = system.get_mut::<SignalRegistrationCount>()
+                {
+                    registration_count.increment();
                 }
                 *signal
             }
@@ -373,18 +379,12 @@ impl LazySystem {
     }
 }
 
-/// A helper struct to ensure a signal system is registered only once in the `World`.
-///
-/// This struct wraps the registration logic. When `register` is called, it checks
-/// if the system has already been registered. If not, it runs the provided closure
-/// to create and register the system. If it has, it increments the registration count
-/// for the existing system.
 pub(crate) struct LazySignal {
-    inner: Arc<LazySignalState>,
+    pub(crate) inner: Arc<LazySignalState>,
 }
 
 impl LazySignal {
-    pub fn new<F: FnOnce(&mut World) -> SignalSystem + SSs>(system: F) -> Self {
+    pub(crate) fn new<F: FnOnce(&mut World) -> SignalSystem + SSs>(system: F) -> Self {
         LazySignal {
             inner: Arc::new(LazySignalState {
                 references: AtomicUsize::new(1),
@@ -393,12 +393,12 @@ impl LazySignal {
         }
     }
 
-    pub fn register(self, world: &mut World) -> SignalSystem {
+    pub(crate) fn register(self, world: &mut World) -> SignalSystem {
         let signal = self.inner.system.write().unwrap().register(world);
-        if let Ok(mut entity) = world.get_entity_mut(*signal) {
-            if !entity.contains::<LazySignalHolder>() {
-                entity.insert(LazySignalHolder(self));
-            }
+        if let Ok(mut entity) = world.get_entity_mut(*signal)
+            && !entity.contains::<LazySignalHolder>()
+        {
+            entity.insert(LazySignalHolder(self));
         }
         signal
     }
@@ -416,10 +416,10 @@ impl Clone for LazySignal {
 impl Drop for LazySignal {
     fn drop(&mut self) {
         // <= 2 because we also wna queue if only the holder remains
-        if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2 {
-            if let LazySystem::Registered(signal) = *self.inner.system.read().unwrap() {
-                CLEANUP_SIGNALS.lock().unwrap().push(signal);
-            }
+        if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2
+            && let LazySystem::Registered(signal) = *self.inner.system.read().unwrap()
+        {
+            CLEANUP_SIGNALS.lock().unwrap().push(signal);
         }
     }
 }
@@ -427,22 +427,16 @@ impl Drop for LazySignal {
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
 
-pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn flush_cleanup_signals(world: &mut World) {
-    let signals = CLEANUP_SIGNALS
-        .lock()
-        .unwrap()
-        .drain(..)
-        .collect::<Vec<_>>();
+    let signals = CLEANUP_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();
     for signal in signals {
-        if let Ok(entity) = world.get_entity_mut(*signal) {
-            if let Some(registration_count) = entity.get::<SignalRegistrationCount>() {
-                if **registration_count == 0 {
-                    entity.despawn();
-                }
-            }
+        if let Ok(entity) = world.get_entity_mut(*signal)
+            && let Some(registration_count) = entity.get::<SignalRegistrationCount>()
+            && **registration_count == 0
+        {
+            entity.despawn();
         }
     }
 }
@@ -457,10 +451,7 @@ where
     LazySignal::new(move |world: &mut World| spawn_signal(world, system))
 }
 
-/// An iterator that traverses *upstream* signal dependencies.
-///
-/// Starting from a given signal system entity, it yields the entity IDs of its direct
-/// and indirect upstream dependencies (systems that provide input to it).
+#[allow(dead_code)]
 pub(crate) struct UpstreamIter<'w, 's, D: QueryData, F: QueryFilter>
 where
     D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
@@ -469,6 +460,7 @@ where
     upstreams: Vec<SignalSystem>,
 }
 
+#[allow(dead_code)]
 impl<'w, 's, D: QueryData, F: QueryFilter> UpstreamIter<'w, 's, D, F>
 where
     D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
@@ -477,12 +469,7 @@ where
     pub fn new(upstreams_query: &'w Query<'w, 's, D, F>, signal: SignalSystem) -> Self {
         UpstreamIter {
             upstreams_query,
-            upstreams: upstreams_query
-                .get(*signal)
-                .into_iter()
-                .flatten()
-                .copied()
-                .collect(),
+            upstreams: upstreams_query.get(*signal).into_iter().flatten().copied().collect(),
         }
     }
 }
@@ -504,11 +491,7 @@ where
     }
 }
 
-/// An iterator that traverses *downstream* signal dependencies.
-///
-/// Starting from a given signal system entity, it yields the entity IDs of its direct
-/// and indirect downstream dependencies (systems that consume its output).
-#[allow(dead_code)] // Currently unused within the crate, but potentially useful
+#[allow(dead_code)]
 pub(crate) struct DownstreamIter<'w, 's, D: QueryData, F: QueryFilter>
 where
     D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
@@ -521,17 +504,11 @@ impl<'w, 's, D: QueryData, F: QueryFilter> DownstreamIter<'w, 's, D, F>
 where
     D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
 {
-    /// Returns a new [`DescendantIter`].
-    #[allow(dead_code)] // Currently unused within the crate
+    #[allow(dead_code)]
     pub fn new(downstreams_query: &'w Query<'w, 's, D, F>, signal: SignalSystem) -> Self {
         DownstreamIter {
             downstreams_query,
-            downstreams: downstreams_query
-                .get(*signal)
-                .into_iter()
-                .flatten()
-                .copied()
-                .collect(),
+            downstreams: downstreams_query.get(*signal).into_iter().flatten().copied().collect(),
         }
     }
 }
@@ -553,10 +530,7 @@ where
     }
 }
 
-pub(crate) fn signal_handle_cleanup_helper(
-    world: &mut World,
-    signals: impl IntoIterator<Item = SignalSystem>,
-) {
+pub(crate) fn signal_handle_cleanup_helper(world: &mut World, signals: impl IntoIterator<Item = SignalSystem>) {
     for signal in signals {
         if let Some(upstreams) = world.get::<Upstream>(*signal).cloned() {
             signal_handle_cleanup_helper(world, upstreams.0);
@@ -571,21 +545,17 @@ pub(crate) fn signal_handle_cleanup_helper(
                     no_registrations = true;
                 }
             }
-            if no_registrations {
-                if let Some(LazySignalHolder(lazy_signal)) = entity.get::<LazySignalHolder>() {
-                    if lazy_signal.inner.references.load(Ordering::SeqCst) == 1 {
-                        entity.despawn();
-                    }
-                }
+            if no_registrations
+                && let Some(LazySignalHolder(lazy_signal)) = entity.get::<LazySignalHolder>()
+                && lazy_signal.inner.references.load(Ordering::SeqCst) == 1
+            {
+                entity.despawn();
             }
         }
     }
 }
 
-pub fn poll_signal_one_shot(
-    In(signal): In<SignalSystem>,
-    world: &mut World,
-) -> Option<Box<dyn AnyClone>> {
+pub(crate) fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Option<Box<dyn AnyClone>> {
     fn visit(
         world: &mut World,
         node: SignalSystem,
@@ -621,10 +591,10 @@ pub fn poll_signal_one_shot(
             last_output = runner.run(world, Box::new(()));
         } else {
             for up in upstreams {
-                if let Some(input) = visit(world, up, cache) {
-                    if let Some(out) = runner.run(world, input) {
-                        last_output = Some(out);
-                    }
+                if let Some(input) = visit(world, up, cache)
+                    && let Some(out) = runner.run(world, input)
+                {
+                    last_output = Some(out);
                 }
             }
         }
@@ -637,6 +607,7 @@ pub fn poll_signal_one_shot(
     visit(world, signal, &mut cache)
 }
 
+/// Get a signal's current value by running all of it's dependencies.
 pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn AnyClone>> {
     world
         .run_system_cached_with(poll_signal_one_shot, signal)

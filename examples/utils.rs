@@ -1,6 +1,5 @@
 #![allow(dead_code)]
-use bevy::color::palettes::css::*;
-use bevy::prelude::*;
+use bevy::{color::palettes::css::*, prelude::*};
 use rand::prelude::IndexedRandom;
 
 pub(crate) static COLORS: &[Color] = &[

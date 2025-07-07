@@ -2,7 +2,8 @@ let src_lib = import "src/lib.rs" as 'Text in
 let src_builder = import "src/builder.rs" as 'Text in
 let src_signal_vec = import "src/signal_vec.rs" as 'Text in
 let src_signal = import "src/signal.rs" as 'Text in
-let src_tree = import "src/tree.rs" as 'Text in
+let src_signal_map = import "src/signal_map.rs" as 'Text in
+let src_graph = import "src/graph.rs" as 'Text in
 let src_utils = import "src/utils.rs" as 'Text in
 let examples_basic_builder = import "examples/basic_builder.rs" as 'Text in
 let examples_basic = import "examples/basic.rs" as 'Text in
@@ -14,7 +15,8 @@ let repo_structure = {
   "src/builder.rs" = src_builder,
   "src/signal_vec.rs" = src_signal_vec,
   "src/signal.rs" = src_signal,
-  "src/tree.rs" = src_tree,
+  "src/signal_map.rs" = src_signal_map,
+  "src/graph.rs" = src_graph,
   "src/utils.rs" = src_utils,
   "examples/basic_builder.rs" = examples_basic_builder,
   "examples/basic.rs" = examples_basic,
@@ -40,7 +42,8 @@ jonmo is a functional reactive signals implementation in rust for the bevy game 
     ├── lib.rs
     ├── signal_vec.rs
     ├── signal.rs
-    ├── tree.rs
+    ├── signal_map.rs
+    ├── graph.rs
     └── utils.rs
 
 %{ repo_structure |> std.record.map (fun k v => "%{ k }\n```rust\n%{ v }\n```") |> std.record.values |> std.string.join "\n\n" }
