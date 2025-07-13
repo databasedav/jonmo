@@ -1,8 +1,10 @@
+//!
+
 mod utils;
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::prelude::*;
+use jonmo::{graph::poll_signal, prelude::*};
 
 fn main() {
     let mut app = App::new();
@@ -45,27 +47,26 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
         // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
-        // numbers.signal_vec()
-        // SignalBuilder::from_system(|_: In<()>| 1)
-        SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
+        numbers
+            .signal_vec()
+            // SignalBuilder::from_system(|_: In<()>| 1)
+            // SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
             // .dedupe()
-            .switch_signal_vec(move |In(toggle)| {
-                if toggle {
-                    // println!("toggled to A");
-                    list_a.clone()
-                } else {
-                    // println!("toggled to B");
-                    list_b.clone()
-                }
-            })
+            // .switch_signal_vec(move |In(toggle)| {
+            //     if toggle {
+            //         // println!("toggled to A");
+            //         list_a.clone()
+            //     } else {
+            //         // println!("toggled to B");
+            //         list_b.clone()
+            //     }
+            // })
             // .dedupe()
             // .to_signal_vec()
             // .filter_signal(|In(n)| {
-            //     SignalBuilder::from_system(
-            //         move |_: In<()>, toggle: Res<ToggleFilter>| {
-            //             n % 2 == if toggle.0 { 0 } else { 1 }
-            //         },
-            //     )
+            //     SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+            //         n % 2 == if toggle.0 { 0 } else { 1 }
+            //     })
             // })
             // .map_signal(|In(n): In<i32>| {
             //     SignalBuilder::from_system(move |_: In<()>| n + 1)
@@ -73,10 +74,15 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             // .flatten()
             // .chain(numbers)
             // .intersperse(0)
-            // .intersperse_with(|_: In<_>| 0)
             // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
             // .sort_by_key(|In(n): In<i32>| -n)
-            .map(|In(n)| item(n)),
+            .map(|In(n)| item(n))
+            .intersperse_with(|index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>|
+                JonmoBuilder::from(Node::default())
+                .component_signal(
+                    index_signal.clone().map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0))))
+                )
+            )
     )
 }
 

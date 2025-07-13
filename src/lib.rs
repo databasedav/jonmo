@@ -29,8 +29,8 @@ impl Plugin for JonmoPlugin {
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
-        graph::SignalHandles,
         builder::JonmoBuilder,
+        graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
         // signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},

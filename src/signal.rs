@@ -12,7 +12,7 @@ use core::{any::Any, fmt, marker::PhantomData, ops, time::Duration};
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
 pub trait Signal: SSs {
-    /// Output type of the [`Signal`].
+    /// Output type.
     type Item;
 
     /// Registers the [`System`]s associated with this [`Signal`] by consuming its boxed form.
@@ -33,7 +33,7 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
     type Item = U;
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
-        (*self).register_boxed_signal(world).into()
+        (*self).register_boxed_signal(world)
     }
 }
 
@@ -515,7 +515,7 @@ where
 impl<Upstream, T> SignalVec for ToSignalVec<Upstream>
 where
     Upstream: Signal<Item = Vec<T>>,
-    T: 'static
+    T: 'static,
 {
     type Item = T;
 
@@ -578,7 +578,7 @@ impl SignalBuilder {
     }
 
     /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating if the
-    /// [`Component`] does not exist on the [`Entity`].
+    /// [`Entity`] doesn't exist or the [`Component`] doesn't exist on the [`Entity`].
     pub fn from_component<C>(entity: Entity) -> Source<C>
     where
         C: Component + Clone,
@@ -587,7 +587,7 @@ impl SignalBuilder {
     }
 
     /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating if the
-    /// [`Component`] does not exist on the corresponding [`Entity`].
+    /// [`Entity`] doesn't exist or the [`Component`] doesn't exist on the corresponding [`Entity`].
     pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
     where
         C: Component + Clone,
@@ -618,7 +618,7 @@ impl SignalBuilder {
     where
         R: Resource + Clone,
     {
-        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| resource.as_deref().map(Clone::clone))
+        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| resource.as_deref().cloned())
     }
 
     /// Creates a signal from a [`Resource`], always outputting an [`Option`].
@@ -626,13 +626,16 @@ impl SignalBuilder {
     where
         R: Resource + Clone,
     {
-        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| Some(resource.as_deref().map(Clone::clone)))
+        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| Some(resource.as_deref().cloned()))
     }
 }
 
 /// Enables returning different concrete [`Signal`] types from branching logic without boxing,
 /// although note that all [`Signal`]s are boxed internally regardless.
+///
+/// Inspired by https://github.com/rayon-rs/either.
 #[derive(Clone)]
+#[allow(missing_docs)]
 pub enum SignalEither<L, R>
 where
     L: Signal,
@@ -656,6 +659,9 @@ where
     }
 }
 
+/// Blanket trait for transforming [`Signal`]s into [`SignalEither::Left`] or
+/// [`SignalEither::Right`].
+#[allow(missing_docs)]
 pub trait IntoSignalEither: Sized
 where
     Self: Signal,
@@ -677,7 +683,7 @@ where
 
 impl<T: Signal> IntoSignalEither for T {}
 
-/// Extension trait providing combinator methods for types implementing [`Signal`].
+/// Extension trait providing combinator methods for [`Signal`]s.
 pub trait SignalExt: Signal {
     /// Pass the output of this [`Signal`] to a [`System`], continuing propagation if the [`System`]
     /// returns [`Some`] or terminating for the frame if it returns [`None`]. If the [`System`]
@@ -727,7 +733,7 @@ pub trait SignalExt: Signal {
     /// the [`FnMut`] returns [`Some`] or terminating for the frame if it returns [`None`]. If
     /// the [`FnMut`] logic is infallible, wrapping the result in an option is unnecessary.
     ///
-    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary,
+    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary
     /// and the target function expects a reference.
     ///
     /// # Example
@@ -986,8 +992,8 @@ pub trait SignalExt: Signal {
     /// outputs. The resulting [`Signal`] will only output a value when both input [`Signal`]s have
     /// outputted a value since the last resulting output, e.g. if on frame 1, this [`Signal`]
     /// outputs `1` and the other [`Signal`] outputs `None`, the resulting [`Signal`] will have no
-    /// output, but if on frame 2, this [`Signal`] outputs `None` and the other [`Signal`] outputs
-    /// 2, then the resulting [`Signal`] will output `(1, 2)`.
+    /// output, but then if on frame 2, this [`Signal`] outputs `None` and the other [`Signal`]
+    /// outputs 2, then the resulting [`Signal`] will output `(1, 2)`.
     ///
     /// # Example
     /// ```no_run
@@ -1731,7 +1737,7 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{prelude::SignalVecExt, JonmoPlugin};
+    use crate::{JonmoPlugin, prelude::SignalVecExt};
 
     use super::*;
     // Import Bevy prelude for MinimalPlugins and other common items
@@ -2437,9 +2443,7 @@ mod tests {
 
         let signal_vec = source_signal.to_signal_vec();
 
-        let handle = signal_vec
-            .for_each(capture_vec_output::<i32>)
-            .register(app.world_mut());
+        let handle = signal_vec.for_each(capture_vec_output::<i32>).register(app.world_mut());
 
         // Frame 1: Initial state, no emission.
         app.update();
@@ -2493,7 +2497,8 @@ mod tests {
     }
 
     fn get_and_clear_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
-        world.get_resource_mut::<SignalVecOutput<T>>()
+        world
+            .get_resource_mut::<SignalVecOutput<T>>()
             .map(|mut res| core::mem::take(&mut res.0))
             .unwrap_or_default()
     }
