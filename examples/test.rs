@@ -76,13 +76,16 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             // .intersperse(0)
             // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
             // .sort_by_key(|In(n): In<i32>| -n)
-            .map(|In(n)| item(n))
-            .intersperse_with(|index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>|
-                JonmoBuilder::from(Node::default())
-                .component_signal(
-                    index_signal.clone().map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0))))
-                )
-            )
+            .debug()
+            .map(|In(n)| item(n)), /* .intersperse_with(
+                                    *     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
+                                    *         JonmoBuilder::from(Node::default()).component_signal(
+                                    *             index_signal
+                                    *                 .clone()
+                                    *                 .map_in(|idx_opt| Text::new(format!("{}",
+                                    * idx_opt.unwrap_or(0)))),         )
+                                    *     },
+                                    * ), */
     )
 }
 

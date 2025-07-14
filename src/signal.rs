@@ -1553,9 +1553,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     /// ```no_run
-    /// let signal = SignalBuilder::from_system(|_: In<()>| 1)
-    ///     .debug() // Logs the value 1
+    /// SignalBuilder::from_system(|_: In<()>| 1)
+    ///     .debug() // logs `1`
     ///     .map(|In(x): In<i32>| x * 2);
+    ///     .debug() // logs `2`
     /// ```
     fn debug(self) -> Debug<Self>
     where
@@ -1577,9 +1578,9 @@ pub trait SignalExt: Signal {
     /// # Example
     /// ```no_run
     /// let signal = if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a [`Map<Source<i32>>`]
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a [`Dedupe<Source<i32>>`]
     /// } // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn Signal<Item = Self::Item>>
