@@ -29,10 +29,10 @@ impl Plugin for JonmoPlugin {
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
-        signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
         builder::JonmoBuilder,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
+        signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
         utils::{LazyEntity, clone},
     };

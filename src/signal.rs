@@ -2552,45 +2552,6 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn simple_signal_lazy_dropped_before_handle_cleanup() {
-    //     let mut app = create_test_app_for_cleanup();
-
-    //     let source_signal_struct = SignalBuilder::from_system(test_source_system);
-    //     let handle = source_signal_struct.clone().register(app.world_mut());
-    //     let system_entity = handle.0.entity();
-
-    //     assert!(app.world().get_entity(system_entity).is_some());
-    //     assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
-
-    //     drop(source_signal_struct); // LazySignalState.references decreases.
-    //     app.update(); // CLEANUP_SIGNALS is empty. Entity still exists.
-
-    //     assert!(app.world().get_entity(system_entity).is_some());
-    //     assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
-
-    //     handle.cleanup(app.world_mut());
-    //     // Now SignalRegistrationCount is 0.
-    //     // The LazySignal in LazySignalHolder is the only one left (references == 1).
-    //     // So, LazySignalHolder IS removed.
-    //     // Dropping LazySignalHolder drops its LazySignal, which queues the system_entity to
-    // CLEANUP_SIGNALS.     assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).
-    // unwrap(), 0);     assert!(
-    //         app.world().get_entity(system_entity).is_some(),
-    //         "System entity exists before final flush"
-    //     );
-    //     assert!(
-    //         app.world().get::<LazySignalHolder>(system_entity).is_none(),
-    //         "LazySignalHolder should be removed"
-    //     );
-
-    //     app.update(); // Runs flush_cleanup_signals, processes CLEANUP_SIGNALS.
-    //     assert!(
-    //         app.world().get_entity(system_entity).is_none(),
-    //         "System entity should be despawned"
-    //     );
-    // }
-
     #[test]
     fn multiple_lazy_signal_clones_cleanup_behavior() {
         let mut app = create_test_app();
