@@ -9,7 +9,7 @@ use bevy_ecs::prelude::*;
 pub mod builder;
 pub mod graph;
 pub mod signal;
-// pub mod signal_map;
+pub mod signal_map;
 pub mod signal_vec;
 pub mod utils;
 
@@ -29,11 +29,11 @@ impl Plugin for JonmoPlugin {
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
+        signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
         builder::JonmoBuilder,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
-        // signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
         utils::{LazyEntity, clone},
     };
 }

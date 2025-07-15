@@ -15,7 +15,7 @@ impl LazyEntity {
         Self::default()
     }
 
-    // Set the [`Entity`], panicking if it was already set.
+    /// Set the [`Entity`], panicking if it was already set.
     pub fn set(&self, entity: Entity) {
         self.0.set(entity).expect("EntityHolder already contains an Entity");
     }

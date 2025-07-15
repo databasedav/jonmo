@@ -209,7 +209,8 @@ impl SystemRunner {
     }
 }
 
-pub(crate) trait AnyClone: Any + DynClone {}
+/// An extension trait for [`Any`] types that implement [`Clone`].
+pub trait AnyClone: Any + DynClone {}
 clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
@@ -613,4 +614,15 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
         .run_system_cached_with(poll_signal_one_shot, signal)
         .ok()
         .flatten()
+}
+
+/// Utility function for extracting values from [`AnyClone`]s, e.g. those returned by
+/// [`poll_signal`].
+///
+/// # Example
+/// ```no_run
+/// poll_signal(world, signal).and_then(downcast_any_clone::<usize>) // assuming this `signal` outputs a `usize`, this will return an `Option<usize>`
+/// ```
+pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {
+    (any_clone as Box<dyn Any>).downcast::<T>().map(|o| *o).ok()
 }

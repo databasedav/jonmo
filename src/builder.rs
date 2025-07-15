@@ -3,7 +3,7 @@
 use core::cmp::Ordering;
 
 use super::{graph::*, signal::*, signal_vec::*, utils::*};
-use bevy_ecs::{component::HookContext, prelude::*, world::DeferredWorld};
+use bevy_ecs::prelude::*;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},

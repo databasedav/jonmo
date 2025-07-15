@@ -1,10 +1,15 @@
 //!
 
 mod utils;
+use std::any::Any;
+
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::{graph::poll_signal, prelude::*};
+use jonmo::{
+    graph::{downcast_any_clone, poll_signal},
+    prelude::*,
+};
 
 fn main() {
     let mut app = App::new();
@@ -32,9 +37,12 @@ struct Numbers(MutableVec<i32>);
 #[derive(Component, Default, Clone)]
 struct Lifetime(f32);
 
+#[rustfmt::skip]
 fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     let list_a = MutableVec::from([1, 2, 3, 4, 5]).signal_vec();
     let list_b = MutableVec::from([3, 4, 5]).signal_vec();
+    let map = MutableBTreeMap::from([(1, 2), (2, 3)]);
+    // map.signal_map().
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -69,23 +77,32 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //     })
             // })
             // .map_signal(|In(n): In<i32>| {
-            //     SignalBuilder::from_system(move |_: In<()>| n + 1)
+            //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
             // })
+            // .debug()
+            .map_in(|n: i32| -n)
+            // .sort_by_cmp()
             // .flatten()
             // .chain(numbers)
             // .intersperse(0)
             // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
             // .sort_by_key(|In(n): In<i32>| -n)
-            .debug()
-            .map(|In(n)| item(n)), /* .intersperse_with(
-                                    *     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
-                                    *         JonmoBuilder::from(Node::default()).component_signal(
-                                    *             index_signal
-                                    *                 .clone()
-                                    *                 .map_in(|idx_opt| Text::new(format!("{}",
-                                    * idx_opt.unwrap_or(0)))),         )
-                                    *     },
-                                    * ), */
+            // .intersperse_with(|In(index_signal): In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>, world: &mut World| {
+            //     let signal = index_signal.debug().register(world);
+            //     poll_signal(world, *signal)
+            //         .and_then(downcast_any_clone::<Option<usize>>).flatten().unwrap_or_default() as i32
+            // })
+            .map(|In(n)| item(n))
+            // .intersperse_with(
+            //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
+            //         JonmoBuilder::from(Node::default()).component_signal(
+            //             index_signal
+            //                 .clone()
+            //                 .debug()
+            //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
+            //         )
+            //     },
+            // ),
     )
 }
 

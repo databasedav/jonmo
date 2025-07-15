@@ -7,7 +7,7 @@ use bevy_ecs::prelude::*;
 use bevy_log::prelude::*;
 use bevy_platform::prelude::*;
 use bevy_time::{Time, Timer, TimerMode};
-use core::{any::Any, fmt, marker::PhantomData, ops, time::Duration};
+use core::{fmt, marker::PhantomData, ops, time::Duration};
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
@@ -1114,12 +1114,7 @@ pub trait SignalExt: Signal {
                         //    This is done by creating a temporary one-shot signal.
                         let temp_handle = inner_signal.clone().first().register(world);
                         let initial_value = poll_signal(world, *temp_handle)
-                            .and_then(|any_val| {
-                                (any_val as Box<dyn Any>)
-                                    .downcast::<<Self::Item as Signal>::Item>()
-                                    .ok()
-                            })
-                            .map(|b| *b);
+                            .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
                         // The temporary handle must be cleaned up immediately.
                         temp_handle.cleanup(world);
 
