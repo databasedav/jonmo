@@ -1,5 +1,7 @@
 //! Reactive map primitive, inspired by `futures-signals`.
 
+use crate::signal_vec::Replayable;
+
 use super::{
     graph::*,
     signal::*,
@@ -14,7 +16,7 @@ use bevy_platform::{
 };
 use core::{fmt, marker::PhantomData, ops::Deref};
 
-/// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped through
+/// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to
 /// [`Downstream`] [`SignalMap`]s.
 #[allow(missing_docs)]
 pub enum MapDiff<K, V> {
@@ -97,10 +99,10 @@ impl<K, V> MapDiff<K, V> {
     }
 }
 
-/// A reactive key-value store that emits [`MapDiff`]s when it changes.
-///
-/// Unlike `SignalVec`, `SignalMap` itself provides no ordering guarantees.
-/// Ordered views can be obtained from specific implementations like [`MutableBTreeMap`].
+/// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
+/// of the signal graph [`Downstream`] of some source [`MutableBTreeMap`]; this is similar to
+/// [`Signal`] but critically requires that the [`System`] outputs [`Option<MapDiff<Self::Key,
+/// Self::Value>>`].
 pub trait SignalMap: SSs {
     #[allow(missing_docs)]
     type Key;
@@ -108,6 +110,8 @@ pub trait SignalMap: SSs {
     type Value;
 
     /// Registers the [`System`]s associated with this [`SignalMap`] by consuming its boxed form.
+    ///
+    /// All concrete signal map types must implement this method.
     fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle;
 
     /// Registers the [`System`]s associated with this [`SignalMap`].
@@ -127,7 +131,8 @@ impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMap<Key = K, Value = V>
     }
 }
 
-/// A node that consumes `MapDiff`s and runs a system.
+/// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<MapDiff>`]s of its
+/// upstream, see [.for_each](SignalMapExt::for_each).
 #[derive(Clone)]
 pub struct ForEach<Upstream, O> {
     upstream: Upstream,
@@ -149,7 +154,8 @@ where
     }
 }
 
-/// A node that transforms the values of a `SignalMap`.
+/// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
+/// upstream, see [`.map_value`](SignalMapExt::map_value).
 #[derive(Clone)]
 pub struct MapValue<Upstream, O> {
     signal: LazySignal,
@@ -169,8 +175,9 @@ where
     }
 }
 
-/// A node that maps `SignalMap` values to new `Signal`s and flattens the result.
-/// Created by [`SignalMapExt::map_value_signal`].
+/// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
+/// upstream, forwarding the output of each resulting [`Signal`], see
+/// [`.map_value`](SignalMapExt::map_value).
 #[derive(Clone)]
 pub struct MapValueSignal<Upstream, S: Signal> {
     signal: LazySignal,
@@ -191,14 +198,38 @@ where
     }
 }
 
-/// A `SignalVec` that yields the keys of a `SignalMap` in sorted order.
+/// Signal graph node which maps its upstream [`SignalVec`] to a [`Key`](SignalMap::Key)-lookup
+/// [`Signal`], see [`.key`](SignalMapExt::key).
 #[derive(Clone)]
-pub struct SignalMapKeys<Upstream> {
+pub struct Key<Upstream>
+where
+    Upstream: SignalMap,
+{
+    inner: ForEach<Upstream, Option<Upstream::Value>>,
+}
+
+impl<Upstream> Signal for Key<Upstream>
+where
+    Upstream: SignalMap,
+    Upstream::Key: 'static,
+    Upstream::Value: 'static,
+{
+    type Item = Option<Upstream::Value>;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.inner.register_signal(world)
+    }
+}
+
+/// Signal graph node with no [`Upstream`]s which outputs some [`MutableBTreeMap`]'s sorted keys as
+/// a [`SignalVec`], see [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
+#[derive(Clone)]
+pub struct SignalVecKeys<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
 }
 
-impl<Upstream> SignalVec for SignalMapKeys<Upstream>
+impl<Upstream> SignalVec for SignalVecKeys<Upstream>
 where
     Upstream: SignalMap,
 {
@@ -209,14 +240,15 @@ where
     }
 }
 
-/// A `SignalVec` that yields the `(key, value)` entries of a `SignalMap` in sorted order.
+/// Signal graph node which maps its upstream [`MutableBTreeMap`] to a [`SignalVec`] of its sorted
+/// `(key, values)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
 #[derive(Clone)]
-pub struct SignalMapEntries<Upstream> {
+pub struct SignalVecEntries<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
 }
 
-impl<Upstream> SignalVec for SignalMapEntries<Upstream>
+impl<Upstream> SignalVec for SignalVecEntries<Upstream>
 where
     Upstream: SignalMap,
 {
@@ -229,8 +261,13 @@ where
 
 /// Extension trait providing combinator methods for [`SignalMap`]s.
 pub trait SignalMapExt: SignalMap {
-    /// Pass the "raw" [`Vec<MapDiff<...>>`] output of this [`SignalMap`] to a [`System`].
-    /// This transforms the `SignalMap` into a `Signal`.
+    /// Pass the "raw" [`Vec<MapDiff<Self::Key, Self::Value>>`] output of this [`SignalMap`] to a
+    /// [`System`], continuing propagation if the [`System`] returns [`Some`] or terminating for the
+    /// frame if it returns [`None`]. This transforms the `SignalMap` into a `Signal`. Unlike
+    /// most other [`SignalMap`] methods, [`.for_each`](SignalMapExt::for_each), returns a
+    /// [`Signal`], not a [`SignalMap`], since the output type need not be an
+    /// [`Option<Vec<MapDiff>>`]. If the [`System`] logic is infallible, wrapping the result in
+    /// an option is unnecessary.
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
@@ -247,7 +284,13 @@ pub trait SignalMapExt: SignalMap {
         }
     }
 
-    /// Creates a new `SignalMap` by applying a [`System`] to transform the values.
+    /// Pass each [`Value`](SignalMap::Value) of this [`SignalMap`] to a [`System`], transforming
+    /// it.
+    ///
+    /// # Example
+    /// ```no_run
+    /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value(|In(x)| x * 2); // outputs `SignalMap -> {1: 2, 3: 4}`
+    /// ```
     fn map_value<O, F, M>(self, system: F) -> MapValue<Self, O>
     where
         Self: Sized,
@@ -282,31 +325,15 @@ pub trait SignalMapExt: SignalMap {
         }
     }
 
-    /// Creates a new `SignalMap` by applying a system to each value, which returns
-    /// a new `Signal` for that value. The new `SignalMap`'s values are the output
-    /// of these inner signals.
-    ///
-    /// This is the `SignalMap` equivalent of `SignalExt::flatten`. It's useful
-    /// when you have a map of items, and each item has its own reactive state
-    /// that you want to track individually.
+    /// Pass each [`Value`](SignalMap::Value) of this [`SignalMap`] to a [`System`] that produces a
+    /// [`Signal`], forwarding the output of each resulting [`Signal`].
     ///
     /// # Example
     /// ```no_run
-    /// # use bevy::prelude::*;
-    /// # use jonmo::prelude::*;
-    /// // A map of entity IDs
-    /// # let mut world = World::new();
-    /// # let entity_a = world.spawn(Name::new("A")).id();
-    /// # let entity_b = world.spawn(Name::new("B")).id();
-    /// let entity_map = MutableBTreeMap::from([(0, entity_a), (1, entity_b)]);
-    ///
-    /// // Create a SignalMap where each value is a Signal tracking a component on that entity.
-    /// let component_map_signal = entity_map.signal_map().map_value_signal(
-    ///     |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity)
-    /// );
-    ///
-    /// // `component_map_signal` will now emit `MapDiff`s with `Name` components as values
-    /// // whenever the `Name` on `entity_a` or `entity_b` changes.
+    /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map()
+    ///     .map_value_signal(|In(x)|
+    ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
+    ///     ); // outputs `SignalMap -> {1: 4, 3: 8}`
     /// ```
     fn map_value_signal<S, F, M>(self, system: F) -> MapValueSignal<Self, S>
     where
@@ -524,11 +551,10 @@ pub trait SignalMapExt: SignalMap {
                     }
                 }
 
-                if !new_map_diffs.is_empty() {
-                    if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
-                    {
-                        queue.0.extend(new_map_diffs);
-                    }
+                if !new_map_diffs.is_empty()
+                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
+                {
+                    queue.0.extend(new_map_diffs);
                 }
                 process_signals(world, [*output_system_handle_clone], Box::new(()));
             };
@@ -557,58 +583,74 @@ pub trait SignalMapExt: SignalMap {
         }
     }
 
-    /// Creates a `Signal` that tracks the value of a single key.
+    /// Maps this [`SignalMap`] to a [`Key`]-lookup [`Signal`] which outputs [`Some<Value>`] if the
+    /// [`Key`] is present and [`None`] otherwise.
     ///
-    /// The returned signal will emit `Some(value)` when the key is present and `None` when it is
-    /// not. It only emits when the value for that specific key changes.
-    fn key(self, key: Self::Key) -> impl Signal<Item = Option<Self::Value>>
+    /// # Example
+    /// ```no_run
+    /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().key(1); // outputs `2`
+    /// ```
+    ///
+    /// [`Key`]: SignalMap::Key
+    fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
         Self::Key: PartialEq + Clone + SSs,
         Self::Value: Clone + Send + 'static,
     {
-        self.for_each(
-            move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, mut state: Local<Option<Self::Value>>| {
-                let mut changed = false;
-                let mut new_value = (*state).clone();
+        Key {
+            inner: self.for_each(
+                move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, mut state: Local<Option<Self::Value>>| {
+                    let mut changed = false;
+                    let mut new_value = (*state).clone();
 
-                for diff in diffs {
-                    match diff {
-                        MapDiff::Replace { entries } => {
-                            new_value = entries.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
-                            changed = true;
-                        }
-                        MapDiff::Insert { key: k, value } | MapDiff::Update { key: k, value } => {
-                            if k == key {
-                                new_value = Some(value);
+                    for diff in diffs {
+                        match diff {
+                            MapDiff::Replace { entries } => {
+                                new_value = entries.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
                                 changed = true;
                             }
-                        }
-                        MapDiff::Remove { key: k } => {
-                            if k == key {
+                            MapDiff::Insert { key: k, value } | MapDiff::Update { key: k, value } => {
+                                if k == key {
+                                    new_value = Some(value);
+                                    changed = true;
+                                }
+                            }
+                            MapDiff::Remove { key: k } => {
+                                if k == key {
+                                    new_value = None;
+                                    changed = true;
+                                }
+                            }
+                            MapDiff::Clear => {
                                 new_value = None;
                                 changed = true;
                             }
                         }
-                        MapDiff::Clear => {
-                            new_value = None;
-                            changed = true;
-                        }
                     }
-                }
 
-                if changed {
-                    *state = new_value.clone();
-                    Some(new_value)
-                } else {
-                    None
-                }
-            },
-        )
+                    if changed {
+                        *state = new_value.clone();
+                        Some(new_value)
+                    } else {
+                        None
+                    }
+                },
+            ),
+        }
     }
 
     /// Erases the type of this [`SignalMap`], allowing it to be used in conjunction with
     /// [`SignalMap`]s of other concrete types.
+    ///
+    /// # Example
+    /// ```no_run
+    /// let signal = if condition {
+    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).map_value(...).boxed() // this is a `MapValue<Source<i32, i32>>`
+    /// } else {
+    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).map_value_signal(...).boxed() // this is a `MapValueSignal<Source<i32, i32>>`
+    /// } // without the `.boxed()`, the compiler would not allow this
+    /// ```
     fn boxed(self) -> Box<dyn SignalMap<Key = Self::Key, Value = Self::Value>>
     where
         Self: Sized,
@@ -632,10 +674,7 @@ impl<'a, K, V> Deref for MutableBTreeMapReadGuard<'a, K, V> {
 }
 
 /// Provides limited mutable access to the underlying [`BTreeMap`].
-pub struct MutableBTreeMapWriteGuard<'a, K, V>
-where
-    K: Ord + Clone,
-{
+pub struct MutableBTreeMapWriteGuard<'a, K, V> {
     guard: RwLockWriteGuard<'a, MutableBTreeMapState<K, V>>,
 }
 
@@ -644,9 +683,13 @@ where
     K: Ord + Clone,
     V: Clone,
 {
-    /// Inserts a key-value pair into the map.
+    /// Inserts a key-value pair into this [`MutableBTreeMap`], queueing a [`MapDiff::Update`] or
+    /// [`MapDiff::Insert`] depending on whether the key was present.
+    ///
     /// If the map did not have this key present, [`None`] is returned.
-    /// If the map did have this key present, the value is updated, and the old value is returned.
+    ///
+    /// If the map did have this key present, the value is updated, and the old
+    /// value is returned
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let diff = if self.guard.map.contains_key(&key) {
             MapDiff::Update {
@@ -664,8 +707,8 @@ where
         old
     }
 
-    /// Removes a key from the map, returning the value at the key if the key was previously in the
-    /// map.
+    /// Removes a key from this [`MutableBTreeMap`], queueing a [`MapDiff::Remove`] and returning
+    /// the value at the key if the key was previously present.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let old = self.guard.map.remove(key);
         if old.is_some() {
@@ -674,7 +717,8 @@ where
         old
     }
 
-    /// Clears the map, removing all key-value pairs.
+    /// Clears this [`MutableBTreeMap`], removing all elements and queueing a [`MapDiff::Clear`] if any elements were
+    /// present.
     pub fn clear(&mut self) {
         if !self.guard.map.is_empty() {
             self.guard.map.clear();
@@ -682,14 +726,19 @@ where
         }
     }
 
-    /// Replaces the entire contents of the map with a new set of entries.
-    pub fn replace(&mut self, entries: Vec<(K, V)>) {
-        self.guard.map = entries.iter().cloned().collect();
+    /// Replaces the entire contents of this [`MutableBTreeMap`] with a new set of entries, queueing
+    /// a [`MapDiff::Replace`].
+    pub fn replace<T>(&mut self, entries: T)
+    where
+        BTreeMap<K, V>: From<T>,
+    {
+        self.guard.map = entries.into();
+        let entries = self.guard.map.clone().into_iter().collect();
         self.guard.pending_diffs.push(MapDiff::Replace { entries });
     }
 }
 
-impl<'a, K: Ord + Clone, V> Deref for MutableBTreeMapWriteGuard<'a, K, V> {
+impl<'a, K, V> Deref for MutableBTreeMapWriteGuard<'a, K, V> {
     type Target = BTreeMap<K, V>;
     fn deref(&self) -> &Self::Target {
         &self.guard.map
@@ -705,7 +754,9 @@ struct MutableBTreeMapState<K, V> {
 #[derive(Component)]
 struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
 
-/// A reactive `BTreeMap` that can be mutated and observed via signals.
+/// Wrapper around a [`BTreeMap`] that tracks mutations as [`MapDiff`]s and emits them as a batch on
+/// [`flush`](MutableBTreeMap::flush), enabling diff-less constant time reactive updates for
+/// [`Downstream`] [`SignalMap`]s.
 #[derive(Clone)]
 pub struct MutableBTreeMap<K, V> {
     state: Arc<RwLock<MutableBTreeMapState<K, V>>>,
@@ -726,29 +777,11 @@ where
     }
 }
 
-impl<K, V> Default for MutableBTreeMap<K, V>
-where
-    K: Ord,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<K, V> MutableBTreeMap<K, V>
-where
-    K: Ord,
-{
-    /// Constructs a new, emtpy [`MutableBTreeMap<K, V>`].
-    pub fn new() -> Self {
-        Self::from(BTreeMap::new())
-    }
-}
-
-/// A `SignalMap` source derived from a `MutableBTreeMap`.
+/// Signal graph node with no [`Upstream`]s which forwards [`Vec<MapDiff<K, V>>`]s flushed from some
+/// source [`MutableBTreeMap<K, V>`], see [`MutableBTreeMap::signal_map`].
 #[derive(Clone)]
 pub struct Source<K, V> {
-    pub(crate) signal: LazySignal,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -764,10 +797,22 @@ where
     }
 }
 
-impl<K, V> MutableBTreeMap<K, V>
-where
-    K: Ord + Clone,
-{
+#[derive(Component)]
+pub(crate) struct MapReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+
+impl Replayable for MapReplayTrigger {
+    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
+        self.0
+    }
+}
+
+impl<K, V> MutableBTreeMap<K, V> {
+    /// Constructs a new, emtpy [`MutableBTreeMap<K, V>`].
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::from(BTreeMap::new())
+    }
+
     /// Locks this [`MutableBTreeMap`] with shared read access, blocking the current thread until it
     /// can be acquired, see [`RwLock::read`].
     pub fn read(&self) -> MutableBTreeMapReadGuard<'_, K, V> {
@@ -784,25 +829,23 @@ where
         }
     }
 
-    /// Returns a [`Source`] signal from this [`MutableBTreeMap`], always returning clones of the
-    /// same underlying [`Signal`]; such [`SignalMap`]s only emit incremental updates so clones
-    /// will not re-emit initial states.
-    pub fn signal_map(&self) -> Source<K, V>
+    fn get_or_create_broadcaster_signal(&self) -> LazySignal
     where
         K: Clone + SSs,
         V: Clone + SSs,
     {
         let mut state = self.state.write().unwrap();
+        // If the signal already exists, just clone and return it.
         if let Some(lazy_signal) = &state.signal {
-            return Source {
-                signal: lazy_signal.clone(),
-                _marker: PhantomData,
-            };
+            return lazy_signal.clone();
         }
 
-        let signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
+        // Otherwise, create the broadcaster signal for the first time.
+        let broadcaster_lazy_signal = LazySignal::new(move |world: &mut World| {
             let self_entity = LazyEntity::new();
 
+            // This is the system for the one-and-only broadcaster. It just drains
+            // diffs that `flush` has put into its component.
             let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
                 if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<K, V>>(self_entity.get()) {
                     if diffs.0.is_empty() { None } else { Some(diffs.0.drain(..).collect()) }
@@ -814,26 +857,83 @@ where
             let signal_system = register_signal::<(), Vec<MapDiff<K, V>>, _, _, _>(world, source_system_logic);
             self_entity.set(*signal_system);
 
+            // The broadcaster itself doesn't have an initial state to replay.
+            // It just needs the component to receive flushed diffs.
+            world.entity_mut(*signal_system).insert(QueuedMapDiffs::<K, V>(vec![]));
+
+            signal_system
+        });
+
+        // Store it for future calls.
+        state.signal = Some(broadcaster_lazy_signal.clone());
+        broadcaster_lazy_signal
+    }
+
+    /// Returns a [`Source`] signal from this [`MutableBTreeMap`], always returning clones of the
+    /// same underlying [`Signal`]; such [`SignalMap`]s only emit incremental updates so clones
+    /// will not re-emit initial states.
+    pub fn signal_map(&self) -> Source<K, V>
+    where
+        K: Clone + Ord + SSs,
+        V: Clone + SSs,
+    {
+        let broadcaster_signal = self.get_or_create_broadcaster_signal();
+
+        let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
+            let self_entity = LazyEntity::new();
+            let broadcaster_system = broadcaster_signal.register(world);
+
+            let replay_system_logic = clone!((self_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World| {
+                // Get the locally queued diffs (the initial 'Replace' diff).
+                let mut diffs = world
+                    .get_entity_mut(self_entity.get()).ok()
+                    .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
+                    .map(|queued| queued.0)
+                    .unwrap_or_default();
+
+                // Add the diffs from upstream (the broadcaster).
+                diffs.extend(upstream_diffs);
+
+                // If there are any diffs to process, return them.
+                if diffs.is_empty() { None } else { Some(diffs) }
+            });
+
+            // 1. Register the replay system.
+            let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
+            self_entity.set(*replay_signal);
+
+            // This closure is the core of the replay trigger. It checks if the broadcaster is idle.
+            let trigger = Box::new(move |world: &mut World| {
+                // If the broadcaster's queue has no diffs, it's an idle frame, so we trigger a replay.
+                if world.get::<QueuedMapDiffs<K, V>>(*broadcaster_system).is_some_and(|q| q.0.is_empty()) {
+                    // Trigger with an empty vec, forcing the replay_system_logic to check its own queue.
+                    process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
+                }
+            });
+
+            // 2. Queue the initial state for this new subscriber.
             let initial_map: BTreeMap<K, V> = state.read().unwrap().map.clone();
             let initial_diffs = if !initial_map.is_empty() {
                 vec![MapDiff::Replace { entries: initial_map.into_iter().collect() }]
             } else {
                 vec![]
             };
-            world.entity_mut(*signal_system).insert(QueuedMapDiffs(initial_diffs));
+            world.entity_mut(*replay_signal).insert((QueuedMapDiffs(initial_diffs), MapReplayTrigger(trigger)));
 
-            signal_system
+            // 3. Pipe the broadcaster to the new replay node.
+            pipe_signal(world, broadcaster_system, replay_signal);
+
+            replay_signal
         }));
 
-        state.signal = Some(signal.clone());
         Source {
-            signal,
+            signal: replay_lazy_signal,
             _marker: PhantomData,
         }
     }
 
-    /// Returns a `SignalVec` that tracks the map's keys in sorted order.
-    pub fn signal_vec_keys(&self) -> SignalMapKeys<Self>
+    /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s keys in sorted order.
+    pub fn signal_vec_keys(&self) -> SignalVecKeys<Self>
     where
         K: Ord + Clone + SSs,
         V: Clone + SSs,
@@ -877,14 +977,14 @@ where
             processor_handle
         });
 
-        SignalMapKeys {
+        SignalVecKeys {
             signal: lazy_signal,
             _marker: PhantomData,
         }
     }
 
     /// Returns a `SignalVec` that tracks the map's entries (`(key, value)`) in sorted order.
-    pub fn signal_vec_entries(&self) -> SignalMapEntries<Self>
+    pub fn signal_vec_entries(&self) -> SignalVecEntries<Self>
     where
         K: Ord + Clone + SSs,
         V: Clone + SSs,
@@ -936,7 +1036,7 @@ where
             processor_handle
         });
 
-        SignalMapEntries {
+        SignalVecEntries {
             signal: lazy_signal,
             _marker: PhantomData,
         }
@@ -968,10 +1068,11 @@ where
     }
 
     /// Returns an `impl Command` that can be passed to [`Commands::queue`] to flush this
-    /// [`MutableBTreeMap`], see [`.flush_into_world`](Self::flush_into_world).
+    /// [`MutableBTreeMap`]'s pending [`MapDiff`]s, see
+    /// [`.flush_into_world`](Self::flush_into_world).
     pub fn flush(&self) -> impl Command
     where
-        K: SSs,
+        K: Clone + SSs,
         V: Clone + SSs,
     {
         let self_ = self.clone();
@@ -1063,7 +1164,7 @@ mod tests {
         let source_map = MutableBTreeMap::from([(1, 10), (2, 20)]);
 
         // The mapping function transforms an i32 value into a String.
-        let mapping_system = |In(val): In<i32>| format!("Val:{}", val);
+        let mapping_system = |In(val): In<i32>| format!("Val:{val}");
 
         // Apply `map_value` to create the derived signal.
         let mapped_signal = source_map.signal_map().map_value(mapping_system);

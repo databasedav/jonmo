@@ -10,7 +10,7 @@ use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
 
 use super::{graph::*, signal::*, utils::*};
 
-/// Describes the mutations made to the underlying [`MutableVec`] that are piped through
+/// Describes the mutations made to the underlying [`MutableVec`] that are piped to
 /// [`Downstream`] [`SignalVec`]s.
 #[allow(missing_docs)]
 pub enum VecDiff<T> {
@@ -114,15 +114,14 @@ impl<T: Clone> VecDiff<T> {
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph [`Downstream`] of some source [`MutableVec`]; this is similar to [`Signal`]
-/// but critically requires that the [`System`] outputs [`Option<VecDiff<Self::Item>>`] and will
-/// often take [`In<VecDiff<T>>`].
+/// but critically requires that the [`System`] outputs [`Option<VecDiff<Self::Item>>`].
 pub trait SignalVec: SSs {
     /// Output type.
     type Item;
 
     /// Registers the [`System`]s associated with this [`SignalVec`] by consuming its boxed form.
     ///
-    /// All concrete signal types must implement this method.
+    /// All concrete signal vec types must implement this method.
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle;
 
     /// Registers the [`System`]s associated with this [`SignalVec`].
@@ -147,7 +146,7 @@ impl<O: 'static> SignalVec for Box<dyn SignalVec<Item = O> + Send + Sync> {
 /// source [`MutableVec<T>`], see [`MutableVec::signal_vec`].
 #[derive(Clone)]
 pub struct Source<T> {
-    pub(crate) signal: LazySignal,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -162,12 +161,12 @@ where
     }
 }
 
-/// Signal graph node which applies a [`System`] directly to the [`Vec<VecDiff>`]s of its upstream,
-/// see [`.for_each`](SignalVecExt::for_each).
+/// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<VecDiff>`]s of its
+/// upstream, see [`.for_each`](SignalVecExt::for_each).
 #[derive(Clone)]
 pub struct ForEach<Upstream, O> {
-    pub(crate) upstream: Upstream,
-    pub(crate) signal: LazySignal,
+    upstream: Upstream,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
 }
 
@@ -190,7 +189,7 @@ where
 /// see [`.map`](SignalVecExt::map).
 #[derive(Clone)]
 pub struct Map<Upstream, O> {
-    pub(crate) signal: LazySignal,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
 }
 
@@ -209,7 +208,9 @@ where
 #[derive(Component, Deref, DerefMut, Clone, Copy)]
 struct ItemIndex(usize);
 
-/// A node that maps items to signals and flattens the result.
+/// Signal graph node which applies a [`System`] to each [`Item`](SignalVec::Item) of its upstream,
+/// forwarding the output of each resulting [`Signal`], see
+/// [`.map_signal`](SignalVecExt::map_signal).
 #[derive(Clone)]
 pub struct MapSignal<Upstream, S: Signal> {
     signal: LazySignal,
@@ -977,14 +978,14 @@ where
 //     }
 // }
 
-/// Signal graph node that debug logs its upstream's "raw" [`VecDiff`]s, see
+/// Signal graph node that debug logs its upstream's "raw" [`Vec<VecDiff>`]s, see
 /// [`.debug`](SignalVecExt::debug).
 #[derive(Clone)]
 pub struct Debug<Upstream>
 where
     Upstream: SignalVec,
 {
-    pub(crate) signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+    signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
 }
 
 impl<Upstream> SignalVec for Debug<Upstream>
@@ -1136,14 +1137,18 @@ pub trait SignalVecExt: SignalVec {
         self.map(move |In(item)| function(&item))
     }
 
-    /// Creates a new `SignalVec` by mapping each item of the source `SignalVec` to a `Signal`.
+    /// Pass each [`Item`] of this [`SignalVec`] to a [`System`] that produces a [`Signal`],
+    /// forwarding the output of each resulting [`Signal`].
     ///
-    /// For each item in the source vector, the provided `system` is run to produce an
-    /// inner `Signal`. The output vector's value at a given index becomes the latest
-    /// value emitted by the corresponding inner `Signal`.
+    /// # Example
+    /// ```no_run
+    /// MutableVec::from([1, 2, 3]).signal_vec()
+    ///     .map_signal(|In(x): In<i32>|
+    ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
+    ///     ) // outputs `SignalVec -> [2, 4, 6]`
+    /// ```
     ///
-    /// This is useful for creating dynamic lists where each element has its own
-    /// independent, reactive state.
+    /// [`Item`]: SignalVec::Item
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
         Self: Sized,
@@ -3199,9 +3204,9 @@ pub trait SignalVecExt: SignalVec {
     /// # Example
     /// ```no_run
     /// let signal = if condition {
-    ///     MutableVec::from([1, 2, 3]).map(...).boxed() // this is a [`Map<Source<i32>>`]
+    ///     MutableVec::from([1, 2, 3]).map(...).boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     MutableVec::from([1, 2, 3]).filter(...).boxed() // this is a [`Filter<Source<i32>>`]
+    ///     MutableVec::from([1, 2, 3]).filter(...).boxed() // this is a `Filter<Source<i32>>`
     /// } // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>>
@@ -3234,7 +3239,6 @@ where
 {
     type Target = [T];
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.guard.vec
     }
@@ -3339,9 +3343,15 @@ where
 
     /// Replaces the entire contents of this [`MutableVec`] with the provided `values`, queueing a
     /// [`VecDiff::Replace`].
-    pub fn replace(&mut self, values: Vec<T>) {
-        self.guard.vec = values.clone();
-        self.guard.pending_diffs.push(VecDiff::Replace { values });
+    pub fn replace<A>(&mut self, values: A)
+    where
+        Vec<T>: From<A>,
+        A: Clone,
+    {
+        self.guard.vec = values.clone().into();
+        self.guard
+            .pending_diffs
+            .push(VecDiff::Replace { values: values.into() });
     }
 }
 
@@ -3351,7 +3361,6 @@ where
 {
     type Target = [T];
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.guard.vec
     }
@@ -3378,7 +3387,6 @@ impl<T, A> From<T> for MutableVec<A>
 where
     Vec<A>: From<T>,
 {
-    #[inline]
     fn from(values: T) -> Self {
         MutableVec {
             state: Arc::new(RwLock::new(MutableVecState {
@@ -3390,9 +3398,22 @@ where
     }
 }
 
+pub(crate) trait Replayable {
+    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync>;
+}
+
+#[derive(Component)]
+pub(crate) struct VecReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+
+impl Replayable for VecReplayTrigger {
+    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
+        self.0
+    }
+}
+
 impl<T> MutableVec<T> {
-    #[allow(clippy::new_without_default)]
     /// Constructs a new, empty [`MutableVec<T>`].
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(MutableVecState {
@@ -3403,20 +3424,8 @@ impl<T> MutableVec<T> {
         }
     }
 
-    /// Creates a new [`MutableVec<T>`] initialized with the given values.
-    pub fn with_values(values: Vec<T>) -> Self {
-        Self {
-            state: Arc::new(RwLock::new(MutableVecState {
-                pending_diffs: Vec::new(), // Start with empty diffs
-                vec: values,
-                signal: None,
-            })),
-        }
-    }
-
     /// Locks this [`MutableVec`] with shared read access, blocking the current thread until it can
     /// be acquired, see [`RwLock::read`].
-    #[inline]
     pub fn read(&self) -> MutableVecReadGuard<'_, T> {
         MutableVecReadGuard {
             guard: self.state.read().unwrap(),
@@ -3425,53 +3434,103 @@ impl<T> MutableVec<T> {
 
     /// Locks this [`MutableVec`] with exclusive write access, blocking the current thread until it
     /// can be acquired, see [`RwLock::write`].
-    #[inline]
     pub fn write(&self) -> MutableVecWriteGuard<'_, T> {
         MutableVecWriteGuard {
             guard: self.state.write().unwrap(),
         }
     }
 
-    /// Returns a [`Source`] signal from this [`MutableVec`], always returning clones of the same
-    /// underlying [`Signal`]; such [`SignalVec`]s only emit incremental updates so clones will not
-    /// re-emit initial states.
-    pub fn signal_vec(&self) -> Source<T>
+    fn get_or_create_broadcaster_signal(&self) -> LazySignal
     where
         T: Clone + SSs,
     {
         let mut state = self.state.write().unwrap();
+        // If the signal already exists, just clone and return it.
         if let Some(lazy_signal) = &state.signal {
-            return Source {
-                signal: lazy_signal.clone(),
-                _marker: PhantomData,
-            };
+            return lazy_signal.clone();
         }
 
-        let signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
+        // Otherwise, create the broadcaster signal for the first time.
+        let broadcaster_lazy_signal = LazySignal::new(move |world: &mut World| {
             let self_entity = LazyEntity::new();
 
+            // This is the system for the one-and-only broadcaster. It just drains
+            // diffs that `flush` has put into its component.
             let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
-                let mut diffs = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()).unwrap();
-                if diffs.0.is_empty() { None } else { Some(diffs.0.drain(..).collect()) }
+                if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()) {
+                    if diffs.0.is_empty() { None } else { Some(diffs.0.drain(..).collect()) }
+                } else {
+                    None
+                }
             });
 
             let signal_system = register_signal::<(), Vec<VecDiff<T>>, _, _, _>(world, source_system_logic);
             self_entity.set(*signal_system);
 
+            // The broadcaster itself doesn't have an initial state to replay.
+            // It just needs the component to receive flushed diffs.
+            world.entity_mut(*signal_system).insert(QueuedVecDiffs::<T>(vec![]));
+
+            signal_system
+        });
+
+        // Store it for future calls.
+        state.signal = Some(broadcaster_lazy_signal.clone());
+        broadcaster_lazy_signal
+    }
+
+    /// Returns a [`Source`] signal from this [`MutableVec`].
+    pub fn signal_vec(&self) -> Source<T>
+    where
+        T: Clone + SSs,
+    {
+        let broadcaster_signal = self.get_or_create_broadcaster_signal();
+
+        let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
+            let self_entity = LazyEntity::new();
+            let broadcaster_system = broadcaster_signal.register(world);
+
+            let replay_system_logic = clone!((self_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World| {
+                let mut diffs = world
+                    .get_entity_mut(self_entity.get()).ok()
+                    .and_then(|mut entity| entity.take::<QueuedVecDiffs<T>>())
+                    .map(|queued| queued.0)
+                    .unwrap_or_default();
+
+                diffs.extend(upstream_diffs);
+
+                if diffs.is_empty() { None } else { Some(diffs) }
+            });
+
+            // 1. Register the replay system as before.
+            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
+            self_entity.set(*replay_signal);
+
+            // This closure contains the type-specific logic.
+            let trigger = Box::new(move |world: &mut World| {
+                // Check if the broadcaster's queue has diffs.
+                if world.get::<QueuedVecDiffs<T>>(*broadcaster_system).is_some_and(|q| q.0.is_empty()) {
+                    process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
+                }
+            });
+
+            // 2. Queue the initial state as before.
             let initial_vec = state.read().unwrap().vec.clone();
             let initial_diffs = if !initial_vec.is_empty() {
                 vec![VecDiff::Replace { values: initial_vec }]
             } else {
                 vec![]
             };
-            world.entity_mut(*signal_system).insert(QueuedVecDiffs(initial_diffs));
+            world.entity_mut(*replay_signal).insert((QueuedVecDiffs(initial_diffs), VecReplayTrigger(trigger)));
 
-            signal_system
+            // 3. Pipe the broadcaster to the replay node as before.
+            pipe_signal(world, broadcaster_system, replay_signal);
+
+            replay_signal
         }));
 
-        state.signal = Some(signal.clone());
         Source {
-            signal,
+            signal: replay_lazy_signal,
             _marker: PhantomData,
         }
     }
@@ -3501,12 +3560,12 @@ impl<T> MutableVec<T> {
     }
 
     /// Returns an `impl Command` that can be passed to [`Commands::queue`] to flush this
-    /// [`MutableVec`], see [`.flush_into_world`](Self::flush_into_world).
+    /// [`MutableVec`]'s pending [`VecDiff`]s, see [`.flush_into_world`](Self::flush_into_world).
     pub fn flush(&self) -> impl Command
     where
         T: Clone + SSs,
     {
-        let self_ = self.to_owned();
+        let self_ = self.clone();
         move |world: &mut World| self_.flush_into_world(world)
     }
 }

@@ -10,15 +10,15 @@ in bengali, jonmo means "birth"
 
 [jonmo](https://github.com/databasedav/jonmo) provides an ergonomic, functional, and declarative API for specifying Bevy [system](https://docs.rs/bevy/latest/bevy/ecs/system/index.html) dependency graphs, where "output" handles to nodes of the graph are canonically referred to as "signals". Building upon these signals, jonmo offers a high level [entity builder](https://docs.rs/jonmo/latest/jonmo/struct.JonmoBuilder.html) which enables one to declare reactive entities, components, and children using a familiar fluent syntax with semantics and API ported from the incredible [FRP](https://en.wikipedia.org/wiki/Functional_reactive_programming) signals of [futures-signals](https://github.com/Pauan/rust-signals) and its web UI dependents [MoonZoon](https://github.com/MoonZoon/MoonZoon) and [Dominator](https://github.com/Pauan/rust-dominator).
 
-The runtime of jonmo is quite simple; every frame, the outputs of systems are forwarded to their dependants, recursively. The complexity and power of jonmo really emerges from its monadic signal combinators, defined within the [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalExt.html) and [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalVecExt.html) traits (ported from futures-signals' traits of the same name), which internally manage special Bevy systems that allow for the declarative composition of complex data flows with minimal boilerplate.
+The runtime of jonmo is quite simple; every frame, the outputs of systems are forwarded to their dependants, recursively. The complexity and power of jonmo really emerges from its monadic signal combinators, defined within the [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalExt.html), [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalVecExt.html), and [`SignalMapExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalMapExt.html) traits (ported from futures-signals' traits of the same name), which internally manage special Bevy systems that allow for the declarative composition of complex data flows with minimalistic, high-level, signals-oriented methods.
 
 ### Assorted features:
 - fine-grained reactivity for all entities, components, and children
-- ***diff-less*** constant-time reactive updates for collections (available through `MutableVec` and soon™ `MutableBTreeMap`)
+- ***diff-less*** constant-time reactive updates for collections (available through `MutableVec` and `MutableBTreeMap`)
 - automated system lifecycle management when using the builder API, simple component on-remove hook when not
-- either wrappers (a la https://github.com/rayon-rs/either) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
 - polling API for when one needs an escape hatch from the regular push-based output semantics (polling is used sparsely internally for some combinators)
-- `no_std` compatible
+- either wrappers (a la https://github.com/rayon-rs/either) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
+- `no_std` *always*
 
 ## examples
 ```rust no_run

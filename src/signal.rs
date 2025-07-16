@@ -59,8 +59,8 @@ where
 /// Signal graph node which applies a [`System`] to its upstream, see [`.map`](SignalExt::map).
 #[derive(Clone)]
 pub struct Map<Upstream, O> {
-    pub(crate) upstream: Upstream,
-    pub(crate) signal: LazySignal,
+    upstream: Upstream,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
 }
 
@@ -83,7 +83,7 @@ where
 /// [.component](SignalExt::component).
 #[derive(Clone)]
 pub struct MapComponent<Upstream, C> {
-    pub(crate) signal: Map<Upstream, C>,
+    signal: Map<Upstream, C>,
 }
 
 impl<Upstream, C> Signal for MapComponent<Upstream, C>
@@ -102,7 +102,7 @@ where
 /// see [.component_option](SignalExt::component_option).
 #[derive(Clone)]
 pub struct ComponentOption<Upstream, C> {
-    pub(crate) signal: Map<Upstream, Option<C>>,
+    signal: Map<Upstream, Option<C>>,
 }
 
 impl<Upstream, C> Signal for ComponentOption<Upstream, C>
@@ -121,7 +121,7 @@ where
 /// [`.has_component`](SignalExt::has_component).
 #[derive(Clone)]
 pub struct HasComponent<Upstream, C> {
-    pub(crate) signal: Map<Upstream, bool>,
+    signal: Map<Upstream, bool>,
     _marker: PhantomData<fn() -> C>,
 }
 
@@ -144,7 +144,7 @@ pub struct Dedupe<Upstream>
 where
     Upstream: Signal,
 {
-    pub(crate) signal: Map<Upstream, Upstream::Item>,
+    signal: Map<Upstream, Upstream::Item>,
 }
 
 impl<Upstream> Signal for Dedupe<Upstream>
@@ -165,7 +165,7 @@ pub struct First<Upstream>
 where
     Upstream: Signal,
 {
-    pub(crate) signal: Map<Upstream, Upstream::Item>,
+    signal: Map<Upstream, Upstream::Item>,
 }
 
 impl<Upstream> Signal for First<Upstream>
@@ -187,10 +187,10 @@ where
     Right: Signal,
 {
     #[allow(clippy::type_complexity)]
-    pub(crate) left_wrapper: Map<Left, (Option<Left::Item>, Option<Right::Item>)>,
+    left_wrapper: Map<Left, (Option<Left::Item>, Option<Right::Item>)>,
     #[allow(clippy::type_complexity)]
-    pub(crate) right_wrapper: Map<Right, (Option<Left::Item>, Option<Right::Item>)>,
-    pub(crate) signal: LazySignal,
+    right_wrapper: Map<Right, (Option<Left::Item>, Option<Right::Item>)>,
+    signal: LazySignal,
 }
 
 impl<Left, Right> Signal for Combine<Left, Right>
@@ -214,7 +214,7 @@ where
 /// [`.eq`](SignalExt::eq).
 #[derive(Clone)]
 pub struct Eq<Upstream> {
-    pub(crate) signal: Map<Upstream, bool>,
+    signal: Map<Upstream, bool>,
 }
 
 impl<Upstream> Signal for Eq<Upstream>
@@ -232,7 +232,7 @@ where
 /// [`.neq`](SignalExt::neq).
 #[derive(Clone)]
 pub struct Neq<Upstream> {
-    pub(crate) signal: Map<Upstream, bool>,
+    signal: Map<Upstream, bool>,
 }
 
 impl<Upstream> Signal for Neq<Upstream>
@@ -255,7 +255,7 @@ where
     <Upstream as Signal>::Item: ops::Not,
     <<Upstream as Signal>::Item as ops::Not>::Output: Clone,
 {
-    pub(crate) signal: Map<Upstream, <Upstream::Item as ops::Not>::Output>,
+    signal: Map<Upstream, <Upstream::Item as ops::Not>::Output>,
 }
 
 impl<Upstream> Signal for Not<Upstream>
@@ -274,7 +274,7 @@ where
 /// Signal graph node which selectively terminates propagation, see [`.filter`](SignalExt::filter).
 #[derive(Clone)]
 pub struct Filter<Upstream> {
-    pub(crate) signal: LazySignal,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
 }
 
@@ -294,7 +294,7 @@ struct FlattenState<T> {
     value: Option<T>,
 }
 
-/// Signal graph node which forwards the inner signal values of its upstream, see
+/// Signal graph node which forwards the upstream output [`Signal`]'s output, see
 /// [`.flatten`](SignalExt::flatten).
 #[derive(Clone)]
 pub struct Flatten<Upstream>
@@ -320,7 +320,8 @@ where
     }
 }
 
-/// Signal graph node which maps its upstream to a [`Signal`], see [`.switch`](SignalExt::switch).
+/// Signal graph node which maps its upstream to a [`Signal`], forwarding its output, see
+/// [`.switch`](SignalExt::switch).
 #[derive(Clone)]
 pub struct Switch<Upstream, Other>
 where
@@ -328,7 +329,7 @@ where
     Other: Signal,
     Other::Item: Clone,
 {
-    pub(crate) signal: Flatten<Map<Upstream, Other>>,
+    signal: Flatten<Map<Upstream, Other>>,
 }
 
 impl<Upstream, Other> Signal for Switch<Upstream, Other>
@@ -348,7 +349,7 @@ where
 // /// Created by the [`SignalExt::switch_signal_vec`] method.
 // #[derive(Clone)]
 // pub struct SwitchSignalVec<Upstream: 'static> {
-//     pub(crate) signal: LazySignal,
+//     signal: LazySignal,
 //     _marker: PhantomData<fn() -> Upstream>,
 // }
 
@@ -367,7 +368,7 @@ pub struct Throttle<Upstream>
 where
     Upstream: Signal,
 {
-    pub(crate) signal: Map<Upstream, Upstream::Item>,
+    signal: Map<Upstream, Upstream::Item>,
 }
 
 impl<Upstream> Signal for Throttle<Upstream>
@@ -508,7 +509,7 @@ pub struct ToSignalVec<Upstream>
 where
     Upstream: Signal,
 {
-    pub(crate) signal: LazySignal,
+    signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
 }
 
@@ -530,7 +531,7 @@ pub struct Debug<Upstream>
 where
     Upstream: Signal,
 {
-    pub(crate) signal: Map<Upstream, Upstream::Item>,
+    signal: Map<Upstream, Upstream::Item>,
 }
 
 impl<Upstream> Signal for Debug<Upstream>
@@ -1207,6 +1208,7 @@ pub trait SignalExt: Signal {
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
+    ///        state
     ///     }
     /// })
     /// .throttle(Duration::from_secs(1)); // outputs `1`, terminates for the next 1 second of frames, outputs `2`, terminates for the next 1 second of frames, outputs `3`, ...
@@ -1573,9 +1575,9 @@ pub trait SignalExt: Signal {
     /// # Example
     /// ```no_run
     /// let signal = if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a [`Map<Source<i32>>`]
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a [`Dedupe<Source<i32>>`]
+    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
     /// } // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn Signal<Item = Self::Item>>

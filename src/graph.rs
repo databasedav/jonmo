@@ -215,8 +215,8 @@ clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
 
-#[derive(Component)]
-pub(crate) struct SkipOnce;
+// #[derive(Component)]
+// pub(crate) struct SkipOnce;
 
 pub(crate) fn process_signals(
     world: &mut World,

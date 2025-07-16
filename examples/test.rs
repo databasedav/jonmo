@@ -80,7 +80,7 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
             // })
             // .debug()
-            .map_in(|n: i32| -n)
+            // .map_in(|n: i32| -n)
             // .sort_by_cmp()
             // .flatten()
             // .chain(numbers)
