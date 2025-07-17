@@ -22,7 +22,7 @@ fn main() {
 #[derive(Resource, Deref, DerefMut)]
 struct ValueTicker(Timer);
 
-#[derive(Component, Reflect, Clone, Default, PartialEq)]
+#[derive(Component, Clone, Default, PartialEq)]
 struct Value(i32);
 
 fn ui() -> JonmoBuilder {
@@ -34,10 +34,10 @@ fn ui() -> JonmoBuilder {
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node::default())
+        JonmoBuilder::from((Node::default(), TextFont::from_font_size(100.)))
             .insert(Value(0))
             .component_signal_from_component(|signal| {
-                signal.dedupe().map(|In(value): In<Value>| Some(Text(value.0.to_string())))
+                signal.dedupe().map(|In(value): In<Value>| Text(value.0.to_string()))
             }),
     )
 }

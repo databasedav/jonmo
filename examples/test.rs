@@ -1,56 +1,165 @@
+//!
+
+mod utils;
+use std::any::Any;
+
+use utils::*;
+
 use bevy::prelude::*;
-use jonmo::prelude::*;
+use jonmo::{
+    graph::{downcast_any_clone, poll_signal},
+    prelude::*,
+};
 
 fn main() {
     let mut app = App::new();
+    let numbers = MutableVec::from([1, 2, 3, 4, 5]);
     app.add_plugins(DefaultPlugins)
         .add_plugins(JonmoPlugin)
+        .insert_resource(Numbers(numbers.clone()))
         .add_systems(
-            Startup,
+            PostStartup,
             (
-                |world: &mut World| {
-                    ui_root().spawn(world);
+                move |world: &mut World| {
+                    ui_root(numbers.clone()).spawn(world);
                 },
                 camera,
             ),
         )
-        .add_systems(Update, incr_value)
-        .insert_resource(ValueTicker(Timer::from_seconds(1., TimerMode::Repeating)))
+        .add_systems(Update, (live.run_if(any_with_component::<Lifetime>), hotkeys, toggle))
+        .insert_resource(ToggleFilter(true))
         .run();
 }
 
-#[derive(Resource, Deref, DerefMut)]
-struct ValueTicker(Timer);
+#[derive(Resource, Clone)]
+struct Numbers(MutableVec<i32>);
 
-#[derive(Component, Reflect, Clone, Default, PartialEq)]
-struct Value(i32);
+#[derive(Component, Default, Clone)]
+struct Lifetime(f32);
 
-fn ui_root() -> JonmoBuilder {
+#[rustfmt::skip]
+fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
+    let list_a = MutableVec::from([1, 2, 3, 4, 5]).signal_vec();
+    let list_b = MutableVec::from([3, 4, 5]).signal_vec();
+    let map = MutableBTreeMap::from([(1, 2), (2, 3)]);
+    // map.signal_map().
     JonmoBuilder::from(Node {
-        justify_content: JustifyContent::Center,
+        height: Val::Percent(100.0),
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Column,
         align_items: AlignItems::Center,
-        height: Val::Percent(100.),
-        width: Val::Percent(100.),
+        justify_content: JustifyContent::Center,
+        row_gap: Val::Px(10.0),
         ..default()
     })
-    .child(
-        JonmoBuilder::from(Node::default())
-            .insert(Value(0))
-            .component_signal_from_component(|signal| {
-                signal.map(|In(value): In<Value>| Some(Text(value.0.to_string())))
-            }),
+    // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
+    .children_signal_vec(
+        // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
+        numbers
+            .signal_vec()
+            // SignalBuilder::from_system(|_: In<()>| 1)
+            // SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
+            // .dedupe()
+            // .switch_signal_vec(move |In(toggle)| {
+            //     if toggle {
+            //         // println!("toggled to A");
+            //         list_a.clone()
+            //     } else {
+            //         // println!("toggled to B");
+            //         list_b.clone()
+            //     }
+            // })
+            // .dedupe()
+            // .to_signal_vec()
+            // .filter_signal(|In(n)| {
+            //     SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+            //         n % 2 == if toggle.0 { 0 } else { 1 }
+            //     })
+            // })
+            // .map_signal(|In(n): In<i32>| {
+            //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
+            // })
+            // .debug()
+            // .map_in(|n: i32| -n)
+            // .sort_by_cmp()
+            // .flatten()
+            // .chain(numbers)
+            // .intersperse(0)
+            // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
+            // .sort_by_key(|In(n): In<i32>| -n)
+            // .intersperse_with(|In(index_signal): In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>, world: &mut World| {
+            //     let signal = index_signal.debug().register(world);
+            //     poll_signal(world, *signal)
+            //         .and_then(downcast_any_clone::<Option<usize>>).flatten().unwrap_or_default() as i32
+            // })
+            .map(|In(n)| item(n))
+            // .intersperse_with(
+            //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
+            //         JonmoBuilder::from(Node::default()).component_signal(
+            //             index_signal
+            //                 .clone()
+            //                 .debug()
+            //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
+            //         )
+            //     },
+            // ),
     )
 }
 
-fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {
-    if ticker.tick(time.delta()).finished() {
-        for mut value in values.iter_mut() {
-            value.0 = value.0.wrapping_add(1);
-        }
-        ticker.reset();
-    }
+#[derive(Resource)]
+struct ToggleFilter(bool);
+
+fn item(number: i32) -> JonmoBuilder {
+    JonmoBuilder::from((
+        Node {
+            height: Val::Px(40.0),
+            width: Val::Px(200.0),
+            padding: UiRect::all(Val::Px(5.0)),
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(Color::WHITE),
+    ))
+    .child(JonmoBuilder::from((
+        Node {
+            height: Val::Percent(100.),
+            width: Val::Percent(100.),
+            ..default()
+        },
+        Text(number.to_string()),
+        TextColor(Color::BLACK),
+        TextLayout::new_with_justify(JustifyText::Center),
+        Lifetime::default(),
+    )))
 }
 
 fn camera(mut commands: Commands) {
     commands.spawn(Camera2d);
+}
+
+fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
+    for mut lifetime in lifetimes.iter_mut() {
+        lifetime.0 += time.delta_secs();
+    }
+}
+
+fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut commands: Commands) {
+    let mut flush = false;
+    let mut guard = numbers.0.write();
+    if keys.just_pressed(KeyCode::Equal) {
+        guard.push((guard.len() + 1) as i32);
+        flush = true;
+    } else if keys.just_pressed(KeyCode::Minus) {
+        guard.pop();
+        flush = true;
+    }
+    if flush {
+        commands.queue(numbers.0.flush());
+    }
+}
+
+fn toggle(keys: Res<ButtonInput<KeyCode>>, mut toggle: ResMut<ToggleFilter>) {
+    if keys.just_pressed(KeyCode::Space) {
+        toggle.0 = !toggle.0;
+    }
 }

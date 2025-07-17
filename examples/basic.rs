@@ -14,11 +14,13 @@ fn main() {
 #[derive(Resource, Deref, DerefMut)]
 struct ValueTicker(Timer);
 
-#[derive(Component, Reflect, Clone, Default, PartialEq)]
+#[derive(Component, Clone, Default, PartialEq)]
 struct Value(i32);
 
 fn ui(world: &mut World) {
-    let text = world.spawn((Node::default(), Value(0))).id();
+    let text = world
+        .spawn((Node::default(), TextFont::from_font_size(100.), Value(0)))
+        .id();
     let signal = SignalBuilder::from_component(text)
         .dedupe()
         .map(move |In(value): In<Value>, mut commands: Commands| {

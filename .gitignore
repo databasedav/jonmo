@@ -2,3 +2,6 @@
 rust-signals
 rust-toolchain.toml
 .cargo
+note.md
+repo_prompt_input.md
+patch.diff
