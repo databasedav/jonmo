@@ -1,3 +1,6 @@
+//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
+//! [`Vec`] mutations, see [`MutableVec`] and [`SignalVecExt`].
+
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
 use bevy_log::debug;
@@ -3259,7 +3262,7 @@ where
         self.guard.pending_diffs.push(VecDiff::Push { value });
     }
 
-    /// If this [`MutableVec`] isn't empty, removes the last element and returns it, queueing a
+    /// If this [`MutableVec`] is not empty, removes the last element and returns it, queueing a
     /// [`VecDiff::Pop`], otherwise returns [`None`].
     pub fn pop(&mut self) -> Option<T> {
         let result = self.guard.vec.pop();
@@ -3292,7 +3295,7 @@ where
         value
     }
 
-    /// Clears this [`MutableVec`], removing all values, queueing a [`VecDiff::Clear`] if it wasn't
+    /// Clears this [`MutableVec`], removing all values, queueing a [`VecDiff::Clear`] if it was not
     /// empty.
     pub fn clear(&mut self) {
         if !self.guard.vec.is_empty() {
@@ -3467,7 +3470,7 @@ impl<T> MutableVec<T> {
             let signal_system = register_signal::<(), Vec<VecDiff<T>>, _, _, _>(world, source_system_logic);
             self_entity.set(*signal_system);
 
-            // The broadcaster itself doesn't have an initial state to replay.
+            // The broadcaster itself does not have an initial state to replay.
             // It just needs the component to receive flushed diffs.
             world.entity_mut(*signal_system).insert(QueuedVecDiffs::<T>(vec![]));
 
@@ -3573,25 +3576,8 @@ impl<T> MutableVec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{JonmoPlugin, prelude::*};
+    use crate::JonmoPlugin;
     use bevy::prelude::*;
-    use bevy_log::tracing_subscriber::EnvFilter;
-    use bevy_platform::sync::OnceLock; // Add `once_cell` to your Cargo.toml if you don't have it
-
-    // Use a static OnceCell to ensure the subscriber is only initialized once
-    static TRACING_INIT: OnceLock<()> = OnceLock::new();
-
-    // A helper function to set up tracing
-    fn setup_tracing() {
-        TRACING_INIT.get_or_init(|| {
-            bevy_log::tracing_subscriber::FmtSubscriber::builder()
-                // Respect RUST_LOG environment variable for filtering
-                // e.g., RUST_LOG=info,wgpu=error cargo test ...
-                .with_env_filter(EnvFilter::from_default_env())
-                .init();
-            // You can also add other configurations here, like color, time, etc.
-        });
-    }
 
     #[derive(Resource, Default, Debug)]
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);

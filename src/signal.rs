@@ -1,3 +1,6 @@
+//! Signal builders and combinators for constructing reactive [`System`] dependency graphs, see
+//! [`SignalExt`].
+
 use super::{
     graph::*,
     signal_vec::{SignalVec, VecDiff},
@@ -579,7 +582,7 @@ impl SignalBuilder {
     }
 
     /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating if the
-    /// [`Entity`] doesn't exist or the [`Component`] doesn't exist on the [`Entity`].
+    /// [`Entity`] does not exist or the [`Component`] does not exist on the [`Entity`].
     pub fn from_component<C>(entity: Entity) -> Source<C>
     where
         C: Component + Clone,
@@ -588,7 +591,8 @@ impl SignalBuilder {
     }
 
     /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating if the
-    /// [`Entity`] doesn't exist or the [`Component`] doesn't exist on the corresponding [`Entity`].
+    /// [`Entity`] does not exist or the [`Component`] does not exist on the corresponding
+    /// [`Entity`].
     pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
     where
         C: Component + Clone,
@@ -688,7 +692,7 @@ impl<T: Signal> IntoSignalEither for T {}
 pub trait SignalExt: Signal {
     /// Pass the output of this [`Signal`] to a [`System`], continuing propagation if the [`System`]
     /// returns [`Some`] or terminating for the frame if it returns [`None`]. If the [`System`]
-    /// logic is infallible, wrapping the result in an option is unnecessary.
+    /// logic is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
     /// # Example
     /// ```no_run
@@ -711,7 +715,7 @@ pub trait SignalExt: Signal {
 
     /// Pass the output of this [`Signal`] to an [`FnMut`], continuing propagation if the [`FnMut`]
     /// returns [`Some`] or terminating for the frame if it returns [`None`]. If the [`FnMut`] logic
-    /// is infallible, wrapping the result in an option is unnecessary.
+    /// is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
     /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary.
     ///
@@ -732,7 +736,7 @@ pub trait SignalExt: Signal {
 
     /// Pass a reference to the output of this [`Signal`] to an [`FnMut`], continuing propagation if
     /// the [`FnMut`] returns [`Some`] or terminating for the frame if it returns [`None`]. If
-    /// the [`FnMut`] logic is infallible, wrapping the result in an option is unnecessary.
+    /// the [`FnMut`] logic is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
     /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary
     /// and the target function expects a reference.
@@ -752,8 +756,8 @@ pub trait SignalExt: Signal {
         self.map(move |In(item)| function(&item))
     }
 
-    /// Map this [`Signal`]'s output [`Entity`] to some [`Component`], terminating for the frame if
-    /// it doesn't exist.
+    /// Map this [`Signal`]'s output [`Entity`] to its `C` [`Component`], terminating for the frame
+    /// if it does not exist.
     ///
     /// # Example
     /// ```no_run
@@ -777,7 +781,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Map this [`Signal`]'s output [`Entity`] to some [`Component`], always outputting an
+    /// Map this [`Signal`]'s output [`Entity`] to its `C` [`Component`], always outputting an
     /// [`Option`].
     ///
     /// # Example
@@ -2542,7 +2546,7 @@ mod tests {
 
         drop(source_signal_struct);
         // Dropping source_signal_struct reduces LazySignalState.references.
-        // If it becomes 1 (only holder's copy left), LazySignal::drop doesn't queue.
+        // If it becomes 1 (only holder's copy left), LazySignal::drop does not queue.
         // The system is not queued to CLEANUP_SIGNALS yet.
         // LazySignalHolder is still present.
         app.update(); // Runs flush_cleanup_signals. CLEANUP_SIGNALS is empty.

@@ -1,3 +1,5 @@
+//! Signal graph management and runtime.
+
 use super::utils::*;
 
 use bevy_derive::{Deref, DerefMut};
@@ -40,15 +42,15 @@ impl<I: 'static, O> From<SystemId<In<I>, O>> for SignalSystem {
 pub(crate) struct SignalRegistrationCount(i32);
 
 impl SignalRegistrationCount {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self(1)
     }
 
-    pub(crate) fn increment(&mut self) {
+    fn increment(&mut self) {
         self.0 += 1
     }
 
-    pub(crate) fn decrement(&mut self) {
+    fn decrement(&mut self) {
         self.0 -= 1
     }
 }
@@ -160,9 +162,9 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
 }
 
 #[derive(Component, Clone)]
-pub(crate) struct SystemRunner {
+struct SystemRunner {
     #[allow(clippy::type_complexity)]
-    pub(crate) runner: Arc<Box<dyn Fn(&mut World, Box<dyn Any>) -> Option<Box<dyn AnyClone>> + Send + Sync>>,
+    runner: Arc<Box<dyn Fn(&mut World, Box<dyn Any>) -> Option<Box<dyn AnyClone>> + Send + Sync>>,
 }
 
 trait Runnable: Send + Sync {
@@ -204,7 +206,7 @@ where
 }
 
 impl SystemRunner {
-    pub(crate) fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
+    fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
         (self.runner)(world, input)
     }
 }
@@ -259,8 +261,8 @@ pub(crate) fn process_signal_graph(world: &mut World) {
 /// Handle to a particular node of the signal graph, returned by
 /// [`SignalExt::register`](super::signal::SignalExt),
 /// [`SignalVecExt::register`](super::signal_vec::SignalVecExt::register), and
-/// [`SignalMap::register`](super::signal_map::SignalMapExt::register). In order for signals to be
-/// appropriately cleaned up, for every call to `.register` made to some particular signal or its
+/// [`SignalMapExt::register`](super::signal_map::SignalMapExt::register). In order for signals to
+/// be appropriately cleaned up, for every call to `.register` made to some particular signal or its
 /// clones, [`SignalHandle::cleanup`] must be called on a corresponding [`SignalHandle`] or a
 /// downstream [`SignalHandle`]. Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`]
 /// will take care of this when the corresponding [`Entity`] is despawned, and using the
@@ -300,6 +302,8 @@ fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: 
     }
 }
 
+/// Stores [`SignalHandle`]s tied to the lifetime of some [`Entity`],
+/// [`.cleanup`](SignalHandle::cleanup)-ing them when the [`Entity`] is despawned.
 #[derive(Component, Default)]
 #[component(on_remove = cleanup_signal_handles)]
 pub struct SignalHandles(Vec<SignalHandle>);
@@ -315,12 +319,13 @@ where
 }
 
 impl SignalHandles {
+    #[allow(missing_docs)]
     pub fn add(&mut self, handle: SignalHandle) {
         self.0.push(handle);
     }
 }
 
-pub(crate) fn spawn_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
+fn spawn_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
     I: 'static,
     O: Clone + 'static,
@@ -346,7 +351,6 @@ where
     entity.into()
 }
 
-/// Internal enum used by `RegisterOnceSignal` to track registration state.
 pub(crate) struct LazySignalState {
     references: AtomicUsize,
     pub(crate) system: RwLock<LazySystem>,
@@ -359,9 +363,7 @@ pub(crate) enum LazySystem {
 }
 
 impl LazySystem {
-    /// Registers the system if it hasn't been registered yet.
-    /// Returns the system ID of the registered system.
-    pub fn register(&mut self, world: &mut World) -> SignalSystem {
+    fn register(&mut self, world: &mut World) -> SignalSystem {
         match self {
             LazySystem::System(f) => {
                 let signal = f.take().unwrap()(world);
@@ -428,7 +430,7 @@ impl Drop for LazySignal {
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
 
-pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn flush_cleanup_signals(world: &mut World) {
     let signals = CLEANUP_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();
@@ -531,7 +533,7 @@ where
     }
 }
 
-pub(crate) fn signal_handle_cleanup_helper(world: &mut World, signals: impl IntoIterator<Item = SignalSystem>) {
+fn signal_handle_cleanup_helper(world: &mut World, signals: impl IntoIterator<Item = SignalSystem>) {
     for signal in signals {
         if let Some(upstreams) = world.get::<Upstream>(*signal).cloned() {
             signal_handle_cleanup_helper(world, upstreams.0);
@@ -556,7 +558,7 @@ pub(crate) fn signal_handle_cleanup_helper(world: &mut World, signals: impl Into
     }
 }
 
-pub(crate) fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Option<Box<dyn AnyClone>> {
+fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Option<Box<dyn AnyClone>> {
     fn visit(
         world: &mut World,
         node: SignalSystem,

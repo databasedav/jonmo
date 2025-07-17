@@ -1,4 +1,4 @@
-//! Declarative entity builder using jonmo signals.
+//! Reactive entity builder ported from [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
 
 use core::cmp::Ordering;
 
@@ -17,10 +17,15 @@ fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
     }
 }
 
-/// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive systems and
-/// children using a declarative builder pattern. Inspired by Dominator's DomBuilder and Haalka's
-/// NodeBuilder.
-#[derive(Default, Clone)]
+// TODO: the fluent interface link breaks cargo fmt ??
+/// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive components
+/// and children using a declarative [fluent](https://en.wikipedia.org/wiki/Fluent_interface) builder pattern. All its methods are deferred until the
+/// corresponding [`Entity`] is spawned so its state *and how that state should change* depending on
+/// the state of the [`World`] can be specified up front, in a tidy colocated package, without a
+/// `&mut World` or [`Commands`].
+///
+/// Port of [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html), and [haalka](https://github.com/databasedav/haalka)'s [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
+#[derive(Clone)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
@@ -34,16 +39,21 @@ impl<T: Bundle> From<T> for JonmoBuilder {
 }
 
 impl JonmoBuilder {
+    #[allow(clippy::new_without_default, missing_docs)]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            on_spawns: Arc::new(Mutex::new(Vec::new())),
+            child_block_populations: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
+    /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
     pub fn on_spawn(self, on_spawn: impl FnOnce(&mut World, Entity) + SSs) -> Self {
-        self.on_spawns.lock().unwrap().push(Box::new(on_spawn)); // Direct access
+        self.on_spawns.lock().unwrap().push(Box::new(on_spawn));
         self
     }
 
-    /// Insert a [`Bundle`] onto the node's entity.
+    /// Adds a [`Bundle`] onto this builder's [`Entity`].
     pub fn insert<T: Bundle>(self, bundle: T) -> Self {
         self.on_spawn(move |world, entity| {
             if let Ok(mut entity) = world.get_entity_mut(entity) {
@@ -52,15 +62,15 @@ impl JonmoBuilder {
         })
     }
 
-    /// Sync the entity with an [`OnceLock<Entity>`].
+    /// Set the [`LazyEntity`] to this builder's [`Entity`].
     pub fn entity_sync(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    /// The system receives the value emitted by the signal.
-    /// Note: The system is registered *directly* on the builder and will be transferred
-    /// to the entity's `SignalHandlers` component upon spawning.
+    /// Reactively run a [`System`] which takes [`In`] this builder's [`Entity`] and the output of a
+    /// [`Signal`].
+    ///
+    /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn on_signal<I, S, F, M>(self, signal: S, system: F) -> Self
     where
         I: Clone + 'static,
@@ -75,10 +85,13 @@ impl JonmoBuilder {
         self.on_spawn(on_spawn)
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn signal_from_entity<O, S, F>(self, f: F) -> Self
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`].
+    ///
+    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn signal_from_entity<S, F>(self, f: F) -> Self
     where
-        S: Signal<Item = O>,
+        S: Signal,
         F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
@@ -88,11 +101,15 @@ impl JonmoBuilder {
         self.on_spawn(on_spawn)
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
-    pub fn signal_from_component<C, S, F, O>(self, f: F) -> Self
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
+    /// [`Component`] and returns a [`Signal`]; if this builder's [`Entity`] does not have a `C`
+    /// [`Component`], the [`Signal`] chain will terminate for that frame.
+    ///
+    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn signal_from_component<C, S, F>(self, f: F) -> Self
     where
         C: Component + Clone,
-        S: Signal<Item = O>,
+        S: Signal,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
     {
         self.signal_from_entity(|signal| {
@@ -100,27 +117,59 @@ impl JonmoBuilder {
         })
     }
 
-    pub fn signal_from_ancestor<O, S, F>(self, generations: usize, f: F) -> Self
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
+    /// [`Component`] wrapped in an [`Option`] and returns a [`Signal`]; if this builder's
+    /// [`Entity`] does not have a `C` [`Component`], the [`Signal`] will output [`None`] and
+    /// continue propagation.
+    ///
+    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn signal_from_component_option<C, S, F>(self, f: F) -> Self
     where
-        S: Signal<Item = O>,
+        C: Component + Clone,
+        S: Signal,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<C>>) -> S + SSs,
+    {
+        self.signal_from_entity(|signal| {
+            f(signal.map(|In(entity): In<Entity>, components: Query<&C>| Some(components.get(entity).ok().cloned())))
+        })
+    }
+
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
+    /// `generations`-nth generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
+    /// will return this builder's [`Entity`] itself.
+    ///
+    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn signal_from_ancestor<S, F>(self, generations: usize, f: F) -> Self
+    where
+        S: Signal,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_entity(move |signal| {
             f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
-                parents.iter_ancestors(entity).nth(generations.saturating_sub(1))
+                [entity]
+                    .into_iter()
+                    .chain(parents.iter_ancestors(entity))
+                    .nth(generations)
             }))
         })
     }
 
-    pub fn signal_from_parent<O, S, F>(self, f: F) -> Self
+    /// Run a function that takes a [`Signal`] which outputs this builder's parent's [`Entity`] and
+    /// returns a [`Signal`].
+    ///
+    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn signal_from_parent<S, F>(self, f: F) -> Self
     where
-        S: Signal<Item = O>,
+        S: Signal,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_ancestor(1, f)
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
+    /// Reactively set this builder's [`Entity`]'s `C` [`Component`] with a [`Signal`] that outputs
+    /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is
+    /// removed. If the [`Signal`]'s output is infallible, wrapping the result in an [`Option`] is
+    /// unnecessary.
     pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
     where
         C: Component,
@@ -141,7 +190,11 @@ impl JonmoBuilder {
         )
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
+    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
+    /// [`Component`] is removed. If the resulting [`Signal`]'s output is infallible, wrapping the result in
+    /// an [`Option`] is unnecessary.
     pub fn component_signal_from_entity<C, IOC, S, F>(self, f: F) -> Self
     where
         C: Component,
@@ -163,7 +216,13 @@ impl JonmoBuilder {
         })
     }
 
-    /// Register a reactive system that runs when the given [`Signal`] emits a value.
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
+    /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
+    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the
+    /// [`Signal`] outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`]
+    /// does not have a `C` [`Component`], the [`Signal`]'s execution path will terminate for
+    /// that frame. If the resulting [`Signal`]'s output is infallible, wrapping the result in an
+    /// [`Option`] is unnecessary.
     pub fn component_signal_from_component<I, O, IOO, S, F>(self, f: F) -> Self
     where
         I: Component + Clone,
@@ -177,6 +236,13 @@ impl JonmoBuilder {
         })
     }
 
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
+    /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
+    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the
+    /// [`Signal`] outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`]
+    /// does not have a `C` [`Component`], the input [`Signal`] will output [`None`] and continue
+    /// propagation. If the resulting [`Signal`]'s output is infallible, wrapping the result in an
+    /// [`Option`] is unnecessary.
     pub fn component_signal_from_component_option<I, O, IOO, S, F>(self, f: F) -> Self
     where
         I: Component + Clone,
@@ -190,8 +256,7 @@ impl JonmoBuilder {
         })
     }
 
-    /// Declare a static child node.
-    /// The child is spawned and added to the parent when the parent is spawned.
+    /// Declare a static child.
     pub fn child(self, child: impl Into<JonmoBuilder>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(1);
@@ -282,7 +347,7 @@ impl JonmoBuilder {
         self.on_spawn(on_spawn)
     }
 
-    /// Declare reactive children based on a `SignalVec`.
+    /// Declare reactive children.
     pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = JonmoBuilder>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
         self.child_block_populations.lock().unwrap().push(0);
@@ -433,9 +498,7 @@ impl JonmoBuilder {
         self.on_spawn(on_spawn)
     }
 
-    /// Spawn the node with its components and reactive systems onto an existing [`Entity`].
-    ///
-    /// Note: This consumes the builder.
+    /// Spawn this builder on an existing [`Entity`].
     pub fn spawn_on_entity(self, world: &mut World, entity: Entity) {
         if let Ok(mut entity) = world.get_entity_mut(entity) {
             let id = entity.id();
@@ -446,7 +509,7 @@ impl JonmoBuilder {
         }
     }
 
-    /// Spawn the node with its components and reactive systems onto a new [`Entity`].
+    /// Spawn this builder into the [`World`].
     pub fn spawn(self, world: &mut World) -> Entity {
         let entity = world.spawn_empty().id();
         self.spawn_on_entity(world, entity);

@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#![allow(missing_docs)]
+
 use bevy::{color::palettes::css::*, prelude::*};
 use rand::prelude::IndexedRandom;
 

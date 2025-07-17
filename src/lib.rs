@@ -12,6 +12,7 @@ pub mod graph;
 pub mod signal;
 pub mod signal_map;
 pub mod signal_vec;
+#[allow(missing_docs)]
 pub mod utils;
 
 fn trigger_replays<ReplayTrigger: Component + signal_vec::Replayable>(world: &mut World) {

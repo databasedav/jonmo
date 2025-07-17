@@ -1,4 +1,5 @@
-//! Reactive map primitive, inspired by `futures-signals`.
+//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
+//! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
 
 use crate::signal_vec::Replayable;
 
@@ -221,8 +222,9 @@ where
     }
 }
 
-/// Signal graph node with no [`Upstream`]s which outputs some [`MutableBTreeMap`]'s sorted keys as
-/// a [`SignalVec`], see [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
+/// Signal graph node with no [`Upstream`]s which outputs some [`MutableBTreeMap`]'s sorted
+/// [`Key`](SignalMap::Key)s as a [`SignalVec`], see
+/// [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
 #[derive(Clone)]
 pub struct SignalVecKeys<Upstream> {
     signal: LazySignal,
@@ -241,7 +243,7 @@ where
 }
 
 /// Signal graph node which maps its upstream [`MutableBTreeMap`] to a [`SignalVec`] of its sorted
-/// `(key, values)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
+/// `(key, value)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
 #[derive(Clone)]
 pub struct SignalVecEntries<Upstream> {
     signal: LazySignal,
@@ -657,6 +659,15 @@ pub trait SignalMapExt: SignalMap {
     {
         Box::new(self)
     }
+
+    /// Activate this [`SignalMap`] and all its [`Upstream`]s, causing them to be evaluated every
+    /// frame until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
+    fn register(self, world: &mut World) -> SignalHandle
+    where
+        Self: Sized,
+    {
+        self.register_signal_map(world)
+    }
 }
 
 impl<T: ?Sized> SignalMapExt for T where T: SignalMap {}
@@ -717,8 +728,8 @@ where
         old
     }
 
-    /// Clears this [`MutableBTreeMap`], removing all elements and queueing a [`MapDiff::Clear`] if any elements were
-    /// present.
+    /// Clears this [`MutableBTreeMap`], removing all elements and queueing a [`MapDiff::Clear`] if
+    /// any elements were present.
     pub fn clear(&mut self) {
         if !self.guard.map.is_empty() {
             self.guard.map.clear();
@@ -857,7 +868,7 @@ impl<K, V> MutableBTreeMap<K, V> {
             let signal_system = register_signal::<(), Vec<MapDiff<K, V>>, _, _, _>(world, source_system_logic);
             self_entity.set(*signal_system);
 
-            // The broadcaster itself doesn't have an initial state to replay.
+            // The broadcaster itself does not have an initial state to replay.
             // It just needs the component to receive flushed diffs.
             world.entity_mut(*signal_system).insert(QueuedMapDiffs::<K, V>(vec![]));
 
@@ -932,7 +943,8 @@ impl<K, V> MutableBTreeMap<K, V> {
         }
     }
 
-    /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s keys in sorted order.
+    /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s [`Key`](SignalMap::Key)s in
+    /// sorted order.
     pub fn signal_vec_keys(&self) -> SignalVecKeys<Self>
     where
         K: Ord + Clone + SSs,
@@ -983,7 +995,8 @@ impl<K, V> MutableBTreeMap<K, V> {
         }
     }
 
-    /// Returns a `SignalVec` that tracks the map's entries (`(key, value)`) in sorted order.
+    /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s `(key, value)`s in sorted
+    /// order.
     pub fn signal_vec_entries(&self) -> SignalVecEntries<Self>
     where
         K: Ord + Clone + SSs,
@@ -1083,7 +1096,7 @@ impl<K, V> MutableBTreeMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{JonmoPlugin, prelude::*};
+    use crate::JonmoPlugin;
     use bevy::prelude::*;
 
     // Helper resource to capture the output diffs from a SignalMap for assertions.
