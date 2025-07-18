@@ -40,7 +40,7 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
     }
 }
 
-/// Signal graph node which takes an input of [`In<()>`] and has no [`Upstream`]s. See
+/// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See
 /// [`SignalBuilder`] methods for examples.
 #[derive(Clone)]
 pub struct Source<O> {
@@ -638,7 +638,7 @@ impl SignalBuilder {
 /// Enables returning different concrete [`Signal`] types from branching logic without boxing,
 /// although note that all [`Signal`]s are boxed internally regardless.
 ///
-/// Inspired by https://github.com/rayon-rs/either.
+/// Inspired by <https://github.com/rayon-rs/either>.
 #[derive(Clone)]
 #[allow(missing_docs)]
 pub enum SignalEither<L, R>
@@ -1591,7 +1591,7 @@ pub trait SignalExt: Signal {
         Box::new(self)
     }
 
-    /// Activate this [`Signal`] and all its [`Upstream`]s, causing them to be evaluated every frame
+    /// Activate this [`Signal`] and all its upstreams, causing them to be evaluated every frame
     /// until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
     where

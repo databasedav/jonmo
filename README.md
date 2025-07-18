@@ -12,12 +12,12 @@ in bengali, jonmo means "birth"
 
 The runtime of jonmo is quite simple; every frame, the outputs of systems are forwarded to their dependants, recursively. The complexity and power of jonmo really emerges from its monadic signal combinators, defined within the [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalExt.html), [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalVecExt.html), and [`SignalMapExt`](https://docs.rs/jonmo/latest/jonmo/trait.SignalMapExt.html) traits (ported from futures-signals' traits of the same name), which internally manage special Bevy systems that allow for the declarative composition of complex data flows with minimalistic, high-level, signals-oriented methods.
 
-### Assorted features:
+### assorted features:
 - fine-grained reactivity for all entities, components, and children
 - ***diff-less*** constant-time reactive updates for collections (available through `MutableVec` and `MutableBTreeMap`)
 - automated system lifecycle management when using the builder API, simple component on-remove hook when not
 - polling API for when one needs an escape hatch from the regular push-based output semantics (polling is used sparsely internally for some combinators)
-- either wrappers (a la https://github.com/rayon-rs/either) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
+- either wrappers (a la <https://github.com/rayon-rs/either>) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
 - `no_std` *always*
 
 ## examples

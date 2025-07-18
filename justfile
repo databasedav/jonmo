@@ -1,7 +1,9 @@
-KAAJ_HAALKA_COMMIT := "5e06f448c3515fa0dc1cb9ad66fcc0192756fdaf"
+set shell := ["nu", "-c"]
+
+KAAJ_HAALKA_COMMIT := "42f9b44ab402c88cce7eaa1b3dddc7419512feac"
 
 fetch_kaaj_justfile:
-  curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
+  http get https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
 
 import? 'kaaj.just'
 
@@ -12,4 +14,4 @@ exclude_examples := '"test", "utils"'
 export_nickels := "ci build_example pr_previews examples_on_main cleanup_pr_previews release"
 
 repo_prompt:
-  @nickel eval repo_prompt.ncl | sed 's/^"//; s/"$//; s/\\"/"/g; s/\\n/\n/g'
+  @nickel eval repo_prompt.ncl | str replace -r '^"' '' | str replace -r '"$' '' | str replace '\"' '"' | str replace '\n' "\n"

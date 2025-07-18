@@ -14,7 +14,7 @@ use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
 use super::{graph::*, signal::*, utils::*};
 
 /// Describes the mutations made to the underlying [`MutableVec`] that are piped to
-/// [`Downstream`] [`SignalVec`]s.
+/// downstream [`SignalVec`]s.
 #[allow(missing_docs)]
 pub enum VecDiff<T> {
     Replace { values: Vec<T> },
@@ -116,7 +116,7 @@ impl<T: Clone> VecDiff<T> {
 }
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
-/// of the signal graph [`Downstream`] of some source [`MutableVec`]; this is similar to [`Signal`]
+/// of the signal graph downstream of some source [`MutableVec`]; this is similar to [`Signal`]
 /// but critically requires that the [`System`] outputs [`Option<VecDiff<Self::Item>>`].
 pub trait SignalVec: SSs {
     /// Output type.
@@ -145,7 +145,7 @@ impl<O: 'static> SignalVec for Box<dyn SignalVec<Item = O> + Send + Sync> {
     }
 }
 
-/// Signal graph node with no [`Upstream`]s which forwards [`Vec<VecDiff<T>>`]s flushed from some
+/// Signal graph node with no upstreams which forwards [`Vec<VecDiff<T>>`]s flushed from some
 /// source [`MutableVec<T>`], see [`MutableVec::signal_vec`].
 #[derive(Clone)]
 pub struct Source<T> {
@@ -1103,7 +1103,7 @@ pub trait SignalVecExt: SignalVec {
 
     /// Pass each [`Item`](SignalVec::Item) of this [`SignalVec`] to an [`FnMut`], transforming it.
     ///
-    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParams)s aren't
+    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't
     /// necessary.
     ///
     /// # Example
@@ -1748,7 +1748,7 @@ pub trait SignalVecExt: SignalVec {
     /// item and the left item is a [`Signal<Item = Option<usize>>`] which outputs the item's index
     /// or [`None`] if it was removed.
     ///
-    /// The [`Signal<Item = Option<usize>>`]s are deduped so any [`Downstream`] [`Signal`]s are only
+    /// The [`Signal<Item = Option<usize>>`]s are deduped so any downstream [`Signal`]s are only
     /// run on frames where the index has changed.
     ///
     /// # Example
@@ -2550,11 +2550,11 @@ pub trait SignalVecExt: SignalVec {
     }
 
     /// Sort this [`SignalVec`] according to a [`System`] which takes [`In`] `(Self::Item,
-    /// Self::Item)` and returns a [`std::cmp::Ordering`].
+    /// Self::Item)` and returns a [`core::cmp::Ordering`].
     ///
     /// # Example
     /// ```no_run
-    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(right)) -> outputs `SignalVec -> [1, 2, 3]`
+    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(right)) // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
     where
@@ -3219,7 +3219,7 @@ pub trait SignalVecExt: SignalVec {
         Box::new(self)
     }
 
-    /// Activate this [`SignalVec`] and all its [`Upstream`]s, causing them to be evaluated every
+    /// Activate this [`SignalVec`] and all its upstreams, causing them to be evaluated every
     /// frame until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
     where
@@ -3377,7 +3377,7 @@ struct MutableVecState<T> {
 
 /// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them as a batch on
 /// [`flush`](MutableVec::flush), enabling diff-less constant time reactive updates for
-/// [`Downstream`] [`SignalVec`]s.
+/// downstream [`SignalVec`]s.
 #[derive(Clone)]
 pub struct MutableVec<T> {
     state: Arc<RwLock<MutableVecState<T>>>,
@@ -3538,7 +3538,7 @@ impl<T> MutableVec<T> {
         }
     }
 
-    /// Emits any pending [`VecDiff`]s to [`Downstream`] [`SignalVec`]s.
+    /// Emits any pending [`VecDiff`]s to downstream [`SignalVec`]s.
     pub fn flush_into_world(&self, world: &mut World)
     where
         T: SSs,

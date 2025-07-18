@@ -18,7 +18,7 @@ use bevy_platform::{
 use core::{fmt, marker::PhantomData, ops::Deref};
 
 /// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to
-/// [`Downstream`] [`SignalMap`]s.
+/// downstream [`SignalMap`]s.
 #[allow(missing_docs)]
 pub enum MapDiff<K, V> {
     Replace { entries: Vec<(K, V)> },
@@ -101,7 +101,7 @@ impl<K, V> MapDiff<K, V> {
 }
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
-/// of the signal graph [`Downstream`] of some source [`MutableBTreeMap`]; this is similar to
+/// of the signal graph downstream of some source [`MutableBTreeMap`]; this is similar to
 /// [`Signal`] but critically requires that the [`System`] outputs [`Option<MapDiff<Self::Key,
 /// Self::Value>>`].
 pub trait SignalMap: SSs {
@@ -222,7 +222,7 @@ where
     }
 }
 
-/// Signal graph node with no [`Upstream`]s which outputs some [`MutableBTreeMap`]'s sorted
+/// Signal graph node with no upstreams which outputs some [`MutableBTreeMap`]'s sorted
 /// [`Key`](SignalMap::Key)s as a [`SignalVec`], see
 /// [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
 #[derive(Clone)]
@@ -660,7 +660,7 @@ pub trait SignalMapExt: SignalMap {
         Box::new(self)
     }
 
-    /// Activate this [`SignalMap`] and all its [`Upstream`]s, causing them to be evaluated every
+    /// Activate this [`SignalMap`] and all its upstreams, causing them to be evaluated every
     /// frame until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
     where
@@ -767,7 +767,7 @@ struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
 
 /// Wrapper around a [`BTreeMap`] that tracks mutations as [`MapDiff`]s and emits them as a batch on
 /// [`flush`](MutableBTreeMap::flush), enabling diff-less constant time reactive updates for
-/// [`Downstream`] [`SignalMap`]s.
+/// downstream [`SignalMap`]s.
 #[derive(Clone)]
 pub struct MutableBTreeMap<K, V> {
     state: Arc<RwLock<MutableBTreeMapState<K, V>>>,
@@ -788,7 +788,7 @@ where
     }
 }
 
-/// Signal graph node with no [`Upstream`]s which forwards [`Vec<MapDiff<K, V>>`]s flushed from some
+/// Signal graph node with no upstreams which forwards [`Vec<MapDiff<K, V>>`]s flushed from some
 /// source [`MutableBTreeMap<K, V>`], see [`MutableBTreeMap::signal_map`].
 #[derive(Clone)]
 pub struct Source<K, V> {
@@ -1055,7 +1055,7 @@ impl<K, V> MutableBTreeMap<K, V> {
         }
     }
 
-    /// Emits any pending [`MapDiff`]s to [`Downstream`] [`SignalMap`]s.
+    /// Emits any pending [`MapDiff`]s to downstream [`SignalMap`]s.
     pub fn flush_into_world(&self, world: &mut World)
     where
         K: SSs,

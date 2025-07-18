@@ -282,7 +282,7 @@ impl SignalHandle {
         Self(signal)
     }
 
-    /// Decrements the usage tracking of the corresponding [`Signal`] and all its [`Upstream`]s,
+    /// Decrements the usage tracking of the corresponding signal and all its upstreams,
     /// potentially despawning the backing [`System`], see [`SignalHandle`].
     pub fn cleanup(self, world: &mut World) {
         signal_handle_cleanup_helper(world, [self.0]);
