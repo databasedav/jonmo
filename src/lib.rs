@@ -64,4 +64,6 @@ pub mod prelude {
         signal_vec::{MutableVec, SignalVec, SignalVecExt},
         utils::{LazyEntity, clone},
     };
+    #[doc(no_inline)]
+    pub use apply::{Also, Apply};
 }

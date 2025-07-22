@@ -23,9 +23,10 @@ bevy_platform = { version = "0.16", default-features = false }
 bevy_time = { version = "0.16", default-features = false }
 enclose = "1.2"
 dyn-clone = "1.0"
+apply = "0.3"
 
 [dev-dependencies]
-bevy = "0.16.0"
+bevy = "0.16"
 rand = "0.9"
 
 [[example]]

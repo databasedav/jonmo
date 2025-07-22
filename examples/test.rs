@@ -71,11 +71,11 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             // })
             // .dedupe()
             // .to_signal_vec()
-            // .filter_signal(|In(n)| {
-            //     SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
-            //         n % 2 == if toggle.0 { 0 } else { 1 }
-            //     })
-            // })
+            .filter_signal(|In(n)| {
+                SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+                    n % 2 == if toggle.0 { 0 } else { 1 }
+                })
+            })
             // .map_signal(|In(n): In<i32>| {
             //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
             // })
@@ -97,7 +97,7 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
             //         JonmoBuilder::from(Node::default()).component_signal(
             //             index_signal
-            //                 .clone()
+            //                 .clone() // TODO: this clone shouldn't be required ??
             //                 .debug()
             //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
             //         )

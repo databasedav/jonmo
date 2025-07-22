@@ -3,10 +3,10 @@
 use core::cmp::Ordering;
 
 use super::{graph::*, signal::*, signal_vec::*, utils::*};
-use bevy_ecs::prelude::*;
+use bevy_ecs::{component::Mutable, prelude::*, system::SystemState};
 use bevy_platform::{
     prelude::*,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
@@ -53,11 +53,28 @@ impl JonmoBuilder {
         self
     }
 
+    /// Run a function with this builder's [`EntityWorldMut`].
+    pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
+        self.on_spawn(move |world, entity| {
+            if let Ok(entity) = world.get_entity_mut(entity) {
+                f(entity);
+            }
+        })
+    }
+
     /// Adds a [`Bundle`] onto this builder's [`Entity`].
     pub fn insert<T: Bundle>(self, bundle: T) -> Self {
-        self.on_spawn(move |world, entity| {
-            if let Ok(mut entity) = world.get_entity_mut(entity) {
+        self.with_entity(move |mut entity| {
                 entity.insert(bundle);
+        })
+    }
+
+    /// Run a function with mutable access (via [`Mut`]) to this builder's `C` [`Component`] if it
+    /// exists.
+    pub fn with_component<C: Component<Mutability = Mutable>>(self, f: impl FnOnce(Mut<C>) + SSs) -> Self {
+        self.with_entity(|mut entity| {
+            if let Some(component) = entity.get_mut::<C>() {
+                f(component);
             }
         })
     }
@@ -80,6 +97,31 @@ impl JonmoBuilder {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle =
                 Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
+            add_handle(world, entity, handle);
+        };
+        self.on_spawn(on_spawn)
+    }
+
+    /// Reactively run a function with mutable access (via [`Mut`]) to this builder's [`Entity`]'s
+    /// `C` [`Component`] if it exists and the output of a [`Signal`].
+    ///
+    /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn on_signal_with_component<C, I, S, F, M>(self, signal: S, mut f: F) -> Self
+    where
+        C: Component<Mutability = Mutable>,
+        I: Clone + 'static,
+        S: Signal<Item = I> + SSs,
+        F: FnMut(Mut<C>, I) + SSs,
+    {
+        let on_spawn = move |world: &mut World, entity: Entity| {
+            let handle = Signal::register_signal(
+                signal.map(move |In(input): In<I>, mut components: Query<&mut C>| {
+                    if let Ok(component) = components.get_mut(entity) {
+                        f(component, input)
+                    }
+                }),
+                world,
+            );
             add_handle(world, entity, handle);
         };
         self.on_spawn(on_spawn)
@@ -134,6 +176,38 @@ impl JonmoBuilder {
         })
     }
 
+    pub fn signal_from_ancestor_find<S, F, P, M>(self, f: F, predicate: P) -> Self
+    where
+        S: Signal,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>) -> S + SSs,
+        P: IntoSystem<In<Entity>, bool, M> + SSs,
+    {
+        let system = Arc::new(OnceLock::new());
+        self
+        .on_spawn(clone!((system) move |world, entity| {
+            let system_id = world.register_system(predicate);
+            world.entity_mut(entity).add_child(system_id.entity());
+            let _ = system.set(system_id);
+        }))
+        .signal_from_entity(move |signal| {
+            f(signal.map(move |In(entity): In<Entity>, world: &mut World| {
+                let mut ancestors = SystemState::<Query<&ChildOf>>::new(world);
+                let ancestors = ancestors.get(world);
+                let ancestors = ancestors.iter_ancestors(entity).collect::<Vec<_>>();
+                ancestors.into_iter().find(|&ancestor| world.run_system_with(system.get().copied().unwrap(), ancestor).ok().unwrap_or(false))
+            }))
+        })
+    }
+
+    pub fn signal_from_ancestor_with_component<C, S, F>(self, f: F) -> Self
+    where
+        C: Component,
+        S: Signal,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>) -> S + SSs,
+    {
+        self.signal_from_ancestor_find(f, |In(entity), components: Query<&C>| components.contains(entity))
+    }
+
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
     /// `generations`-nth generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
     /// will return this builder's [`Entity`] itself.
@@ -145,12 +219,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         self.signal_from_entity(move |signal| {
-            f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
-                [entity]
-                    .into_iter()
-                    .chain(parents.iter_ancestors(entity))
-                    .nth(generations)
-            }))
+            f(signal.map(ancestor_map(generations)))
         })
     }
 
@@ -170,17 +239,16 @@ impl JonmoBuilder {
     /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is
     /// removed. If the [`Signal`]'s output is infallible, wrapping the result in an [`Option`] is
     /// unnecessary.
-    pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
+    pub fn component_signal<C, S>(self, signal: S) -> Self
     where
-        C: Component,
-        IOC: Into<Option<C>> + Clone + 'static,
-        S: Signal<Item = IOC> + SSs,
+        C: Component + Clone,
+        S: Signal<Item = Option<C>> + SSs,
     {
         self.on_signal(
             signal,
-            move |In((entity, component_option)): In<(Entity, IOC)>, world: &mut World| {
+            move |In((entity, component_option)): In<(Entity, Option<C>)>, world: &mut World| {
                 if let Ok(mut entity) = world.get_entity_mut(entity) {
-                    if let Some(component) = component_option.into() {
+                    if let Some(component) = component_option {
                         entity.insert(component);
                     } else {
                         entity.remove::<C>();
@@ -214,6 +282,53 @@ impl JonmoBuilder {
                 }
             })
         })
+    }
+
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
+    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
+    /// [`Component`] is removed. If the resulting [`Signal`]'s output is infallible, wrapping the
+    /// result in an [`Option`] is unnecessary.
+    pub fn component_signal_from_ancestor<C, IOC, S, F>(self, generations: usize, f: F) -> Self
+    where
+        C: Component,
+        IOC: Into<Option<C>> + 'static,
+        S: Signal<Item = IOC>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
+    {
+        let entity = LazyEntity::new();
+        self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
+            f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
+                [entity]
+                    .into_iter()
+                    .chain(parents.iter_ancestors(entity))
+                    .nth(generations)
+            }))
+            .map(move |In(component_option): In<IOC>, world: &mut World| {
+                if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
+                    if let Some(component) = component_option.into() {
+                        entity.insert(component);
+                    } else {
+                        entity.remove::<C>();
+                    }
+                }
+            })
+        })
+    }
+
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
+    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
+    /// [`Component`] is removed. If the resulting [`Signal`]'s output is infallible, wrapping the
+    /// result in an [`Option`] is unnecessary.
+    pub fn component_signal_from_parent<C, IOC, S, F>(self, f: F) -> Self
+    where
+        C: Component,
+        IOC: Into<Option<C>> + 'static,
+        S: Signal<Item = IOC>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
+    {
+        self.component_signal_from_ancestor(1, f)
     }
 
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`

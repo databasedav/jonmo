@@ -14,4 +14,4 @@ exclude_examples := '"test", "utils"'
 export_nickels := "ci build_example pr_previews examples_on_main cleanup_pr_previews release"
 
 repo_prompt:
-  @nickel eval repo_prompt.ncl | str replace -r '^"' '' | str replace -r '"$' '' | str replace '\"' '"' | str replace '\n' "\n"
+  @nickel eval repo_prompt.ncl | sed 's/^"//; s/"$//; s/\\"/"/g; s/\\n/\n/g'

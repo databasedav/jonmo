@@ -251,8 +251,7 @@ pub(crate) fn process_signals(
 }
 
 pub(crate) fn process_signal_graph(world: &mut World) {
-    let mut orphan_parents =
-        SystemState::<Query<Entity, (With<SystemRunner>, Without<Upstream>, With<Downstream>)>>::new(world);
+    let mut orphan_parents = SystemState::<Query<Entity, (With<SystemRunner>, Without<Upstream>)>>::new(world);
     let orphan_parents = orphan_parents.get(world);
     let orphan_parents = orphan_parents.iter().map(SignalSystem).collect::<Vec<_>>();
     process_signals(world, orphan_parents, Box::new(()));

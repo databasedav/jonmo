@@ -26,6 +26,17 @@ impl LazyEntity {
     }
 }
 
+pub(crate) fn get_ancestor(child_ofs: &Query<&ChildOf>, entity: Entity, generations: usize) -> Option<Entity> {
+    [entity]
+        .into_iter()
+        .chain(child_ofs.iter_ancestors(entity))
+        .nth(generations.saturating_sub(1))
+}
+
+pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&ChildOf>) -> Option<Entity> {
+    move |In(entity): In<Entity>, child_ofs: Query<&ChildOf>| get_ancestor(&child_ofs, entity, generations)
+}
+
 /// Convenience trait for [`Send`] + [`Sync`] + 'static.
 pub trait SSs: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> SSs for T {}
