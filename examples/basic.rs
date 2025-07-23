@@ -51,3 +51,4 @@ fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Quer
 fn camera(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
+
