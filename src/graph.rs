@@ -1,13 +1,11 @@
 //! Signal graph management and runtime.
-
 use super::utils::*;
-
 use bevy_derive::Deref;
 use bevy_ecs::{
     component::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
-    system::{RunSystemOnce, SystemId, SystemState},
+    system::{SystemId, SystemState},
     world::DeferredWorld,
 };
 use bevy_log::prelude::*;
@@ -65,35 +63,13 @@ where
     lazy_signal_from_system(system).register(world)
 }
 
-fn downstream_syncer(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    world.commands().queue(move |world: &mut World| {
-        let _ = world.run_system_once(
-            move |upstreams: Query<&Upstream>, mut downstreams: Query<&mut Downstream>, mut commands: Commands| {
-                if let Ok(upstream) = upstreams.get(entity) {
-                    for &upstream_system in upstream.iter() {
-                        if let Ok(mut downstreams) = downstreams.get_mut(*upstream_system) {
-                            downstreams.0.remove(&SignalSystem(entity));
-                            if downstreams.0.is_empty()
-                                && let Ok(mut entity) = commands.get_entity(*upstream_system)
-                            {
-                                entity.remove::<Downstream>();
-                            }
-                        }
-                    }
-                }
-            },
-        );
-    });
-}
-
 // TODO: many to many relationships
 #[derive(Component, Deref, Clone)]
-#[component(on_remove = downstream_syncer)]
+// #[component(on_remove = downstream_syncer)]
 pub(crate) struct Upstream(pub(crate) HashSet<SignalSystem>);
 
 impl<'a> IntoIterator for &'a Upstream {
     type Item = <Self::IntoIter as Iterator>::Item;
-
     type IntoIter = bevy_platform::collections::hash_set::Iter<'a, SignalSystem>;
 
     #[inline(always)]
@@ -108,7 +84,6 @@ pub(crate) struct Downstream(HashSet<SignalSystem>);
 
 impl<'a> IntoIterator for &'a Downstream {
     type Item = <Self::IntoIter as Iterator>::Item;
-
     type IntoIter = bevy_platform::collections::hash_set::Iter<'a, SignalSystem>;
 
     #[inline(always)]
@@ -122,10 +97,8 @@ fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem)
     if source == target {
         return true;
     }
-
     let mut stack = vec![target];
     let mut visited = HashSet::new();
-
     while let Some(node) = stack.pop() {
         if node == source {
             return true;
@@ -194,10 +167,11 @@ where
                 .ok()
                 .and_then(Into::into)
                 .map(|o| Box::new(o) as Box<dyn AnyClone>),
-            Err(error) => {
+            Err(_) => {
+                let expected_type = core::any::type_name::<I>();
                 error!(
-                    "failed to downcast input to type for system {:?}: {:?}",
-                    self.system, error
+                    "failed to downcast input for system {:?}. expected input type: `{}`",
+                    self.system, expected_type
                 );
                 None
             }
@@ -213,41 +187,46 @@ impl SystemRunner {
 
 /// An extension trait for [`Any`] types that implement [`Clone`].
 pub trait AnyClone: Any + DynClone {}
+
 clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
-
-// #[derive(Component)]
-// pub(crate) struct SkipOnce;
 
 pub(crate) fn process_signals(
     world: &mut World,
     signals: impl IntoIterator<Item = SignalSystem>,
     input: Box<dyn AnyClone>,
 ) {
-    for signal in signals {
-        if let Some(runner) = world
-            .get_entity(*signal)
-            .ok()
-            .and_then(|entity| entity.get::<SystemRunner>().cloned())
-            && let Some(output) = runner.run(world, input.clone())
-            && let Some(downstream) = world.get::<Downstream>(*signal).cloned()
-        {
-            let targets = downstream
-                .iter()
-                .copied()
-                // .filter(|&signal| {
-                //     let mut entity = world.entity_mut(*signal);
-                //     let filter = entity.get::<SkipOnce>().is_none();
-                //     if !filter {
-                //         entity.remove::<SkipOnce>();
-                //     }
-                //     filter
-                // })
-                .collect::<Vec<_>>();
-            process_signals(world, targets, output);
+    let mut iter = signals.into_iter().peekable();
+    if let Some(first_signal) = iter.next() {
+        // avoid cloning the input if there's only a single downstream, according to
+        // gemini, the compiler cannot capable of doing this intelligently
+        if iter.peek().is_none() {
+            if let Some(runner) = world
+                .get_entity(*first_signal)
+                .ok()
+                .and_then(|entity| entity.get::<SystemRunner>().cloned())
+                && let Some(output) = runner.run(world, input)
+                && let Some(downstream) = world.get::<Downstream>(*first_signal).cloned()
+            {
+                process_signals(world, downstream.iter().copied(), output);
+            }
+        } else {
+            for signal in [first_signal].into_iter().chain(iter) {
+                if let Some(runner) = world
+                    .get_entity(*signal)
+                    .ok()
+                    .and_then(|entity| entity.get::<SystemRunner>().cloned())
+                    && let Some(output) = runner.run(world, input.clone())
+                    && let Some(downstream) = world.get::<Downstream>(*signal).cloned()
+                {
+                    process_signals(world, downstream.iter().copied(), output);
+                }
+            }
         }
     }
+    // If there were no signals to begin with, `input` is simply dropped, which is
+    // correct.
 }
 
 pub(crate) fn process_signal_graph(world: &mut World) {
@@ -260,11 +239,12 @@ pub(crate) fn process_signal_graph(world: &mut World) {
 /// Handle to a particular node of the signal graph, returned by
 /// [`SignalExt::register`](super::signal::SignalExt),
 /// [`SignalVecExt::register`](super::signal_vec::SignalVecExt::register), and
-/// [`SignalMapExt::register`](super::signal_map::SignalMapExt::register). In order for signals to
-/// be appropriately cleaned up, for every call to `.register` made to some particular signal or its
-/// clones, [`SignalHandle::cleanup`] must be called on a corresponding [`SignalHandle`] or a
-/// downstream [`SignalHandle`]. Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`]
-/// will take care of this when the corresponding [`Entity`] is despawned, and using the
+/// [`SignalMapExt::register`](super::signal_map::SignalMapExt::register). In order
+/// for signals to be appropriately cleaned up, for every call to `.register` made
+/// to some particular signal or its clones, [`SignalHandle::cleanup`] must be
+/// called on a corresponding [`SignalHandle`] or a downstream [`SignalHandle`].
+/// Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`] will take care
+/// of this when the corresponding [`Entity`] is despawned, and using the
 /// [`JonmoBuilder`](super::builder::JonmoBuilder) will manage this internally.
 #[derive(Clone, Deref)]
 pub struct SignalHandle(pub SignalSystem);
@@ -281,10 +261,10 @@ impl SignalHandle {
         Self(signal)
     }
 
-    /// Decrements the usage tracking of the corresponding signal and all its upstreams,
-    /// potentially despawning the backing [`System`], see [`SignalHandle`].
+    /// Decrements the usage tracking of the corresponding signal and all its
+    /// upstreams, potentially despawning the backing [`System`], see [`SignalHandle`].
     pub fn cleanup(self, world: &mut World) {
-        signal_handle_cleanup_helper(world, [self.0]);
+        cleanup_recursive(world, self.0);
     }
 }
 
@@ -339,14 +319,12 @@ where
         system: sys_id,
         _marker: PhantomData,
     }));
-
     world.entity_mut(entity).insert((
         SignalRegistrationCount::new(),
         SystemRunner {
             runner: Arc::new(Box::new(move |w, inp| runner.run(w, inp))),
         },
     ));
-
     entity.into()
 }
 
@@ -484,11 +462,9 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let signal = self.upstreams.pop()?;
-
         if let Ok(upstream) = self.upstreams_query.get(*signal) {
             self.upstreams.extend(upstream);
         }
-
         Some(signal)
     }
 }
@@ -523,36 +499,65 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let signal = self.downstreams.pop()?;
-
         if let Ok(downstream) = self.downstreams_query.get(*signal) {
             self.downstreams.extend(downstream);
         }
-
         Some(signal)
     }
 }
 
-fn signal_handle_cleanup_helper(world: &mut World, signals: impl IntoIterator<Item = SignalSystem>) {
-    for signal in signals {
-        if let Some(upstreams) = world.get::<Upstream>(*signal).cloned() {
-            signal_handle_cleanup_helper(world, upstreams.0);
+fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
+    // Stage 1: Decrement the count and check if this node needs full cleanup. We do
+    // this in a short-lived block to release the borrow.
+    let mut needs_full_cleanup = false;
+    if let Ok(mut entity) = world.get_entity_mut(*signal)
+        && let Some(mut count) = entity.get_mut::<SignalRegistrationCount>()
+    {
+        count.decrement();
+        if **count == 0 {
+            needs_full_cleanup = true;
         }
-        if let Ok(mut entity) = world.get_entity_mut(*signal) {
-            let mut no_registrations = false;
-            if let Some(mut registration_count) = entity.get_mut::<SignalRegistrationCount>() {
-                registration_count.decrement();
-                if **registration_count == 0 {
-                    entity.remove::<Upstream>();
-                    entity.remove::<Downstream>();
-                    no_registrations = true;
-                }
-            }
-            if no_registrations
-                && let Some(LazySignalHolder(lazy_signal)) = entity.get::<LazySignalHolder>()
-                && lazy_signal.inner.references.load(Ordering::SeqCst) == 1
-            {
+    }
+
+    // If the count is not zero, we're done with this branch of the graph.
+    if !needs_full_cleanup {
+        return;
+    }
+
+    // Stage 2: The count is zero. Perform the full cleanup. First, get the list of
+    // parents.
+    let upstreams = world.get::<Upstream>(*signal).cloned();
+
+    // Now, we can despawn the current node if it's no longer needed. The check for
+    // LazySignalHolder is crucial.
+    if let Ok(entity) = world.get_entity_mut(*signal) {
+        if let Some(lazy_holder) = entity.get::<LazySignalHolder>() {
+            if lazy_holder.0.inner.references.load(Ordering::SeqCst) == 1 {
                 entity.despawn();
             }
+        } else {
+            // This is a dynamically created signal without a holder, it can be despawned once
+            // its registrations are gone.
+            entity.despawn();
+        }
+    }
+
+    // Stage 3: Notify parents and recurse. This happens _after_ the current node has
+    // been processed and potentially despawned.
+    if let Some(upstreams) = upstreams {
+        for &upstream_system in upstreams.iter() {
+            // Notify the parent to remove this signal from its downstream list.
+            if let Ok(mut upstream_entity) = world.get_entity_mut(*upstream_system)
+                && let Some(mut downstream) = upstream_entity.get_mut::<Downstream>()
+            {
+                downstream.0.remove(&signal);
+                if downstream.0.is_empty() {
+                    upstream_entity.remove::<Downstream>();
+                }
+            }
+
+            // Now, recurse on the parent.
+            cleanup_recursive(world, upstream_system);
         }
     }
 }
@@ -576,7 +581,6 @@ fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Opti
                 return None;
             }
         };
-
         let upstreams: Vec<SignalSystem> = world
             .get::<Upstream>(*node)
             .map(|u| {
@@ -588,7 +592,6 @@ fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Opti
 
         // 3. run the node (depth-first)
         let mut last_output = None;
-
         if upstreams.is_empty() {
             last_output = runner.run(world, Box::new(()));
         } else {
@@ -600,7 +603,6 @@ fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Opti
                 }
             }
         }
-
         cache.insert(node, last_output.clone());
         last_output
     }
@@ -617,10 +619,11 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
         .flatten()
 }
 
-/// Utility function for extracting values from [`AnyClone`]s, e.g. those returned by
-/// [`poll_signal`].
+/// Utility function for extracting values from [`AnyClone`]s, e.g. those returned
+/// by [`poll_signal`].
 ///
 /// # Example
+///
 /// ```no_run
 /// poll_signal(world, signal).and_then(downcast_any_clone::<usize>) // assuming this `signal` outputs a `usize`, this will return an `Option<usize>`
 /// ```

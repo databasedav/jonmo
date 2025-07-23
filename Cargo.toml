@@ -40,8 +40,18 @@ path = "examples/basic_builder.rs"
 doc-scrape-examples = true
 
 [[example]]
-name = "lifetime_list"
-path = "examples/lifetime_list.rs"
+name = "basic_builder_inject"
+path = "examples/basic_builder_inject.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "lifetimes"
+path = "examples/lifetimes.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "letters"
+path = "examples/letters.rs"
 doc-scrape-examples = true
 
 [[example]]

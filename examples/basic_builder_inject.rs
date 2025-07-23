@@ -22,12 +22,6 @@ fn ui(world: &mut World) {
     let text = world
         .spawn((Node::default(), TextFont::from_font_size(100.), Value(0)))
         .id();
-    let signal = SignalBuilder::from_component(text)
-        .dedupe()
-        .map(move |In(value): In<Value>, mut commands: Commands| {
-            commands.entity(text).insert(Text(value.0.to_string()));
-        })
-        .register(world);
     let mut ui_root = world.spawn(Node {
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
@@ -36,7 +30,10 @@ fn ui(world: &mut World) {
         ..default()
     });
     ui_root.add_child(text);
-    ui_root.insert(SignalHandles::from([signal]));
+
+    JonmoBuilder::new()
+        .component_signal_from_component(|signal| signal.dedupe().map(|In(value): In<Value>| Text(value.0.to_string())))
+        .spawn_on_entity(world, text);
 }
 
 fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {

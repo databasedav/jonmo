@@ -199,7 +199,7 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
     a simple increasing timer, using the entity builder, showcasing the recommended idiomatic way to use jonmo signals
 
-- [**`lifetime_list`**](https://github.com/databasedav/jonmo/blob/main/examples/lifetime_list.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/lifetime_list/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/lifetime_list/)
+- [**`lifetimes`**](https://github.com/databasedav/jonmo/blob/main/examples/lifetimes.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/lifetimes/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/lifetimes/)
 
     the example above, a reactive enumerated list of colors, each with an independent lifetime timer
 

@@ -1,10 +1,11 @@
+//!
+
 use bevy::prelude::*;
 use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(JonmoPlugin)
+    app.add_plugins((DefaultPlugins, JonmoPlugin))
         .add_systems(
             Startup,
             (

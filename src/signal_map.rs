@@ -1,14 +1,12 @@
 //! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
 //! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
-
-use crate::signal_vec::Replayable;
-
 use super::{
     graph::*,
     signal::*,
     signal_vec::{SignalVec, VecDiff},
     utils::*,
 };
+use crate::signal_vec::Replayable;
 use alloc::collections::BTreeMap;
 use bevy_ecs::prelude::*;
 use bevy_platform::{
@@ -17,8 +15,8 @@ use bevy_platform::{
 };
 use core::{fmt, marker::PhantomData, ops::Deref};
 
-/// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to
-/// downstream [`SignalMap`]s.
+/// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to downstream
+/// [`SignalMap`]s.
 #[allow(missing_docs)]
 pub enum MapDiff<K, V> {
     Replace { entries: Vec<(K, V)> },
@@ -101,9 +99,8 @@ impl<K, V> MapDiff<K, V> {
 }
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
-/// of the signal graph downstream of some source [`MutableBTreeMap`]; this is similar to
-/// [`Signal`] but critically requires that the [`System`] outputs [`Option<MapDiff<Self::Key,
-/// Self::Value>>`].
+/// of the signal graph downstream of some source [`MutableBTreeMap`]; this is similar to [`Signal`]
+/// but critically requires that the [`System`] outputs [`Option<MapDiff<Self::Key, Self::Value>>`].
 pub trait SignalMap: SSs {
     #[allow(missing_docs)]
     type Key;
@@ -127,6 +124,7 @@ pub trait SignalMap: SSs {
 impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMap<Key = K, Value = V> + Send + Sync> {
     type Key = K;
     type Value = V;
+
     fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
         (*self).register_boxed_signal_map(world)
     }
@@ -147,6 +145,7 @@ where
     O: 'static,
 {
     type Item = O;
+
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         let SignalHandle(upstream) = self.upstream.register_signal_map(world);
         let signal = self.signal.register(world);
@@ -226,16 +225,16 @@ where
 /// [`Key`](SignalMap::Key)s as a [`SignalVec`], see
 /// [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
 #[derive(Clone)]
-pub struct SignalVecKeys<Upstream> {
+pub struct SignalVecKeys<K> {
     signal: LazySignal,
-    _marker: PhantomData<fn() -> Upstream>,
+    _marker: PhantomData<fn() -> K>,
 }
 
-impl<Upstream> SignalVec for SignalVecKeys<Upstream>
+impl<K> SignalVec for SignalVecKeys<K>
 where
-    Upstream: SignalMap,
+    K: 'static,
 {
-    type Item = Upstream::Key;
+    type Item = K;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
@@ -245,16 +244,17 @@ where
 /// Signal graph node which maps its upstream [`MutableBTreeMap`] to a [`SignalVec`] of its sorted
 /// `(key, value)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
 #[derive(Clone)]
-pub struct SignalVecEntries<Upstream> {
+pub struct SignalVecEntries<K, V> {
     signal: LazySignal,
-    _marker: PhantomData<fn() -> Upstream>,
+    _marker: PhantomData<fn() -> (K, V)>,
 }
 
-impl<Upstream> SignalVec for SignalVecEntries<Upstream>
+impl<K, V> SignalVec for SignalVecEntries<K, V>
 where
-    Upstream: SignalMap,
+    K: 'static,
+    V: 'static,
 {
-    type Item = (Upstream::Key, Upstream::Value);
+    type Item = (K, V);
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
@@ -265,11 +265,10 @@ where
 pub trait SignalMapExt: SignalMap {
     /// Pass the "raw" [`Vec<MapDiff<Self::Key, Self::Value>>`] output of this [`SignalMap`] to a
     /// [`System`], continuing propagation if the [`System`] returns [`Some`] or terminating for the
-    /// frame if it returns [`None`]. This transforms the `SignalMap` into a `Signal`. Unlike
-    /// most other [`SignalMap`] methods, [`.for_each`](SignalMapExt::for_each), returns a
-    /// [`Signal`], not a [`SignalMap`], since the output type need not be an
-    /// [`Option<Vec<MapDiff>>`]. If the [`System`] logic is infallible, wrapping the result in
-    /// an option is unnecessary.
+    /// frame if it returns [`None`]. This transforms the `SignalMap` into a `Signal`. Unlike most
+    /// other [`SignalMap`] methods, [`.for_each`](SignalMapExt::for_each), returns a [`Signal`],
+    /// not a [`SignalMap`], since the output type need not be an [`Option<Vec<MapDiff>>`]. If the
+    /// [`System`] logic is infallible, wrapping the result in an option is unnecessary.
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
@@ -290,6 +289,7 @@ pub trait SignalMapExt: SignalMap {
     /// it.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value(|In(x)| x * 2); // outputs `SignalMap -> {1: 2, 3: 4}`
     /// ```
@@ -304,7 +304,6 @@ pub trait SignalMapExt: SignalMap {
         let signal = LazySignal::new(move |world: &mut World| {
             let system_id = world.register_system(system);
             let upstream_handle = self.register_signal_map(world);
-
             let processor_logic = move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, world: &mut World| {
                 let mut out_diffs = Vec::with_capacity(diffs.len());
                 for diff in diffs {
@@ -313,14 +312,12 @@ pub trait SignalMapExt: SignalMap {
                 }
                 if out_diffs.is_empty() { None } else { Some(out_diffs) }
             };
-
             let processor_handle =
                 lazy_signal_from_system::<_, Vec<MapDiff<Self::Key, O>>, _, _, _>(processor_logic).register(world);
             world.entity_mut(*processor_handle).add_child(system_id.entity());
             pipe_signal(world, *upstream_handle, processor_handle);
             processor_handle
         });
-
         MapValue {
             signal,
             _marker: PhantomData,
@@ -331,6 +328,7 @@ pub trait SignalMapExt: SignalMap {
     /// [`Signal`], forwarding the output of each resulting [`Signal`].
     ///
     /// # Example
+    ///
     /// ```no_run
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map()
     ///     .map_value_signal(|In(x)|
@@ -348,9 +346,7 @@ pub trait SignalMapExt: SignalMap {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
-
             let state_and_queue_entity = world.spawn_empty().id();
-
             let output_system_handle = SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
                 move |_: In<()>, world: &mut World| {
                     if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
@@ -375,13 +371,11 @@ pub trait SignalMapExt: SignalMap {
                 inner_signal: impl Signal<Item = V> + Clone + 'static,
             ) -> (SignalHandle, SignalSystem, V) {
                 let inner_signal_id = inner_signal.clone().register(world);
-
                 let temp_handle = inner_signal.clone().first().register(world);
                 let initial_value = poll_signal(world, *temp_handle)
                     .and_then(downcast_any_clone::<V>)
                     .expect("map_value_signal's inner signal must emit an initial value");
                 temp_handle.cleanup(world);
-
                 let processor_handle = inner_signal
                     .map(move |In(value): In<V>, world: &mut World| {
                         if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(queue_entity) {
@@ -393,7 +387,6 @@ pub trait SignalMapExt: SignalMap {
                         }
                     })
                     .register(world);
-
                 (processor_handle, *inner_signal_id, initial_value)
             }
 
@@ -406,7 +399,6 @@ pub trait SignalMapExt: SignalMap {
             let output_system_handle_clone = output_system_handle.clone();
             let manager_system_logic = move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, world: &mut World| {
                 let mut new_map_diffs = Vec::new();
-
                 for diff in diffs {
                     match diff {
                         MapDiff::Replace { entries } => {
@@ -416,11 +408,9 @@ pub trait SignalMapExt: SignalMap {
                                     .unwrap();
                                 core::mem::take(&mut state.signals)
                             };
-
                             for (_, (handle, _)) in old_signals {
                                 handle.cleanup(world);
                             }
-
                             let mut new_signals = BTreeMap::new();
                             let mut new_entries_for_diff = Vec::with_capacity(entries.len());
                             for (key, value) in entries {
@@ -436,12 +426,10 @@ pub trait SignalMapExt: SignalMap {
                                     new_entries_for_diff.push((key, initial_value));
                                 }
                             }
-
                             world
                                 .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
                                 .unwrap()
                                 .signals = new_signals;
-
                             if !new_entries_for_diff.is_empty() {
                                 new_map_diffs.push(MapDiff::Replace {
                                     entries: new_entries_for_diff,
@@ -457,18 +445,15 @@ pub trait SignalMapExt: SignalMap {
                                     key.clone(),
                                     inner_signal,
                                 );
-
                                 let old_handle = {
                                     let mut state = world
                                         .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
                                         .unwrap();
                                     state.signals.insert(key.clone(), (handle, id))
                                 };
-
                                 if let Some((old_handle, _)) = old_handle {
                                     old_handle.cleanup(world);
                                 }
-
                                 new_map_diffs.push(MapDiff::Insert {
                                     key,
                                     value: initial_value,
@@ -478,18 +463,15 @@ pub trait SignalMapExt: SignalMap {
                         MapDiff::Update { key, value } => {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
-
                                 let old_inner_id_opt = {
                                     let state =
                                         world.get::<ManagerState<Self::Key, S>>(state_and_queue_entity).unwrap();
                                     state.signals.get(&key).map(|(_, id)| *id)
                                 };
-
                                 if old_inner_id_opt == Some(*new_inner_id) {
                                     new_inner_id.cleanup(world);
                                     continue;
                                 }
-
                                 let (new_processor_handle, new_processor_id, initial_value) = spawn_processor(
                                     world,
                                     state_and_queue_entity,
@@ -497,7 +479,6 @@ pub trait SignalMapExt: SignalMap {
                                     key.clone(),
                                     new_inner_signal,
                                 );
-
                                 let old_processor_handle = {
                                     let mut state = world
                                         .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
@@ -506,13 +487,10 @@ pub trait SignalMapExt: SignalMap {
                                         .signals
                                         .insert(key.clone(), (new_processor_handle, new_processor_id))
                                 };
-
                                 if let Some((old_handle, _)) = old_processor_handle {
                                     old_handle.cleanup(world);
                                 }
-
                                 new_inner_id.cleanup(world);
-
                                 new_map_diffs.push(MapDiff::Update {
                                     key,
                                     value: initial_value,
@@ -542,7 +520,6 @@ pub trait SignalMapExt: SignalMap {
                                     core::mem::take(&mut state.signals)
                                 }
                             };
-
                             if !old_signals.is_empty() {
                                 for (_, (handle, _)) in old_signals {
                                     handle.cleanup(world);
@@ -552,7 +529,6 @@ pub trait SignalMapExt: SignalMap {
                         }
                     }
                 }
-
                 if !new_map_diffs.is_empty()
                     && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
                 {
@@ -560,9 +536,7 @@ pub trait SignalMapExt: SignalMap {
                 }
                 process_signals(world, [*output_system_handle_clone], Box::new(()));
             };
-
             let manager_handle = self.for_each(manager_system_logic).register(world);
-
             world
                 .entity_mut(state_and_queue_entity)
                 .insert((
@@ -575,25 +549,24 @@ pub trait SignalMapExt: SignalMap {
                 .add_child(**manager_handle)
                 .add_child(factory_system_id.entity())
                 .add_child(**output_system_handle);
-
             *output_system_handle
         });
-
         MapValueSignal {
             signal,
             _marker: PhantomData,
         }
     }
 
-    /// Maps this [`SignalMap`] to a [`Key`]-lookup [`Signal`] which outputs [`Some<Value>`] if the
-    /// [`Key`] is present and [`None`] otherwise.
+    /// Maps this [`SignalMap`] to a [`Key`][`key`]-lookup [`Signal`] which outputs [`Some<Value>`]
+    /// if the [`Key`][`key`] is present and [`None`] otherwise.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().key(1); // outputs `2`
     /// ```
     ///
-    /// [`Key`]: SignalMap::Key
+    /// [`key`]: SignalMap::Key
     fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
@@ -605,7 +578,6 @@ pub trait SignalMapExt: SignalMap {
                 move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, mut state: Local<Option<Self::Value>>| {
                     let mut changed = false;
                     let mut new_value = (*state).clone();
-
                     for diff in diffs {
                         match diff {
                             MapDiff::Replace { entries } => {
@@ -630,7 +602,6 @@ pub trait SignalMapExt: SignalMap {
                             }
                         }
                     }
-
                     if changed {
                         *state = new_value.clone();
                         Some(new_value)
@@ -646,6 +617,7 @@ pub trait SignalMapExt: SignalMap {
     /// [`SignalMap`]s of other concrete types.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal = if condition {
     ///     MutableBTreeMap::from([(1, 2), (3, 4)]).map_value(...).boxed() // this is a `MapValue<Source<i32, i32>>`
@@ -660,8 +632,8 @@ pub trait SignalMapExt: SignalMap {
         Box::new(self)
     }
 
-    /// Activate this [`SignalMap`] and all its upstreams, causing them to be evaluated every
-    /// frame until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
+    /// Activate this [`SignalMap`] and all its upstreams, causing them to be evaluated every frame
+    /// until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
     where
         Self: Sized,
@@ -679,6 +651,7 @@ pub struct MutableBTreeMapReadGuard<'a, K, V> {
 
 impl<'a, K, V> Deref for MutableBTreeMapReadGuard<'a, K, V> {
     type Target = BTreeMap<K, V>;
+
     fn deref(&self) -> &Self::Target {
         &self.guard.map
     }
@@ -699,8 +672,7 @@ where
     ///
     /// If the map did not have this key present, [`None`] is returned.
     ///
-    /// If the map did have this key present, the value is updated, and the old
-    /// value is returned
+    /// If the map did have this key present, the value is updated, and the old value is returned
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let diff = if self.guard.map.contains_key(&key) {
             MapDiff::Update {
@@ -751,6 +723,7 @@ where
 
 impl<'a, K, V> Deref for MutableBTreeMapWriteGuard<'a, K, V> {
     type Target = BTreeMap<K, V>;
+
     fn deref(&self) -> &Self::Target {
         &self.guard.map
     }
@@ -803,6 +776,7 @@ where
 {
     type Key = K;
     type Value = V;
+
     fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
@@ -846,6 +820,7 @@ impl<K, V> MutableBTreeMap<K, V> {
         V: Clone + SSs,
     {
         let mut state = self.state.write().unwrap();
+
         // If the signal already exists, just clone and return it.
         if let Some(lazy_signal) = &state.signal {
             return lazy_signal.clone();
@@ -855,23 +830,25 @@ impl<K, V> MutableBTreeMap<K, V> {
         let broadcaster_lazy_signal = LazySignal::new(move |world: &mut World| {
             let self_entity = LazyEntity::new();
 
-            // This is the system for the one-and-only broadcaster. It just drains
-            // diffs that `flush` has put into its component.
-            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
+            // This is the system for the one-and-only broadcaster. It just drains diffs that
+            // `flush` has put into its component.
+            let source_system_logic = clone!((self_entity) move | _: In <() >, world: & mut World | {
                 if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<K, V>>(self_entity.get()) {
-                    if diffs.0.is_empty() { None } else { Some(diffs.0.drain(..).collect()) }
+                    if diffs.0.is_empty() {
+                        None
+                    } else {
+                        Some(diffs.0.drain(..).collect())
+                    }
                 } else {
                     None
                 }
             });
-
             let signal_system = register_signal::<(), Vec<MapDiff<K, V>>, _, _, _>(world, source_system_logic);
             self_entity.set(*signal_system);
 
-            // The broadcaster itself does not have an initial state to replay.
-            // It just needs the component to receive flushed diffs.
+            // The broadcaster itself does not have an initial state to replay. It just needs
+            // the component to receive flushed diffs.
             world.entity_mut(*signal_system).insert(QueuedMapDiffs::<K, V>(vec![]));
-
             signal_system
         });
 
@@ -881,43 +858,51 @@ impl<K, V> MutableBTreeMap<K, V> {
     }
 
     /// Returns a [`Source`] signal from this [`MutableBTreeMap`], always returning clones of the
-    /// same underlying [`Signal`]; such [`SignalMap`]s only emit incremental updates so clones
-    /// will not re-emit initial states.
+    /// same underlying [`Signal`]; such [`SignalMap`]s only emit incremental updates so clones will
+    /// not re-emit initial states.
     pub fn signal_map(&self) -> Source<K, V>
     where
         K: Clone + Ord + SSs,
         V: Clone + SSs,
     {
         let broadcaster_signal = self.get_or_create_broadcaster_signal();
-
-        let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move |world: &mut World| {
+        let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move | world: & mut World | {
             let self_entity = LazyEntity::new();
             let broadcaster_system = broadcaster_signal.register(world);
+            let replay_system_logic =
+                clone!((self_entity) move | In(upstream_diffs): In < Vec < MapDiff < K, V >>>, world: & mut World | {
+                    // Get the locally queued diffs (the initial 'Replace' diff).
+                    let mut diffs =
+                        world
+                            .get_entity_mut(self_entity.get())
+                            .ok()
+                            .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
+                            .map(|queued| queued.0)
+                            .unwrap_or_default();
 
-            let replay_system_logic = clone!((self_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World| {
-                // Get the locally queued diffs (the initial 'Replace' diff).
-                let mut diffs = world
-                    .get_entity_mut(self_entity.get()).ok()
-                    .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
-                    .map(|queued| queued.0)
-                    .unwrap_or_default();
+                    // Add the diffs from upstream (the broadcaster).
+                    diffs.extend(upstream_diffs);
 
-                // Add the diffs from upstream (the broadcaster).
-                diffs.extend(upstream_diffs);
-
-                // If there are any diffs to process, return them.
-                if diffs.is_empty() { None } else { Some(diffs) }
-            });
+                    // If there are any diffs to process, return them.
+                    if diffs.is_empty() {
+                        None
+                    } else {
+                        Some(diffs)
+                    }
+                });
 
             // 1. Register the replay system.
             let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
             self_entity.set(*replay_signal);
 
-            // This closure is the core of the replay trigger. It checks if the broadcaster is idle.
+            // This closure is the core of the replay trigger. It checks if the broadcaster is
+            // idle.
             let trigger = Box::new(move |world: &mut World| {
-                // If the broadcaster's queue has no diffs, it's an idle frame, so we trigger a replay.
+                // If the broadcaster's queue has no diffs, it's an idle frame, so we trigger a
+                // replay.
                 if world.get::<QueuedMapDiffs<K, V>>(*broadcaster_system).is_some_and(|q| q.0.is_empty()) {
-                    // Trigger with an empty vec, forcing the replay_system_logic to check its own queue.
+                    // Trigger with an empty vec, forcing the replay_system_logic to check its own
+                    // queue.
                     process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
                 }
             });
@@ -933,10 +918,8 @@ impl<K, V> MutableBTreeMap<K, V> {
 
             // 3. Pipe the broadcaster to the new replay node.
             pipe_signal(world, broadcaster_system, replay_signal);
-
             replay_signal
         }));
-
         Source {
             signal: replay_lazy_signal,
             _marker: PhantomData,
@@ -988,7 +971,6 @@ impl<K, V> MutableBTreeMap<K, V> {
             pipe_signal(world, *upstream_handle, processor_handle);
             processor_handle
         });
-
         SignalVecKeys {
             signal: lazy_signal,
             _marker: PhantomData,
@@ -997,7 +979,7 @@ impl<K, V> MutableBTreeMap<K, V> {
 
     /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s `(key, value)`s in sorted
     /// order.
-    pub fn signal_vec_entries(&self) -> SignalVecEntries<Self>
+    pub fn signal_vec_entries(&self) -> SignalVecEntries<K, V>
     where
         K: Ord + Clone + SSs,
         V: Clone + SSs,
@@ -1048,7 +1030,6 @@ impl<K, V> MutableBTreeMap<K, V> {
             pipe_signal(world, *upstream_handle, processor_handle);
             processor_handle
         });
-
         SignalVecEntries {
             signal: lazy_signal,
             _marker: PhantomData,
@@ -1065,7 +1046,6 @@ impl<K, V> MutableBTreeMap<K, V> {
         if state.pending_diffs.is_empty() {
             return;
         }
-
         let signal = if let Some(lazy_signal) = &state.signal
             && let LazySystem::Registered(signal_system) = *lazy_signal.inner.system.read().unwrap()
         {
@@ -1106,7 +1086,8 @@ mod tests {
         K: SSs + Clone + fmt::Debug,
         V: SSs + Clone + fmt::Debug;
 
-    // Helper system that captures incoming diffs and stores them in the SignalMapOutput resource.
+    // Helper system that captures incoming diffs and stores them in the
+    // SignalMapOutput resource.
     fn capture_map_output<K, V>(In(diffs): In<Vec<MapDiff<K, V>>>, mut output: ResMut<SignalMapOutput<K, V>>)
     where
         K: SSs + Clone + fmt::Debug,
@@ -1115,8 +1096,8 @@ mod tests {
         output.0.extend(diffs);
     }
 
-    // Helper function to retrieve and clear the captured diffs from the world,
-    // making it easy to assert against the output of a single frame's update.
+    // Helper function to retrieve and clear the captured diffs from the world, making
+    // it easy to assert against the output of a single frame's update.
     fn get_and_clear_map_output<K, V>(world: &mut World) -> Vec<MapDiff<K, V>>
     where
         K: SSs + Clone + fmt::Debug,
@@ -1170,6 +1151,7 @@ mod tests {
     #[test]
     fn test_map_value() {
         let mut app = create_test_app();
+
         // The output map will have keys of `u32` and values of `String`.
         app.init_resource::<SignalMapOutput<u32, String>>();
 
@@ -1181,13 +1163,12 @@ mod tests {
 
         // Apply `map_value` to create the derived signal.
         let mapped_signal = source_map.signal_map().map_value(mapping_system);
-
         let handle = mapped_signal
             .for_each(capture_map_output::<u32, String>)
             .register(app.world_mut());
 
-        // Test 1: Initial State (Replace).
-        // The first update should replay the initial state with mapped values.
+        // Test 1: Initial State (Replace). The first update should replay the initial
+        // state with mapped values.
         app.update();
         let diffs = get_and_clear_map_output::<u32, String>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Initial state should produce one Replace diff");
@@ -1199,8 +1180,8 @@ mod tests {
             "Initial Replace diff has incorrect mapped values"
         );
 
-        // Test 2: Insert.
-        // A new entry in the source should result in an Insert diff with a mapped value.
+        // Test 2: Insert. A new entry in the source should result in an Insert diff with
+        // a mapped value.
         source_map.write().insert(3, 30);
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1210,14 +1191,14 @@ mod tests {
             diffs[0],
             MapDiff::Insert {
                 key: 3,
-                value: "Val:30".to_string()
+                value: "Val:30".to_string(),
             },
             "Insert diff has incorrect mapped value"
         );
 
-        // Test 3: Update.
-        // Updating an existing entry should result in an Update diff with a mapped value.
-        source_map.write().insert(1, 15); // `insert` on existing key is an update
+        // Test 3: Update. Updating an existing entry should result in an Update diff with
+        // a mapped value. `insert` on existing key is an update
+        source_map.write().insert(1, 15);
         source_map.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_map_output::<u32, String>(app.world_mut());
@@ -1226,13 +1207,13 @@ mod tests {
             diffs[0],
             MapDiff::Update {
                 key: 1,
-                value: "Val:15".to_string()
+                value: "Val:15".to_string(),
             },
             "Update diff has incorrect mapped value"
         );
 
-        // Test 4: Remove.
-        // Removing an entry should result in a Remove diff, which has no value to map.
+        // Test 4: Remove. Removing an entry should result in a Remove diff, which has no
+        // value to map.
         source_map.write().remove(&2);
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1244,21 +1225,20 @@ mod tests {
             "Remove diff was not propagated correctly"
         );
 
-        // Test 5: Clear.
-        // Clearing the source map should result in a Clear diff.
+        // Test 5: Clear. Clearing the source map should result in a Clear diff.
         source_map.write().clear();
         source_map.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_map_output::<u32, String>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Clear should produce one diff");
         assert_eq!(diffs[0], MapDiff::Clear, "Clear diff was not propagated correctly");
-
         handle.cleanup(app.world_mut());
     }
 
     #[test]
     fn test_map_value_signal() {
         let mut app = create_test_app();
+
         // The output map will have keys of `u32` and values of `Name` components.
         app.init_resource::<SignalMapOutput<u32, Name>>();
 
@@ -1266,23 +1246,23 @@ mod tests {
         let entity_a = app.world_mut().spawn(Name::new("Alice")).id();
         let entity_b = app.world_mut().spawn(Name::new("Bob")).id();
 
-        // The source map contains entities. The goal is to create a derived map
-        // that contains the *names* of these entities.
+        // The source map contains entities. The goal is to create a derived map that
+        // contains the _names_ of these entities.
         let entity_map = MutableBTreeMap::from([(1, entity_a), (2, entity_b)]);
 
-        // This "factory" system takes an entity and creates a signal that tracks its `Name`.
+        // This "factory" system takes an entity and creates a signal that tracks its
+        // `Name`.
         let factory_system = |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity).dedupe();
 
-        // Apply `map_value_signal` to transform the SignalMap<u32, Entity>
-        // into a SignalMap<u32, Name>.
+        // Apply `map_value_signal` to transform the SignalMap<u32, Entity> into a
+        // SignalMap<u32, Name>.
         let name_map_signal = entity_map.signal_map().map_value_signal(factory_system);
-
         let handle = name_map_signal
             .for_each(capture_map_output::<u32, Name>)
             .register(app.world_mut());
 
-        // Test 1: Initial State.
-        // The first update should replay the initial state of the map.
+        // Test 1: Initial State. The first update should replay the initial state of the
+        // map.
         app.update();
         let diffs = get_and_clear_map_output::<u32, Name>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Initial state should produce one Replace diff");
@@ -1294,8 +1274,8 @@ mod tests {
             "Initial state is incorrect"
         );
 
-        // Test 2: Inner Signal Update.
-        // Change a component on a tracked entity. This should trigger an Update diff.
+        // Test 2: Inner Signal Update. Change a component on a tracked entity. This
+        // should trigger an Update diff.
         *app.world_mut().get_mut::<Name>(entity_a).unwrap() = Name::new("Alicia");
         app.update();
         let diffs = get_and_clear_map_output::<u32, Name>(app.world_mut());
@@ -1304,7 +1284,7 @@ mod tests {
             diffs[0],
             MapDiff::Update {
                 key: 1,
-                value: Name::new("Alicia")
+                value: Name::new("Alicia"),
             },
             "Update diff is incorrect"
         );
@@ -1314,8 +1294,8 @@ mod tests {
         let diffs = get_and_clear_map_output::<u32, Name>(app.world_mut());
         assert!(diffs.is_empty(), "No change should produce no diffs");
 
-        // Test 4: Source Map Insertion.
-        // Add a new entity to the source map. This should trigger an Insert diff.
+        // Test 4: Source Map Insertion. Add a new entity to the source map. This should
+        // trigger an Insert diff.
         let entity_c = app.world_mut().spawn(Name::new("Charlie")).id();
         entity_map.write().insert(3, entity_c);
         entity_map.flush_into_world(app.world_mut());
@@ -1326,13 +1306,13 @@ mod tests {
             diffs[0],
             MapDiff::Insert {
                 key: 3,
-                value: Name::new("Charlie")
+                value: Name::new("Charlie"),
             },
             "Insert diff is incorrect"
         );
 
-        // Test 5: Source Map Removal.
-        // Remove an entity from the source map. This should trigger a Remove diff.
+        // Test 5: Source Map Removal. Remove an entity from the source map. This should
+        // trigger a Remove diff.
         entity_map.write().remove(&2);
         entity_map.flush_into_world(app.world_mut());
         app.update();
@@ -1340,11 +1320,13 @@ mod tests {
         assert_eq!(diffs.len(), 1, "Remove should produce one Remove diff");
         assert_eq!(diffs[0], MapDiff::Remove { key: 2 }, "Remove diff is incorrect");
 
-        // Test 6: Source Map Update (switching the underlying signal).
-        // Update a key to point to a new entity. This must tear down the old signal
-        // and create a new one, resulting in an Update diff with the new value.
+        // Test 6: Source Map Update (switching the underlying signal). Update a key to
+        // point to a new entity. This must tear down the old signal and create a new one,
+        // resulting in an Update diff with the new value.
         let entity_d = app.world_mut().spawn(Name::new("David")).id();
-        entity_map.write().insert(1, entity_d); // `insert` acts as update here.
+
+        // `insert` acts as update here.
+        entity_map.write().insert(1, entity_d);
         entity_map.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_map_output::<u32, Name>(app.world_mut());
@@ -1353,7 +1335,7 @@ mod tests {
             diffs[0],
             MapDiff::Update {
                 key: 1,
-                value: Name::new("David")
+                value: Name::new("David"),
             },
             "Update-to-new-entity diff is incorrect"
         );
@@ -1376,20 +1358,19 @@ mod tests {
             diffs[0],
             MapDiff::Update {
                 key: 1,
-                value: Name::new("Dave")
+                value: Name::new("Dave"),
             },
             "Update on new entity is incorrect"
         );
 
-        // Test 7: Source Map Clear.
-        // Clear the source map. This should trigger a Clear diff.
+        // Test 7: Source Map Clear. Clear the source map. This should trigger a Clear
+        // diff.
         entity_map.write().clear();
         entity_map.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_map_output::<u32, Name>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Clear should produce one Clear diff");
         assert_eq!(diffs[0], MapDiff::Clear, "Clear diff is incorrect");
-
         handle.cleanup(app.world_mut());
     }
 
@@ -1399,7 +1380,8 @@ mod tests {
     where
         T: SSs + Clone + fmt::Debug;
 
-    // Helper system that captures incoming values and stores them in the SignalOutput resource.
+    // Helper system that captures incoming values and stores them in the SignalOutput
+    // resource.
     fn capture_output<T>(In(value): In<T>, mut output: ResMut<SignalOutput<T>>)
     where
         T: SSs + Clone + fmt::Debug,
@@ -1422,21 +1404,20 @@ mod tests {
     #[test]
     fn test_key() {
         let mut app = create_test_app();
-        // The output is a Signal<Option<String>>.
-        app.init_resource::<SignalOutput<Option<String>>>();
 
+        // The output is a Signal<Option`<String>`>.
+        app.init_resource::<SignalOutput<Option<String>>>();
         let source_map = MutableBTreeMap::from([(1, "one".to_string()), (2, "two".to_string())]);
 
         // We will specifically track the value associated with key `2`.
         let key_to_track = 2;
         let key_signal = source_map.signal_map().key(key_to_track);
-
         let handle = key_signal
             .map(capture_output::<Option<String>>)
             .register(app.world_mut());
 
-        // Test 1: Initial State (Key is Present).
-        // The first update should emit the initial value for the key.
+        // Test 1: Initial State (Key is Present). The first update should emit the
+        // initial value for the key.
         app.update();
         assert_eq!(
             get_output::<Option<String>>(app.world_mut()),
@@ -1444,8 +1425,8 @@ mod tests {
             "Initial value for present key is incorrect"
         );
 
-        // Test 2: Update Tracked Key's Value.
-        // This should cause the signal to emit the new value.
+        // Test 2: Update Tracked Key's Value. This should cause the signal to emit the
+        // new value.
         source_map.write().insert(key_to_track, "two_v2".to_string());
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1455,8 +1436,8 @@ mod tests {
             "Update to tracked key did not emit correctly"
         );
 
-        // Test 3: Update a Different Key.
-        // This should NOT cause the signal to emit, as our key's value hasn't changed.
+        // Test 3: Update a Different Key. This should NOT cause the signal to emit, as
+        // our key's value hasn't changed.
         clear_output::<Option<String>>(app.world_mut());
         source_map.write().insert(1, "one_v2".to_string());
         source_map.flush_into_world(app.world_mut());
@@ -1467,8 +1448,7 @@ mod tests {
             "Signal emitted when a different key was updated"
         );
 
-        // Test 4: Remove Tracked Key.
-        // This should cause the signal to emit `None`.
+        // Test 4: Remove Tracked Key. This should cause the signal to emit `None`.
         source_map.write().remove(&key_to_track);
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1478,8 +1458,8 @@ mod tests {
             "Removing the tracked key did not emit None"
         );
 
-        // Test 5: No Change (Key is Absent).
-        // Another update with the key still absent should not emit.
+        // Test 5: No Change (Key is Absent). Another update with the key still absent
+        // should not emit.
         clear_output::<Option<String>>(app.world_mut());
         app.update();
         assert_eq!(
@@ -1488,8 +1468,8 @@ mod tests {
             "Signal emitted when key remained absent"
         );
 
-        // Test 6: Re-insert Tracked Key.
-        // This should cause the signal to emit the new value.
+        // Test 6: Re-insert Tracked Key. This should cause the signal to emit the new
+        // value.
         source_map.write().insert(key_to_track, "two_reborn".to_string());
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1499,8 +1479,7 @@ mod tests {
             "Re-inserting the tracked key did not emit its value"
         );
 
-        // Test 7: Clear the map.
-        // Since this removes the key, it should emit `None`.
+        // Test 7: Clear the map. Since this removes the key, it should emit `None`.
         source_map.write().clear();
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1509,21 +1488,20 @@ mod tests {
             Some(None),
             "Clearing the map did not emit None for the tracked key"
         );
-
         handle.cleanup(app.world_mut());
     }
 
     #[test]
     fn test_for_each() {
         let mut app = create_test_app();
+
         // The output of our `for_each` system will be the full, reconstructed BTreeMap.
         app.init_resource::<SignalOutput<BTreeMap<u32, String>>>();
-
         let source_map = MutableBTreeMap::from([(1, "one".to_string()), (2, "two".to_string())]);
 
-        // This system reconstructs the state of the map by applying the diffs it receives.
-        // It then outputs the complete, current state of the map.
-        // This allows us to verify that `for_each` is receiving the diffs correctly.
+        // This system reconstructs the state of the map by applying the diffs it
+        // receives. It then outputs the complete, current state of the map. This allows
+        // us to verify that `for_each` is receiving the diffs correctly.
         let reconstructor_system = |In(diffs): In<Vec<MapDiff<u32, String>>>,
                                     mut state: Local<BTreeMap<u32, String>>| {
             for diff in diffs {
@@ -1542,17 +1520,18 @@ mod tests {
                     }
                 }
             }
-            state.clone() // Output the current reconstructed state
-        };
 
+            // Output the current reconstructed state
+            state.clone()
+        };
         let handle = source_map
             .signal_map()
             .for_each(reconstructor_system)
             .map(capture_output::<BTreeMap<u32, String>>)
             .register(app.world_mut());
 
-        // Test 1: Initial State.
-        // The initial `Replace` diff should be received and processed.
+        // Test 1: Initial State. The initial `Replace` diff should be received and
+        // processed.
         app.update();
         let expected_initial_state: BTreeMap<_, _> =
             [(1, "one".to_string()), (2, "two".to_string())].into_iter().collect();
@@ -1562,13 +1541,19 @@ mod tests {
             "Initial state was not reconstructed correctly"
         );
 
-        // Test 2: Batched Mutations.
-        // We'll perform multiple operations before flushing to test batch processing.
+        // Test 2: Batched Mutations. We'll perform multiple operations before flushing to
+        // test batch processing.
         {
             let mut writer = source_map.write();
-            writer.insert(3, "three".to_string()); // Insert
-            writer.insert(1, "one_v2".to_string()); // Update
-            writer.remove(&2); // Remove
+
+            // Insert
+            writer.insert(3, "three".to_string());
+
+            // Update
+            writer.insert(1, "one_v2".to_string());
+
+            // Remove
+            writer.remove(&2);
         }
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1581,8 +1566,7 @@ mod tests {
             "State after batched mutations was not reconstructed correctly"
         );
 
-        // Test 3: Clear.
-        // The `Clear` diff should result in an empty map.
+        // Test 3: Clear. The `Clear` diff should result in an empty map.
         source_map.write().clear();
         source_map.flush_into_world(app.world_mut());
         app.update();
@@ -1592,7 +1576,6 @@ mod tests {
             Some(expected_cleared_state.clone()),
             "State after Clear was not reconstructed correctly"
         );
-
         handle.cleanup(app.world_mut());
     }
 }

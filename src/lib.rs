@@ -20,7 +20,6 @@ fn trigger_replays<ReplayTrigger: Component + signal_vec::Replayable>(world: &mu
         .query_filtered::<Entity, With<ReplayTrigger>>()
         .iter(world)
         .collect();
-
     for trigger_entity in triggers {
         if let Some(trigger_component) = world
             .get_entity_mut(trigger_entity)
@@ -53,7 +52,8 @@ impl Plugin for JonmoPlugin {
     }
 }
 
-/// `use jonmo::prelude::*;` imports everything one needs to use start using [jonmo](crate).
+/// `use jonmo::prelude::*;` imports everything one needs to use start using
+/// [jonmo](crate).
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
@@ -61,7 +61,7 @@ pub mod prelude {
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
-        signal_vec::{MutableVec, SignalVec, SignalVecExt},
+        signal_vec::{MutableVec, SignalVec, SignalVecExt, SignalVecEither, IntoSignalVecEither},
         utils::{LazyEntity, clone},
     };
     #[doc(no_inline)]

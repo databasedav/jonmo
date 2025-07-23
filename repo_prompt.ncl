@@ -7,7 +7,7 @@ let src_graph = import "src/graph.rs" as 'Text in
 let src_utils = import "src/utils.rs" as 'Text in
 let examples_basic_builder = import "examples/basic_builder.rs" as 'Text in
 let examples_basic = import "examples/basic.rs" as 'Text in
-let examples_lifetime_list = import "examples/lifetime_list.rs" as 'Text in
+let examples_lifetimes = import "examples/lifetimes.rs" as 'Text in
 let examples_filters = import "examples/filters.rs" as 'Text in
 let examples_test = import "examples/test.rs" as 'Text in
 let examples_utils = import "examples/utils.rs" as 'Text in
@@ -21,7 +21,7 @@ let repo_structure = {
   "src/utils.rs" = src_utils,
   "examples/basic_builder.rs" = examples_basic_builder,
   "examples/basic.rs" = examples_basic,
-  "examples/lifetime_list.rs" = examples_lifetime_list,
+  "examples/lifetimes.rs" = examples_lifetimes,
   "examples/filters.rs" = examples_filters,
   "examples/test.rs" = examples_test,
   "examples/utils.rs" = examples_utils,
@@ -36,7 +36,7 @@ jonmo is a functional reactive signals implementation in rust for the bevy game 
 ├── examples/
 │   ├── basic_builder.rs
 │   ├── basic.rs
-│   ├── lifetime_list.rs
+│   ├── lifetimes.rs
 │   ├── filters.rs
 │   ├── test.rs
 │   └── utils.rs

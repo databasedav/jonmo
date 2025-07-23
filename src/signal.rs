@@ -1,6 +1,5 @@
 //! Signal builders and combinators for constructing reactive [`System`] dependency graphs, see
 //! [`SignalExt`].
-
 use super::{
     graph::*,
     signal_vec::{Replayable, SignalVec, SignalVecExt, VecDiff},
@@ -11,6 +10,7 @@ use bevy_log::prelude::*;
 use bevy_platform::prelude::*;
 use bevy_time::{Time, Timer, TimerMode};
 use core::{fmt, marker::PhantomData, ops, time::Duration};
+use dyn_clone::{DynClone, clone_trait_object};
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
@@ -40,8 +40,26 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
     }
 }
 
-/// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See
-/// [`SignalBuilder`] methods for examples.
+/// An extension trait for [`Signal`] types that implement [`Clone`].
+///
+/// Relevant in contexts where some function may require a [`Clone`] [`Signal`], but the concrete
+/// type can't be known at compile-time.
+pub trait SignalClone: Signal + DynClone {}
+
+clone_trait_object!(< T > SignalClone < Item = T >);
+
+impl<T: Signal + Clone + 'static> SignalClone for T {}
+
+impl<O: 'static> Signal for Box<dyn SignalClone<Item = O> + Send + Sync> {
+    type Item = O;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        (*self).register_boxed_signal(world)
+    }
+}
+
+/// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See [`SignalBuilder`]
+/// methods for examples.
 #[derive(Clone)]
 pub struct Source<O> {
     signal: LazySignal,
@@ -348,8 +366,7 @@ where
     }
 }
 
-/// A signal that dynamically switches its output to track the `VecDiff`s of
-/// different `SignalVec`s.
+/// A signal that dynamically switches its output to track the `VecDiff`s of different `SignalVec`s.
 ///
 /// Created by the [`SwitchSignalVecExt::switch_signal_vec`] method.
 #[derive(Clone)]
@@ -684,6 +701,7 @@ where
     R: Signal<Item = T>,
 {
     type Item = T;
+
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         match *self {
             SignalEither::Left(left) => left.register_signal(world),
@@ -723,6 +741,7 @@ pub trait SignalExt: Signal {
     /// logic is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system(|_: In<()>| 1).map(|In(x): In<i32>| x * 2); // outputs `2`
     /// ```
@@ -748,6 +767,7 @@ pub trait SignalExt: Signal {
     /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2); // outputs `2`
     /// ```
@@ -763,13 +783,14 @@ pub trait SignalExt: Signal {
     }
 
     /// Pass a reference to the output of this [`Signal`] to an [`FnMut`], continuing propagation if
-    /// the [`FnMut`] returns [`Some`] or terminating for the frame if it returns [`None`]. If
-    /// the [`FnMut`] logic is infallible, wrapping the result in an [`Option`] is unnecessary.
+    /// the [`FnMut`] returns [`Some`] or terminating for the frame if it returns [`None`]. If the
+    /// [`FnMut`] logic is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
-    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary
-    /// and the target function expects a reference.
+    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s
+    /// aren't necessary and the target function expects a reference.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system(|_: In<()>| 1).map_in_ref(ToString::to_string); // outputs `"1"`
     /// ```
@@ -788,6 +809,7 @@ pub trait SignalExt: Signal {
     /// if it does not exist.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// #[derive(Component)]
     /// struct Value(u32);
@@ -813,6 +835,7 @@ pub trait SignalExt: Signal {
     /// [`Option`].
     ///
     /// # Example
+    ///
     /// ```no_run
     /// #[derive(Component)]
     /// struct Value(u32);
@@ -839,6 +862,7 @@ pub trait SignalExt: Signal {
     /// [`Component`].
     ///
     /// # Example
+    ///
     /// ```no_run
     /// #[derive(Component)]
     /// struct Value(u32);
@@ -864,6 +888,7 @@ pub trait SignalExt: Signal {
     /// Terminates this [`Signal`] on frames where the output was the same as the last.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
@@ -888,7 +913,6 @@ pub trait SignalExt: Signal {
                 } else {
                     changed = true;
                 }
-
                 if changed {
                     *cache = Some(current.clone());
                     Some(current)
@@ -904,6 +928,7 @@ pub trait SignalExt: Signal {
     /// After the first value is emitted, this signal will stop propagating any further values.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
@@ -933,6 +958,7 @@ pub trait SignalExt: Signal {
     /// Output this [`Signal`]'s equality with a fixed value.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
     /// signal.clone().eq(0); // outputs `true`
@@ -951,6 +977,7 @@ pub trait SignalExt: Signal {
     /// Output this [`Signal`]'s inequality with a fixed value.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
     /// signal.clone().neq(0); // outputs `false`
@@ -969,6 +996,7 @@ pub trait SignalExt: Signal {
     /// Applies [`ops::Not`] to this [`Signal`]'s output.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system(|_: In<()>| true).not(); // outputs `false`
     /// ```
@@ -986,6 +1014,7 @@ pub trait SignalExt: Signal {
     /// Terminate this [`Signal`] on frames where the `predicate` [`System`] returns `false`.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
@@ -1006,15 +1035,16 @@ pub trait SignalExt: Signal {
                 .map::<Self::Item, _, _, _>(move |In(item): In<Self::Item>, world: &mut World| {
                     match world.run_system_with(system, item.clone()) {
                         Ok(true) => Some(item),
-                        Ok(false) | Err(_) => None, // terminate on false or error
+                        // terminate on false or error
+                        Ok(false) | Err(_) => None,
                     }
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(system.entity());
             signal
         });
-
         Filter {
             signal,
             _marker: PhantomData,
@@ -1029,6 +1059,7 @@ pub trait SignalExt: Signal {
     /// outputs 2, then the resulting [`Signal`] will output `(1, 2)`.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
     /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
@@ -1071,6 +1102,7 @@ pub trait SignalExt: Signal {
     /// Outputs this [`Signal`]'s output [`Signal`]'s output.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
     /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
@@ -1092,111 +1124,109 @@ pub trait SignalExt: Signal {
         Self::Item: Signal + Clone + 'static,
         <Self::Item as Signal>::Item: Clone + Send + Sync,
     {
-        let signal = LazySignal::new(move |world: &mut World| {
-            // 1. The state entity that holds the latest value. This is the communication channel between the
-            //    dynamic inner signals and the static output signal.
-            let state_entity = world
-                .spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None })
-                .id();
+        let signal =
+            LazySignal::new(move |world: &mut World| {
+                // 1. The state entity that holds the latest value. This is the communication channel between the
+                //    dynamic inner signals and the static output signal.
+                let state_entity = world
+                    .spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None })
+                    .id();
 
-            // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
-            //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
-            //    forwarder.
-            let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
-                move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                    if let Ok(mut state) = query.get_mut(state_entity) {
-                        state.value.take()
-                    } else {
-                        None
-                    }
-                },
-            )
-            .register(world);
-
-            // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
-            //    signals.
-            let manager_system = self
-                .map(
-                    // This closure contains the core logic for switching subscriptions.
-                    move |In(inner_signal): In<Self::Item>,
-                          world: &mut World,
-                          mut active_forwarder: Local<Option<SignalHandle>>,
-                          mut active_signal_id: Local<Option<SignalSystem>>| {
-                        // A. Get the canonical ID of the newly emitted inner signal.
-                        //    `register` is idempotent; it just increments the ref-count if the system exists.
-                        let new_signal_id = inner_signal.clone().register(world);
-
-                        // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
-                        if Some(*new_signal_id) == *active_signal_id {
-                            // The signal is the same. Do nothing.
-                            // IMPORTANT: We must cleanup the handle from our `.register()` call above
-                            // to balance the reference count, otherwise it will leak.
-                            new_signal_id.cleanup(world);
-                            return;
+                // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
+                //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
+                //    forwarder.
+                let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
+                    move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                        if let Ok(mut state) = query.get_mut(state_entity) {
+                            state.value.take()
+                        } else {
+                            None
                         }
-
-                        // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
-                        if let Some(old_handle) = active_forwarder.take() {
-                            old_handle.cleanup(world);
-                        }
-                        // The old signal ID handle is implicitly dropped when overwritten.
-
-                        // ================== The Core Setup Logic for the NEW Signal ==================
-
-                        // D. Get the initial value of the new inner signal, synchronously.
-                        //    This is done by creating a temporary one-shot signal.
-                        let temp_handle = inner_signal.clone().first().register(world);
-                        let initial_value = poll_signal(world, *temp_handle)
-                            .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
-                        // The temporary handle must be cleaned up immediately.
-                        temp_handle.cleanup(world);
-
-                        // E. Write this initial value directly into the state component.
-                        if let Some(value) = initial_value
-                            && let Some(mut state) =
-                                world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity)
-                        {
-                            state.value = Some(value);
-                        }
-
-                        // F. Set up a persistent forwarder for all *subsequent* updates from the new signal.
-                        let forwarder_handle = inner_signal
-                            .map(
-                                // This first map writes the value to the state component.
-                                move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                                    if let Ok(mut state) = query.get_mut(state_entity) {
-                                        state.value = Some(value);
-                                    }
-                                },
-                            )
-                            .map(
-                                // This second map triggers the reader to run immediately after the state is written.
-                                move |_, world: &mut World| {
-                                    process_signals(world, [reader_system], Box::new(()));
-                                },
-                            )
-                            .register(world);
-
-                        // G. Store the new forwarder's handle and the new signal's ID for the next frame.
-                        *active_forwarder = Some(forwarder_handle);
-                        *active_signal_id = Some(*new_signal_id);
-
-                        // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
-                        process_signals(world, [reader_system], Box::new(()));
                     },
                 )
                 .register(world);
 
-            // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final output) is
-            //    cleaned up, it will also despawn its children.
-            world
-                .entity_mut(*reader_system)
-                .add_child(state_entity)
-                .add_child(**manager_system);
+                // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
+                //    signals.
+                let manager_system = self
+                    .map(
+                        // This closure contains the core logic for switching subscriptions.
+                        move |In(inner_signal): In<Self::Item>,
+                              world: &mut World,
+                              mut active_forwarder: Local<Option<SignalHandle>>,
+                              mut active_signal_id: Local<Option<SignalSystem>>| {
+                            // A. Get the canonical ID of the newly emitted inner signal. `register` is
+                            // idempotent; it just increments the ref-count if the system exists.
+                            let new_signal_id = inner_signal.clone().register(world);
 
-            reader_system
-        });
+                            // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
+                            if Some(*new_signal_id) == *active_signal_id {
+                                // The signal is the same. Do nothing. IMPORTANT: We must cleanup the handle from
+                                // our `.register()` call above to balance the reference count, otherwise it will
+                                // leak.
+                                new_signal_id.cleanup(world);
+                                return;
+                            }
 
+                            // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
+                            if let Some(old_handle) = active_forwarder.take() {
+                                old_handle.cleanup(world);
+                            }
+
+                            // The old signal ID handle is implicitly dropped when overwritten.
+                            // ================== The Core Setup Logic for the NEW Signal ==================
+                            // D. Get the initial value of the new inner signal, synchronously. This is done
+                            // by creating a temporary one-shot signal.
+                            let temp_handle = inner_signal.clone().first().register(world);
+                            let initial_value = poll_signal(world, *temp_handle)
+                                .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
+
+                            // The temporary handle must be cleaned up immediately.
+                            temp_handle.cleanup(world);
+
+                            // E. Write this initial value directly into the state component.
+                            if let Some(value) = initial_value
+                                && let Some(mut state) =
+                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity)
+                            {
+                                state.value = Some(value);
+                            }
+
+                            // F. Set up a persistent forwarder for all _subsequent_ updates from the new
+                            // signal.
+                            let forwarder_handle = inner_signal.map(
+                        // This first map writes the value to the state component.
+                        move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                            if let Ok(mut state) = query.get_mut(state_entity) {
+                                state.value = Some(value);
+                            }
+                        },
+                    ).map(
+                        // This second map triggers the reader to run immediately after the state is
+                        // written.
+                        move |_, world: &mut World| {
+                            process_signals(world, [reader_system], Box::new(()));
+                        },
+                    ).register(world);
+
+                            // G. Store the new forwarder's handle and the new signal's ID for the next frame.
+                            *active_forwarder = Some(forwarder_handle);
+                            *active_signal_id = Some(*new_signal_id);
+
+                            // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
+                            process_signals(world, [reader_system], Box::new(()));
+                        },
+                    )
+                    .register(world);
+
+                // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final output) is
+                //    cleaned up, it will also despawn its children.
+                world
+                    .entity_mut(*reader_system)
+                    .add_child(state_entity)
+                    .add_child(**manager_system);
+                reader_system
+            });
         Flatten {
             signal,
             _marker: PhantomData,
@@ -1206,6 +1236,7 @@ pub trait SignalExt: Signal {
     /// Maps this [`Signal`]'s output to another [`Signal`], switching to its output.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
     /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
@@ -1235,20 +1266,21 @@ pub trait SignalExt: Signal {
 
     /// Dynamically switches to a new `SignalVec` based on the signal's output.
     ///
-    /// Takes a `switcher` system that receives `In<Self::Item>` and returns a `SignalVec`.
-    /// This signal then behaves like the `SignalVec` returned by `switcher`.
+    /// Takes a `switcher` system that receives `In<Self::Item>` and returns a `SignalVec`. This
+    /// signal then behaves like the `SignalVec` returned by `switcher`.
     ///
-    /// When the upstream signal emits a new value, the `switcher` is run again.
-    /// If it returns a *different* `SignalVec` than the one currently active,
-    /// a single `VecDiff::Replace` is emitted, atomically clearing the old state and
-    /// establishing the new one by polling the new `SignalVec`'s current state.
+    /// When the upstream signal emits a new value, the `switcher` is run again. If it returns a
+    /// _different_ `SignalVec` than the one currently active, a single `VecDiff::Replace` is
+    /// emitted, atomically clearing the old state and establishing the new one by polling the new
+    /// `SignalVec`'s current state.
     ///
     /// This is the idiomatic way to handle dynamic list sources, like sorting by different criteria
-    /// or showing different lists based on a UI mode. For this to work correctly, the
-    /// `SignalVec`s returned by the `switcher` should be "replayable" (like those from
+    /// or showing different lists based on a UI mode. For this to work correctly, the `SignalVec`s
+    /// returned by the `switcher` should be "replayable" (like those from
     /// [`MutableVec::signal_vec`](super::signal_vec::MutableVec::signal_vec)).
     ///
     /// # Example
+    ///
     /// ```no_run
     /// # use bevy::prelude::*;
     /// # use jonmo::prelude::*;
@@ -1288,7 +1320,7 @@ pub trait SignalExt: Signal {
             // The output system is a "poller". It runs when poked and drains its own queue.
             let output_system_entity = LazyEntity::new();
             let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
+                clone!((output_system_entity) move | _: In <() >, mut q: Query <& mut SwitcherQueue < S:: Item >>| {
                     if let Ok(mut queue) = q.get_mut(output_system_entity.get()) {
                         if queue.0.is_empty() {
                             None
@@ -1321,11 +1353,13 @@ pub trait SignalExt: Signal {
 
                     // B. MEMOIZATION: If the signal hasn't changed, do nothing.
                     if Some(new_signal_id) == *active_signal_id {
-                        new_signal_id_handle.cleanup(world); // Balance the ref count for this temporary handle.
+                        // Balance the ref count for this temporary handle.
+                        new_signal_id_handle.cleanup(world);
                         return;
                     }
 
-                    // C. TEARDOWN: The signal is new. Clean up the old forwarder and the old memoization handle.
+                    // C. TEARDOWN: The signal is new. Clean up the old forwarder and the old
+                    // memoization handle.
                     if let Some(old_handle) = active_forwarder.take() {
                         old_handle.cleanup(world);
                     }
@@ -1334,39 +1368,36 @@ pub trait SignalExt: Signal {
                     }
                     *active_signal_id = Some(new_signal_id);
 
-                    // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the
-                    //    inner signal and poke the output system.
+                    // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
+                    // signal and poke the output system.
                     let forwarder_logic = move |In(diffs): In<Vec<VecDiff<S::Item>>>, world: &mut World| {
                         if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_system) {
-                                queue.0.extend(diffs);
-                                process_signals(world, [output_system], Box::new(()));
-                            }
+                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_system)
+                        {
+                            queue.0.extend(diffs);
+                            process_signals(world, [output_system], Box::new(()));
+                        }
                     };
 
-                    // E. PERSIST: Register the new forwarder to listen for diffs, and store both
-                    //    the forwarder's handle and the new memoization handle.
+                    // E. PERSIST: Register the new forwarder to listen for diffs, and store both the
+                    // forwarder's handle and the new memoization handle.
                     let new_forwarder_handle = inner_signal_vec.for_each(forwarder_logic).register(world);
                     *active_forwarder = Some(new_forwarder_handle);
                     *active_memo_handle = Some(new_signal_id_handle);
 
-                    // F. MANUALLY TRIGGER REPLAY:
-                    // Take the trigger from the new signal and run it *now*. This synchronously
-                    // sends the initial `Replace` diff through the pipe we just established.
-                    // Taking it also prevents the `trigger_replays` system from running it again.
-                    // if let Some(trigger) = world.get_entity_mut(*new_signal_id).ok().and_then(|mut entity|
+                    // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
+                    // _now_. This synchronously sends the initial `Replace` diff through the pipe we
+                    // just established. Taking it also prevents the `trigger_replays` system from
+                    // running it again. if let Some(trigger) =
+                    // world.get_entity_mut(*new_signal_id).ok().and_then(|mut entity|
                     // entity.take::<super::signal_vec::VecReplayTrigger>()) {
                     let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal_id).collect::<Vec<_>>();
                     for signal in [new_signal_id].into_iter().chain(upstreams.into_iter()) {
-                                                
-                        if let Some(trigger) = world
-                            .entity_mut(*signal)
-                            .take::<super::signal_vec::VecReplayTrigger>()
-                        {
+                        if let Some(trigger) = world.entity_mut(*signal).take::<super::signal_vec::VecReplayTrigger>() {
                             trigger.trigger()(world);
-                            break
+                            break;
                         }
                     }
                 };
@@ -1374,10 +1405,8 @@ pub trait SignalExt: Signal {
             // Register the manager and tie its lifecycle to the output system.
             let manager_handle = self.map(switcher).map(manager_system_logic).register(world);
             world.entity_mut(*output_system).add_child(**manager_handle);
-
             output_system
         });
-
         SwitchSignalVec {
             signal,
             _marker: PhantomData,
@@ -1387,6 +1416,7 @@ pub trait SignalExt: Signal {
     /// Delays subsequent outputs from this [`Signal`] for some [`Duration`].
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
@@ -1426,6 +1456,7 @@ pub trait SignalExt: Signal {
     /// Maps this [`Signal`] to some [`System`] depending on its [`bool`] output.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
@@ -1458,6 +1489,7 @@ pub trait SignalExt: Signal {
                         .and_then(Into::into)
                 })
                 .register(world);
+
             // just attach the systems to the lifetime of the signal
             world
                 .entity_mut(*signal)
@@ -1475,6 +1507,7 @@ pub trait SignalExt: Signal {
     /// terminate for this frame.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
@@ -1504,6 +1537,7 @@ pub trait SignalExt: Signal {
                     }
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(true_system.entity());
             signal
@@ -1518,6 +1552,7 @@ pub trait SignalExt: Signal {
     /// terminate for this frame.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
@@ -1547,6 +1582,7 @@ pub trait SignalExt: Signal {
                     }
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(false_system.entity());
             signal
@@ -1560,6 +1596,7 @@ pub trait SignalExt: Signal {
     /// Maps this [`Signal`] to some [`System`] depending on its [`Option`] output.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
@@ -1591,6 +1628,7 @@ pub trait SignalExt: Signal {
                     None => world.run_system_with(none_system, ()).ok().and_then(Into::into),
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world
                 .entity_mut(*signal)
@@ -1608,6 +1646,7 @@ pub trait SignalExt: Signal {
     /// the [`Some`] value, otherwise terminate for this frame.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
@@ -1635,6 +1674,7 @@ pub trait SignalExt: Signal {
                     None => Some(None),
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(some_system.entity());
             signal
@@ -1649,6 +1689,7 @@ pub trait SignalExt: Signal {
     /// terminate for this frame.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
@@ -1676,6 +1717,7 @@ pub trait SignalExt: Signal {
                     None => Some(world.run_system_with(none_system, ()).ok()),
                 })
                 .register(world);
+
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(none_system.entity());
             signal
@@ -1696,6 +1738,7 @@ pub trait SignalExt: Signal {
     /// [`JonmoBuilder::children_signal_vec`](super::builder::JonmoBuilder::children_signal_vec).
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Vec<usize>>| {
@@ -1718,7 +1761,6 @@ pub trait SignalExt: Signal {
                 .register(world);
             *handle
         });
-
         ToSignalVec {
             signal: lazy_signal,
             _marker: PhantomData,
@@ -1728,6 +1770,7 @@ pub trait SignalExt: Signal {
     /// Adds debug logging to this [`Signal`]'s ouptut.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// SignalBuilder::from_system(|_: In<()>| 1)
     ///     .debug() // logs `1`
@@ -1752,6 +1795,7 @@ pub trait SignalExt: Signal {
     /// of other concrete types.
     ///
     /// # Example
+    ///
     /// ```no_run
     /// let signal = if condition {
     ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
@@ -1766,8 +1810,27 @@ pub trait SignalExt: Signal {
         Box::new(self)
     }
 
-    /// Activate this [`Signal`] and all its upstreams, causing them to be evaluated every frame
-    /// until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
+    /// Erases the type of this [`Signal`], allowing it to be used in conjunction with [`Signal`]s
+    /// of other concrete types.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let signal = if condition {
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
+    /// } else {
+    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
+    /// } // without the `.boxed()`, the compiler would not allow this
+    /// ```
+    fn boxed_clone(self) -> Box<dyn SignalClone<Item = Self::Item>>
+    where
+        Self: Sized + Clone,
+    {
+        Box::new(self)
+    }
+
+    /// Activate this [`Signal`] and all its upstreams, causing them to be evaluated
+    /// every frame until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
     where
         Self: Sized,
@@ -1785,14 +1848,17 @@ mod tests {
         JonmoPlugin,
         prelude::{MutableVec, SignalVecExt},
     };
+
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
     use bevy_platform::sync::*;
     use bevy_time::TimeUpdateStrategy;
-    use core::{convert::identity, time::Duration}; // Add Duration
 
-    // Helper component and resource for testing
-    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)] // Add Default
+    // Add Duration
+    use core::{convert::identity, time::Duration};
+
+    // Helper component and resource for testing Add Default
+    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
     struct TestData(i32);
 
     #[derive(Resource, Default, Debug)]
@@ -1851,7 +1917,6 @@ mod tests {
         app.insert_resource(SignalOutput::<Option<TestData>>::default());
         let entity_with = app.world_mut().spawn(TestData(1)).id();
         let entity_without = app.world_mut().spawn_empty().id();
-
         let signal = SignalBuilder::from_entity(entity_with)
             .component_option::<TestData>()
             .map(capture_output)
@@ -1859,7 +1924,6 @@ mod tests {
         app.update();
         assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(1))));
         signal.cleanup(app.world_mut());
-
         let signal = SignalBuilder::from_entity(entity_without)
             .component_option::<TestData>()
             .map(capture_output)
@@ -1875,7 +1939,6 @@ mod tests {
         app.insert_resource(SignalOutput::<bool>::default());
         let entity_with = app.world_mut().spawn(TestData(1)).id();
         let entity_without = app.world_mut().spawn_empty().id();
-
         let signal = SignalBuilder::from_entity(entity_with)
             .has_component::<TestData>()
             .map(capture_output)
@@ -1883,7 +1946,6 @@ mod tests {
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
         signal.cleanup(app.world_mut());
-
         let signal = SignalBuilder::from_entity(entity_without)
             .has_component::<TestData>()
             .map(capture_output)
@@ -1898,9 +1960,8 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
-
         let values = Arc::new(Mutex::new(vec![1, 1, 2, 3, 3, 3, 4]));
-        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+        let signal = SignalBuilder::from_system(clone!((values) move | _: In <() >| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -1909,21 +1970,18 @@ mod tests {
             }
         }))
         .dedupe()
-        .map(clone!((counter) move |In(val): In<i32>| {
+        .map(clone!((counter) move | In(val): In < i32 >| {
             *counter.lock().unwrap() += 1;
             val
         }))
         .map(capture_output)
         .register(app.world_mut());
-
         for _ in 0..10 {
             app.update();
         }
-
         assert_eq!(get_output::<i32>(app.world()), Some(4));
         assert_eq!(*counter.lock().unwrap(), 4);
         assert_eq!(values.lock().unwrap().len(), 0);
-
         signal.cleanup(app.world_mut());
     }
 
@@ -1932,9 +1990,8 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
-
         let values = Arc::new(Mutex::new(vec![10, 20, 30]));
-        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+        let signal = SignalBuilder::from_system(clone!((values) move | _: In <() >| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -1943,21 +2000,18 @@ mod tests {
             }
         }))
         .first()
-        .map(clone!((counter) move |In(val): In<i32>| {
+        .map(clone!((counter) move | In(val): In < i32 >| {
             *counter.lock().unwrap() += 1;
             val
         }))
         .map(capture_output)
         .register(app.world_mut());
-
         app.update();
         app.update();
         app.update();
-
         assert_eq!(get_output::<i32>(app.world()), Some(10));
         assert_eq!(*counter.lock().unwrap(), 1);
         assert_eq!(values.lock().unwrap().len(), 0);
-
         signal.cleanup(app.world_mut());
     }
 
@@ -1965,13 +2019,11 @@ mod tests {
     fn test_combine() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
-
         let signal = SignalBuilder::from_system(move |_: In<()>| 10)
             .combine(SignalBuilder::from_system(move |_: In<()>| "hello"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-
         assert_eq!(get_output::<(i32, &'static str)>(app.world()), Some((10, "hello")));
         signal.cleanup(app.world_mut());
     }
@@ -1980,14 +2032,13 @@ mod tests {
     fn test_flatten() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-
         let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
         let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
 
         #[derive(Resource, Default)]
         struct SignalSelector(bool);
-        app.init_resource::<SignalSelector>();
 
+        app.init_resource::<SignalSelector>();
         let signal = SignalBuilder::from_system(
             move |_: In<()>, selector: Res<SignalSelector>| {
                 if selector.0 { signal_1.clone() } else { signal_2.clone() }
@@ -1998,11 +2049,9 @@ mod tests {
         .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
-
         app.world_mut().resource_mut::<SignalSelector>().0 = true;
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(1));
-
         signal.cleanup(app.world_mut());
     }
 
@@ -2010,13 +2059,11 @@ mod tests {
     fn test_eq() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-
         let source = SignalBuilder::from_system(|_: In<()>| 1);
         let signal = source.clone().eq(1).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
         signal.cleanup(app.world_mut());
-
         let signal = source.eq(2).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(false));
@@ -2027,13 +2074,11 @@ mod tests {
     fn test_neq() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-
         let source = SignalBuilder::from_system(|_: In<()>| 1);
         let signal = source.clone().neq(2).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
         signal.cleanup(app.world_mut());
-
         let signal = source.neq(1).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(false));
@@ -2044,7 +2089,6 @@ mod tests {
     fn test_not() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-
         let signal = SignalBuilder::from_system(|_: In<()>| true)
             .not()
             .map(capture_output)
@@ -2052,7 +2096,6 @@ mod tests {
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(false));
         signal.cleanup(app.world_mut());
-
         let signal = SignalBuilder::from_system(|_: In<()>| false)
             .not()
             .map(capture_output)
@@ -2066,7 +2109,6 @@ mod tests {
     fn test_filter() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-
         let values = Arc::new(Mutex::new(vec![1, 2, 3, 4, 5, 6]));
         let signal = SignalBuilder::from_system(move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
@@ -2079,13 +2121,10 @@ mod tests {
         .filter(|In(x): In<i32>| x % 2 == 0)
         .map(capture_output)
         .register(app.world_mut());
-
         for _ in 0..10 {
             app.update();
         }
-
         assert_eq!(get_output::<i32>(app.world()), Some(6));
-
         signal.cleanup(app.world_mut());
     }
 
@@ -2093,14 +2132,13 @@ mod tests {
     fn test_switch() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-
         let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
         let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
 
         #[derive(Resource, Default)]
         struct SwitcherToggle(bool);
-        app.init_resource::<SwitcherToggle>();
 
+        app.init_resource::<SwitcherToggle>();
         let signal = SignalBuilder::from_system(move |_: In<()>, mut toggle: ResMut<SwitcherToggle>| {
             let current = toggle.0;
             toggle.0 = !toggle.0;
@@ -2113,16 +2151,12 @@ mod tests {
         )
         .map(capture_output)
         .register(app.world_mut());
-
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
-
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(1));
-
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
-
         signal.cleanup(app.world_mut());
     }
 
@@ -2142,6 +2176,7 @@ mod tests {
             A,
             B,
         }
+
         app.insert_resource(ListSelector::A);
 
         // The control signal reads the resource.
@@ -2149,17 +2184,17 @@ mod tests {
 
         // The signal chain under test.
         let switched_signal = control_signal.dedupe().switch_signal_vec(
-            clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                ListSelector::A => list_a.signal_vec().map_in(identity).boxed_clone(),
-                ListSelector::B => list_b.signal_vec().boxed_clone(),
+            clone!((list_a, list_b) move | In(selector): In < ListSelector >| match selector {
+                ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                ListSelector:: B => list_b.signal_vec().boxed_clone(),
             }),
         );
 
         // Register the final signal to a capture system.
         let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
 
-        // --- Test 1: Initial State ---
-        // The first update should select List A and emit its initial state.
+        // --- Test 1: Initial State --- The first update should select List A and emit
+        // its initial state.
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
@@ -2169,8 +2204,8 @@ mod tests {
             "Initial state should be a Replace with List A's contents."
         );
 
-        // --- Test 2: Forwarding Diffs from Active List (A) ---
-        // A mutation to List A should be forwarded.
+        // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
+        // should be forwarded.
         list_a.write().push(30);
         list_a.flush_into_world(app.world_mut());
         app.update();
@@ -2182,8 +2217,8 @@ mod tests {
             "Should forward Push diff from List A."
         );
 
-        // --- Test 3: The Switch to List B ---
-        // Change the selector and update. This should trigger a switch.
+        // --- Test 3: The Switch to List B --- Change the selector and update. This
+        // should trigger a switch.
         *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
@@ -2196,17 +2231,17 @@ mod tests {
             "Switch should emit a Replace with List B's contents."
         );
 
-        // --- Test 4: Ignoring Diffs from Old List (A) ---
-        // A mutation to the now-inactive List A should be ignored.
-        list_a.write().push(99); // This should not be seen
+        // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
+        // List A should be ignored. This should not be seen
+        list_a.write().push(99);
         list_a.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
         assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
 
-        // --- Test 5: Forwarding Diffs from New Active List (B) ---
-        // A mutation to List B should now be forwarded.
-        list_b.write().remove(0); // remove 100
+        // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
+        // should now be forwarded. remove 100
+        list_b.write().remove(0);
         list_b.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
@@ -2217,8 +2252,8 @@ mod tests {
             "Should forward RemoveAt diff from List B."
         );
 
-        // --- Test 6: Memoization (No-Op Switch) ---
-        // "Switching" to the already active list should produce no diffs.
+        // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
+        // list should produce no diffs.
         *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
@@ -2227,8 +2262,8 @@ mod tests {
             "Re-selecting the same list should produce no diffs due to memoization."
         );
 
-        // --- Test 7: Switch Back to List A ---
-        // Switching back should give us the current state of List A.
+        // --- Test 7: Switch Back to List A --- Switching back should give us the current
+        // state of List A.
         *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
@@ -2236,11 +2271,11 @@ mod tests {
         assert_eq!(
             diffs[0],
             VecDiff::Replace {
-                values: vec![10, 20, 30, 99]
-            }, // Note: includes the `push(30)` from earlier
+                values: vec![10, 20, 30, 99],
+                // Note: includes the `push(30)` from earlier
+            },
             "Switching back should Replace with the current state of List A."
         );
-
         handle.cleanup(app.world_mut());
     }
 
@@ -2253,26 +2288,31 @@ mod tests {
 
         // Throttle duration
         let throttle_duration = Duration::from_millis(100);
-
-        let signal = SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
+        let signal = SignalBuilder::from_system(clone!((counter) move | _: In <() >| {
             let mut c = counter.lock().unwrap();
             *c += 1;
-            Some(*c) // Emit 1, 2, 3, 4, 5... rapidly
+
+            // Emit 1, 2, 3, 4, 5... rapidly
+            Some(*c)
         }))
         .throttle(throttle_duration)
-        .map(clone!((emit_count) move |In(val): In<i32>| {
+        .map(clone!((emit_count) move | In(val): In < i32 >| {
             let mut count = emit_count.lock().unwrap();
             *count += 1;
-            val // Pass the value through
+
+            // Pass the value through
+            val
         }))
         .map(capture_output)
         .register(app.world_mut());
 
         // --- Test Execution with Manual Time Control (Revised Assertions) ---
-
+        //
         // 1. Initial update: Emit 1, create timer.
         app.update();
-        assert_eq!(get_output::<i32>(app.world()), Some(1), "Initial emit (1)"); // Changed assertion description
+
+        // Changed assertion description
+        assert_eq!(get_output::<i32>(app.world()), Some(1), "Initial emit (1)");
         assert_eq!(*emit_count.lock().unwrap(), 1, "Emit count after initial");
         assert_eq!(*counter.lock().unwrap(), 1, "Source counter after initial");
 
@@ -2285,19 +2325,20 @@ mod tests {
         assert_eq!(
             get_output::<i32>(app.world()),
             Some(2),
+            // EXPECT 2
             "After 110ms advance, 1st update (emit 2)"
-        ); // EXPECT 2
+        );
         assert_eq!(
             *emit_count.lock().unwrap(),
             2,
+            // EXPECT 2
             "Emit count after 110ms advance, 1st update"
-        ); // EXPECT 2
+        );
         assert_eq!(
             *counter.lock().unwrap(),
             2,
             "Source counter after 110ms advance, 1st update"
         );
-
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(50)));
 
@@ -2307,29 +2348,32 @@ mod tests {
         assert_eq!(
             get_output::<i32>(app.world()),
             Some(2),
+            // EXPECT 2
             "After 110ms advance, 2nd update (block 3)"
-        ); // EXPECT 2
+        );
         assert_eq!(
             *emit_count.lock().unwrap(),
             2,
+            // EXPECT 2
             "Emit count after 110ms advance, 2nd update"
-        ); // EXPECT 2
+        );
         assert_eq!(
             *counter.lock().unwrap(),
             3,
             "Source counter after 110ms advance, 2nd update"
         );
-
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
+
         // 7. Update again: Source emits 5. Time elapsed < duration since last emit. Throttle blocks. Output
         //    remains 2.
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
             Some(2),
+            // EXPECT 2
             "After 50ms advance, 1st update (block 4)"
-        ); // EXPECT 2
+        );
         assert_eq!(
             *emit_count.lock().unwrap(),
             2,
@@ -2349,30 +2393,36 @@ mod tests {
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
-            Some(5),                                   // Reverted: Expect 5 based on logic and actual output
-            "After 60ms advance, 1st update (emit 5)"  // Corrected message to reflect expected value
+            // Reverted: Expect 5 based on logic and actual output
+            Some(5),
+            // Corrected message to reflect expected value
+            "After 60ms advance, 1st update (emit 5)"
         );
         assert_eq!(
             *emit_count.lock().unwrap(),
-            3, // Emit count becomes 3
+            // Emit count becomes 3
+            3,
             "Emit count after 60ms advance, 1st update"
         );
         assert_eq!(
             *counter.lock().unwrap(),
-            5, // Source counter is 5
+            // Source counter is 5
+            5,
             "Source counter after 60ms advance, 1st update"
         );
-
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-        // 10. Update again: Source emits 6. Time elapsed < duration since last emit. Throttle blocks.
-        //     Output remains 5.
+
+        // 10. Update again: Source emits 6. Time elapsed < duration since last emit. Throttle
+        //    blocks. Output remains 5.
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
-            Some(5), // Output remains 5
+            // Output remains 5
+            Some(5),
+            // EXPECT 5
             "After 60ms advance, 2nd update (block 6)"
-        ); // EXPECT 5
+        );
         assert_eq!(
             *emit_count.lock().unwrap(),
             3,
@@ -2387,44 +2437,50 @@ mod tests {
         // Add one more step to ensure timer reset correctly
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(110)));
+
         // 11. Update: Source emits 7. Time >= 100ms. Throttle emits 7.
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
-            Some(7), // Expect 7
+            // Expect 7
+            Some(7),
             "After 110ms advance, 1st update (emit 7)"
         );
         assert_eq!(
             *emit_count.lock().unwrap(),
-            4, // Emit count becomes 4
+            // Emit count becomes 4
+            4,
             "Emit count after 110ms advance, 1st update"
         );
         assert_eq!(
             *counter.lock().unwrap(),
-            7, // Source counter is 7
+            // Source counter is 7
+            7,
             "Source counter after 110ms advance, 1st update"
         );
-
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
+
         // 12. Update: Source emits 8. Time < 100ms. Throttle blocks. Output remains 7.
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
-            Some(7), // Output remains 7
+            // Output remains 7
+            Some(7),
             "After 110ms advance, 2nd update (block 8)"
         );
         assert_eq!(
             *emit_count.lock().unwrap(),
-            4, // Emit count remains 4
+            // Emit count remains 4
+            4,
             "Emit count after 110ms advance, 2nd update"
         );
         assert_eq!(
             *counter.lock().unwrap(),
-            8, // Source counter is 8
+            // Source counter is 8
+            8,
             "Source counter after 110ms advance, 2nd update"
         );
-
         signal.cleanup(app.world_mut());
     }
 
@@ -2455,55 +2511,71 @@ mod tests {
     #[test]
     fn test_map_true() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<&'static str>>();
+        app.init_resource::<SignalOutput<Option<&'static str>>>();
 
-        // Test true case (should emit)
-        let signal_true = SignalBuilder::from_system(|_: In<()>| true)
+        // --- Test true case ---
+        let source_true = SignalBuilder::from_system(|_: In<()>| true);
+        let signal_true = source_true
             .map_true(|_: In<()>| "Was True")
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<&'static str>(app.world()), Some("Was True"));
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(Some("Was True")),
+            "map_true should execute system and output Some(value) when input is true"
+        );
         signal_true.cleanup(app.world_mut());
 
-        // Reset output
-        app.world_mut().resource_mut::<SignalOutput<&'static str>>().0 = None;
-
-        // Test false case (should not emit)
-        let signal_false = SignalBuilder::from_system(|_: In<()>| false)
+        // --- Test false case --- Reset output
+        app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
+        let source_false = SignalBuilder::from_system(|_: In<()>| false);
+        let signal_false = source_false
             .map_true(|_: In<()>| "Was True")
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<&'static str>(app.world()), None); // Should remain None
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(None),
+            "map_true should not execute system and output None when input is false"
+        );
         signal_false.cleanup(app.world_mut());
     }
 
     #[test]
     fn test_map_false() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<&'static str>>();
+        app.init_resource::<SignalOutput<Option<&'static str>>>();
 
-        // Test true case (should not emit)
-        let signal_true = SignalBuilder::from_system(|_: In<()>| true)
+        // --- Test false case ---
+        let source_false = SignalBuilder::from_system(|_: In<()>| false);
+        let signal_false = source_false
             .map_false(|_: In<()>| "Was False")
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<&'static str>(app.world()), None); // Should remain None
-        signal_true.cleanup(app.world_mut());
-
-        // Reset output
-        app.world_mut().resource_mut::<SignalOutput<&'static str>>().0 = None;
-
-        // Test false case (should emit)
-        let signal_false = SignalBuilder::from_system(|_: In<()>| false)
-            .map_false(|_: In<()>| "Was False")
-            .map(capture_output)
-            .register(app.world_mut());
-        app.update();
-        assert_eq!(get_output::<&'static str>(app.world()), Some("Was False"));
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(Some("Was False")),
+            "map_false should execute system and output Some(value) when input is false"
+        );
         signal_false.cleanup(app.world_mut());
+
+        // --- Test true case --- Reset output
+        app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
+        let source_true = SignalBuilder::from_system(|_: In<()>| true);
+        let signal_true = source_true
+            .map_false(|_: In<()>| "Was False")
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(None),
+            "map_false should not execute system and output None when input is true"
+        );
+        signal_true.cleanup(app.world_mut());
     }
 
     #[test]
@@ -2542,70 +2614,82 @@ mod tests {
     #[test]
     fn test_map_some() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<String>>();
+        app.init_resource::<SignalOutput<Option<String>>>();
 
-        // Test Some case (should emit)
-        let signal_some = SignalBuilder::from_system(|_: In<()>| Some(42))
-            .map_some(|In(value): In<i32>| format!("Some({value})"))
+        // --- Test Some case ---
+        let source_some = SignalBuilder::from_system(|_: In<()>| Some(42));
+        let signal_some = source_some
+            .map_some(|In(val): In<i32>| format!("Got {}", val))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<String>(app.world()), Some("Some(42)".to_string()));
+        assert_eq!(
+            get_output::<Option<String>>(app.world()),
+            Some(Some("Got 42".to_string())),
+            "map_some should execute system with inner value and output Some(new_value) for a Some input"
+        );
         signal_some.cleanup(app.world_mut());
 
-        // Reset output
-        app.world_mut().resource_mut::<SignalOutput<String>>().0 = None;
-
-        // Test None case (should not emit)
-        let signal_none = SignalBuilder::from_system(|_: In<()>| None::<i32>)
-            .map_some(|In(value): In<i32>| format!("Some({value})"))
+        // --- Test None case --- Reset output
+        app.world_mut().resource_mut::<SignalOutput<Option<String>>>().0 = None;
+        let source_none = SignalBuilder::from_system(|_: In<()>| None::<i32>);
+        let signal_none = source_none
+            .map_some(|In(val): In<i32>| format!("Got {val}"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<String>(app.world()), None); // Should remain None
+        assert_eq!(
+            get_output::<Option<String>>(app.world()),
+            Some(None),
+            "map_some should not execute system and output None for a None input"
+        );
         signal_none.cleanup(app.world_mut());
     }
 
     #[test]
     fn test_map_none() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<String>>();
+        app.init_resource::<SignalOutput<Option<&'static str>>>();
 
-        // Test Some case (should not emit)
-        let signal_some = SignalBuilder::from_system(|_: In<()>| Some(42))
-            .map_none(|_: In<()>| "None".to_string())
+        // --- Test None case ---
+        let source_none = SignalBuilder::from_system(|_: In<()>| None::<i32>);
+        let signal_none = source_none
+            .map_none(|_: In<()>| "Was None")
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<String>(app.world()), None); // Should remain None
-        signal_some.cleanup(app.world_mut());
-
-        // Reset output
-        app.world_mut().resource_mut::<SignalOutput<String>>().0 = None;
-
-        // Test None case (should emit)
-        let signal_none = SignalBuilder::from_system(|_: In<()>| None::<i32>)
-            .map_none(|_: In<()>| "None".to_string())
-            .map(capture_output)
-            .register(app.world_mut());
-        app.update();
-        assert_eq!(get_output::<String>(app.world()), Some("None".to_string()));
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(Some("Was None")),
+            "map_none should execute system and output Some(value) for a None input"
+        );
         signal_none.cleanup(app.world_mut());
+
+        // --- Test Some case --- Reset output
+        app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
+        let source_some = SignalBuilder::from_system(|_: In<()>| Some(42));
+        let signal_some = source_some
+            .map_none(|_: In<()>| "Was None")
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<&'static str>>(app.world()),
+            Some(None),
+            "map_none should not execute system and output None for a Some input"
+        );
+        signal_some.cleanup(app.world_mut());
     }
 
     #[test]
     fn test_to_signal_vec_from_vec_signal() {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<i32>>();
-
         let source_vec = Arc::new(Mutex::new(None::<Vec<i32>>));
-
-        let source_signal = SignalBuilder::from_system(clone!((source_vec) move |_: In<()>| {
+        let source_signal = SignalBuilder::from_system(clone!((source_vec) move | _: In <() >| {
             source_vec.lock().unwrap().take()
         }));
-
         let signal_vec = source_signal.to_signal_vec();
-
         let handle = signal_vec.for_each(capture_vec_output::<i32>).register(app.world_mut());
 
         // Frame 1: Initial state, no emission.
@@ -2644,7 +2728,6 @@ mod tests {
         } else {
             panic!("Expected a Replace diff, got {:?}", diffs[0]);
         }
-
         handle.cleanup(app.world_mut());
     }
 
@@ -2669,11 +2752,9 @@ mod tests {
     #[test]
     fn simple_signal_lazy_outlives_handle() {
         let mut app = create_test_app();
-
         let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
         let handle = source_signal_struct.clone().register(app.world_mut());
         let system_entity = handle.0.entity();
-
         assert!(
             app.world().get_entity(system_entity).is_ok(),
             "System entity should exist after registration"
@@ -2687,15 +2768,16 @@ mod tests {
             1,
             "SignalRegistrationCount should be 1"
         );
-
         handle.cleanup(app.world_mut());
         assert_eq!(
             **app.world().get::<SignalRegistrationCount>(system_entity).unwrap(),
             0,
             "SignalRegistrationCount should be 0 after cleanup"
         );
-        // LazySignalHolder is not removed because source_signal_struct (holding another LazySignal clone)
-        // still exists, so holder.lazy_signal.inner.references > 1 at the time of cleanup.
+
+        // LazySignalHolder is not removed because source_signal_struct (holding another
+        // LazySignal clone) still exists, so holder.lazy_signal.inner.references > 1 at
+        // the time of cleanup.
         assert!(
             app.world().get_entity(system_entity).is_ok(),
             "System entity should still exist after handle cleanup (LazySignal struct alive)"
@@ -2704,15 +2786,16 @@ mod tests {
             app.world().get::<LazySignalHolder>(system_entity).is_some(),
             "LazySignalHolder should still exist"
         );
-
         drop(source_signal_struct);
-        // Dropping source_signal_struct reduces LazySignalState.references.
-        // If it becomes 1 (only holder's copy left), LazySignal::drop does not queue.
-        // The system is not queued to CLEANUP_SIGNALS yet.
-        // LazySignalHolder is still present.
-        app.update(); // Runs flush_cleanup_signals. CLEANUP_SIGNALS is empty.
-        app.update(); // Runs flush_cleanup_signals. CLEANUP_SIGNALS is empty.
 
+        // Dropping source_signal_struct reduces LazySignalState.references. If it becomes
+        // 1 (only holder's copy left), LazySignal::drop does not queue. The system is not
+        // queued to CLEANUP_SIGNALS yet. LazySignalHolder is still present. Runs
+        // flush_cleanup_signals. CLEANUP_SIGNALS is empty.
+        app.update();
+
+        // Runs flush_cleanup_signals. CLEANUP_SIGNALS is empty.
+        app.update();
         assert!(
             app.world().get_entity(system_entity).is_err(),
             "System entity persists because LazySignalHolder was not removed and its LazySignal did not trigger cleanup on its own drop"
@@ -2723,22 +2806,27 @@ mod tests {
     fn multiple_lazy_signal_clones_cleanup_behavior() {
         let mut app = create_test_app();
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1); // LS.state_refs = 1
-        let s2 = s1.clone(); // LS.state_refs = 2
+        // LS.state_refs = 1
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
 
-        let handle = s1.clone().register(app.world_mut()); // LS.state_refs = 3 (s1, s2, holder)
+        // LS.state_refs = 2
+        let s2 = s1.clone();
+
+        // LS.state_refs = 3 (s1, s2, holder)
+        let handle = s1.clone().register(app.world_mut());
         let system_entity = handle.0.entity();
-
         assert!(app.world().get_entity(system_entity).is_ok());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        handle.cleanup(app.world_mut()); // RegCount = 0. LS.state_refs = 3 for holder check. Holder not removed.
+        // RegCount = 0. LS.state_refs = 3 for holder check. Holder not removed.
+        handle.cleanup(app.world_mut());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 0);
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        drop(s1); // LS.state_refs = 2. Not queued.
+        // LS.state_refs = 2. Not queued.
+        drop(s1);
         app.update();
         assert!(
             app.world().get_entity(system_entity).is_ok(),
@@ -2746,7 +2834,8 @@ mod tests {
         );
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        drop(s2); // LS.state_refs = 1 (only holder's copy). Not queued.
+        // LS.state_refs = 1 (only holder's copy). Not queued.
+        drop(s2);
         app.update();
         assert!(
             app.world().get_entity(system_entity).is_err(),
@@ -2758,27 +2847,33 @@ mod tests {
     fn multiple_handles_same_system() {
         let mut app = create_test_app();
 
-        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1); // LS.state_refs = 1
+        // LS.state_refs = 1
+        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
 
-        let handle1 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (struct, holder). RegCount = 1.
+        // LS.state_refs = 2 (struct, holder). RegCount = 1.
+        let handle1 = source_signal_struct.clone().register(app.world_mut());
         let system_entity = handle1.0.entity();
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
 
-        let handle2 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (no new holder). RegCount = 2.
+        // LS.state_refs = 2 (no new holder). RegCount = 2.
+        let handle2 = source_signal_struct.clone().register(app.world_mut());
         assert_eq!(system_entity, handle2.0.entity());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 2);
 
-        handle1.cleanup(app.world_mut()); // RegCount = 1. Holder not removed (LS.state_refs=2).
+        // RegCount = 1. Holder not removed (LS.state_refs=2).
+        handle1.cleanup(app.world_mut());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        drop(source_signal_struct); // LS.state_refs = 1 (holder only). Not queued.
+        // LS.state_refs = 1 (holder only). Not queued.
+        drop(source_signal_struct);
         app.update();
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        handle2.cleanup(app.world_mut()); // RegCount = 0. LS.state_refs = 1 for holder. Holder IS removed. Queued.
+        // RegCount = 0. LS.state_refs = 1 for holder. Holder IS removed. Queued.
+        handle2.cleanup(app.world_mut());
         app.update();
         assert!(app.world().get_entity(system_entity).is_err());
     }
@@ -2786,10 +2881,10 @@ mod tests {
     #[test]
     fn chained_signals_cleanup() {
         let mut app = create_test_app();
-
         let source_s = SignalBuilder::from_system(|_: In<()>| 1);
-        let map_s = source_s.map(|In(val)| val + 1); // map_s holds source_s
 
+        // map_s holds source_s
+        let map_s = source_s.map(|In(val)| val + 1);
         let handle = map_s.clone().register(app.world_mut());
         let map_entity = handle.0.entity();
         let source_entity = app
@@ -2800,17 +2895,17 @@ mod tests {
             .next()
             .unwrap()
             .entity();
-
         assert!(app.world().get_entity(map_entity).is_ok());
         assert!(app.world().get_entity(source_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(map_entity).is_some());
         assert!(app.world().get::<LazySignalHolder>(source_entity).is_some());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(map_entity).unwrap(), 1);
         assert_eq!(**app.world().get::<SignalRegistrationCount>(source_entity).unwrap(), 1);
-
         handle.cleanup(app.world_mut());
-        // map_entity: RegCount=0. Holder's LS refs > 1 (due to map_s). Holder not removed.
-        // source_entity: RegCount=0. Holder's LS refs > 1 (due to map_s.source_s). Holder not removed.
+
+        // map_entity: RegCount=0. Holder's LS refs > 1 (due to map_s). Holder not
+        // removed. source_entity: RegCount=0. Holder's LS refs > 1 (due to
+        // map_s.source_s). Holder not removed.
         assert_eq!(**app.world().get::<SignalRegistrationCount>(map_entity).unwrap(), 0);
         assert_eq!(**app.world().get::<SignalRegistrationCount>(source_entity).unwrap(), 0);
         assert!(app.world().get_entity(map_entity).is_ok());
@@ -2818,9 +2913,12 @@ mod tests {
         assert!(app.world().get::<LazySignalHolder>(map_entity).is_some());
         assert!(app.world().get::<LazySignalHolder>(source_entity).is_some());
 
-        drop(map_s); // Drops map_s's LazySignal, then source_s's LazySignal.
+        // Drops map_s's LazySignal, then source_s's LazySignal.
+        drop(map_s);
+
         // For both, their LS.state_refs becomes 1 (holder only). queued.
         app.update();
+
         // Both entities despawned.
         assert!(app.world().get_entity(map_entity).is_err(), "Map entity persists");
         assert!(app.world().get_entity(source_entity).is_err(), "Source entity persists");
@@ -2830,28 +2928,34 @@ mod tests {
     fn re_register_after_cleanup_while_lazy_alive() {
         let mut app = create_test_app();
 
-        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1); // LS.state_refs = 1
+        // LS.state_refs = 1
+        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
 
-        let handle1 = source_signal_struct.clone().register(app.world_mut()); // LS.state_refs = 2 (struct, holder). RegCount = 1.
+        // LS.state_refs = 2 (struct, holder). RegCount = 1.
+        let handle1 = source_signal_struct.clone().register(app.world_mut());
         let system_entity = handle1.0.entity();
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
 
-        handle1.cleanup(app.world_mut()); // RegCount = 0. Holder not removed (LS.state_refs=2).
+        // RegCount = 0. Holder not removed (LS.state_refs=2).
+        handle1.cleanup(app.world_mut());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 0);
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        let handle2 = source_signal_struct.clone().register(app.world_mut()); // RegCount becomes 1 again on same entity. LS.state_refs=2.
+        // RegCount becomes 1 again on same entity. LS.state_refs=2.
+        let handle2 = source_signal_struct.clone().register(app.world_mut());
         assert_eq!(system_entity, handle2.0.entity());
         assert_eq!(**app.world().get::<SignalRegistrationCount>(system_entity).unwrap(), 1);
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        drop(source_signal_struct); // LS.state_refs = 1 (holder only). Not queued.
+        // LS.state_refs = 1 (holder only). Not queued.
+        drop(source_signal_struct);
         app.update();
         assert!(app.world().get_entity(system_entity).is_ok());
         assert!(app.world().get::<LazySignalHolder>(system_entity).is_some());
 
-        handle2.cleanup(app.world_mut()); // RegCount = 0. Holder's LS.state_refs = 1. Holder IS removed. despawned.
+        // RegCount = 0. Holder's LS.state_refs = 1. Holder IS removed. despawned.
+        handle2.cleanup(app.world_mut());
         assert!(app.world().get_entity(system_entity).is_err());
     }
 }

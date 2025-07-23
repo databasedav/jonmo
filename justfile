@@ -1,9 +1,7 @@
-set shell := ["nu", "-c"]
-
 KAAJ_HAALKA_COMMIT := "42f9b44ab402c88cce7eaa1b3dddc7419512feac"
 
 fetch_kaaj_justfile:
-  http get https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
+  curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
 
 import? 'kaaj.just'
 

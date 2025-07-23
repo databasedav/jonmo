@@ -1,9 +1,7 @@
 //! Reactive swappable list filters.
-use bevy::prelude::*;
-use bevy_ecs::system::IntoObserverSystem;
-use bevy_platform::collections::HashSet;
+use bevy::{ecs::system::IntoObserverSystem, platform::collections::HashSet, prelude::*};
 use jonmo::{prelude::*, utils::SSs};
-use rand::{prelude::IndexedRandom, Rng};
+use rand::{Rng, prelude::IndexedRandom};
 
 fn main() {
     let mut app = App::new();
@@ -432,9 +430,9 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                 .switch_signal_vec(move |In(sorted)| {
                     let base = items.signal_vec().enumerate();
                     if sorted {
-                        base.sort_by_key(|In((_, Data { number, .. }))| number).boxed_clone()
+                        base.sort_by_key(|In((_, Data { number, .. }))| number).left_either()
                     } else {
-                        base.boxed_clone()
+                        base.right_either()
                     }
                 })
                 .filter_signal(clone!((row_parent) move | In((_, Data { number, .. })) | {
@@ -449,16 +447,16 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                         })
                         .dedupe()
                 }))
-                .filter_signal(clone!((row_parent) move | In((_, Data { color, .. })) | {
-                    SignalBuilder::from_component_lazy(row_parent.clone())
-                        .dedupe()
-                        .map_in(move |color_filters: ColorFilters| color_filters.0.contains(&color))
-                        .dedupe()
-                }))
                 .filter_signal(clone!((row_parent) move | In((_, Data { shape, .. })) | {
                     SignalBuilder::from_component_lazy(row_parent.clone())
                         .dedupe()
                         .map_in(move |shape_filters: ShapeFilters| shape_filters.0.contains(&shape))
+                        .dedupe()
+                }))
+                .filter_signal(clone!((row_parent) move | In((_, Data { color, .. })) | {
+                    SignalBuilder::from_component_lazy(row_parent.clone())
+                        .dedupe()
+                        .map_in(move |color_filters: ColorFilters| color_filters.0.contains(&color))
                         .dedupe()
                 }))
                 .map_in(|(index, data)| item(index, data)),
