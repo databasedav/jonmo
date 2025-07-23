@@ -1,4 +1,4 @@
-let KAAJ_HAALKA_COMMIT = "5e06f448c3515fa0dc1cb9ad66fcc0192756fdaf" in
+let KAAJ_HAALKA_COMMIT = "854d87b07177e4dd986c16f9e04028b24fe156b6" in
 {
   name = "jonmo_ci",
   version = "0.1.0",
