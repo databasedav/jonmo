@@ -264,7 +264,7 @@ impl SignalHandle {
     /// Decrements the usage tracking of the corresponding signal and all its
     /// upstreams, potentially despawning the backing [`System`], see [`SignalHandle`].
     pub fn cleanup(self, world: &mut World) {
-        cleanup_recursive(world, self.0);
+        cleanup_recursive(world, *self);
     }
 }
 
@@ -619,8 +619,8 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
         .flatten()
 }
 
-/// Utility function for extracting values from [`AnyClone`]s, e.g. those returned
-/// by [`poll_signal`].
+/// Utility function for extracting values from [`AnyClone`]s, e.g. those returned by
+/// [`poll_signal`].
 ///
 /// # Example
 ///
