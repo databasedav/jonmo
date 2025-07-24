@@ -209,7 +209,7 @@ pub(crate) fn process_signals(
                 && let Some(output) = runner.run(world, input)
                 && let Some(downstream) = world.get::<Downstream>(*first_signal).cloned()
             {
-                process_signals(world, downstream.iter().copied(), output);
+                process_signals(world, downstream.0, output);
             }
         } else {
             for signal in [first_signal].into_iter().chain(iter) {
@@ -220,13 +220,11 @@ pub(crate) fn process_signals(
                     && let Some(output) = runner.run(world, input.clone())
                     && let Some(downstream) = world.get::<Downstream>(*signal).cloned()
                 {
-                    process_signals(world, downstream.iter().copied(), output);
+                    process_signals(world, downstream.0, output);
                 }
             }
         }
     }
-    // If there were no signals to begin with, `input` is simply dropped, which is
-    // correct.
 }
 
 pub(crate) fn process_signal_graph(world: &mut World) {
