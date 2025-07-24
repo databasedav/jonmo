@@ -14,8 +14,7 @@ use jonmo::{
 fn main() {
     let mut app = App::new();
     let numbers = MutableVec::from([1, 2, 3, 4, 5]);
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(JonmoPlugin)
+    app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
             PostStartup,

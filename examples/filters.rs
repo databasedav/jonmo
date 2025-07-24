@@ -1,4 +1,8 @@
 //! Reactive swappable list filters.
+
+mod utils;
+use utils::*;
+
 use bevy::{ecs::system::IntoObserverSystem, platform::collections::HashSet, prelude::*};
 use jonmo::{prelude::*, utils::SSs};
 use rand::{Rng, prelude::IndexedRandom};
@@ -7,7 +11,7 @@ fn main() {
     let mut app = App::new();
     let datas = MutableVec::from((0..12).map(|_| random_data()).collect::<Vec<_>>());
     let rows = MutableVec::from((0..5).map(|_| ()).collect::<Vec<_>>());
-    app.add_plugins((DefaultPlugins, JonmoPlugin))
+    app.add_plugins(examples_plugin)
         .insert_resource(Datas(datas.clone()))
         .insert_resource(Rows(rows.clone()))
         .add_systems(

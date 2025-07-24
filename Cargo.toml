@@ -24,6 +24,10 @@ bevy_time = { version = "0.16", default-features = false }
 enclose = "1.2"
 dyn-clone = "1.0"
 apply = "0.3"
+cfg-if = "1.0"
+
+[features]
+debug = ["bevy/bevy_ui_debug"]
 
 [dev-dependencies]
 bevy = "0.16"
@@ -42,6 +46,11 @@ doc-scrape-examples = true
 [[example]]
 name = "basic_builder_inject"
 path = "examples/basic_builder_inject.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "counter"
+path = "examples/counter.rs"
 doc-scrape-examples = true
 
 [[example]]

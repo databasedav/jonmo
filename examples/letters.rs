@@ -1,4 +1,6 @@
 //!
+mod utils;
+use utils::*;
 
 use std::collections::BTreeMap;
 
@@ -14,7 +16,7 @@ fn main() {
             .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
             .collect::<BTreeMap<_, _>>(),
     );
-    app.add_plugins((DefaultPlugins, JonmoPlugin))
+    app.add_plugins(examples_plugin)
         .insert_resource(Letters(letters.clone()))
         .add_systems(
             Startup,

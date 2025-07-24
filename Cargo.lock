@@ -2528,6 +2528,7 @@ dependencies = [
  "bevy_log",
  "bevy_platform",
  "bevy_time",
+ "cfg-if",
  "dyn-clone",
  "enclose",
  "rand 0.9.1",

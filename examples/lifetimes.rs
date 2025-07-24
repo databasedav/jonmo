@@ -29,7 +29,7 @@ fn main() {
     // and allows multiple systems to access and modify the same data.
     let colors = MutableVec::from([random_color(), random_color()]);
 
-    app.add_plugins((DefaultPlugins, JonmoPlugin))
+    app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---
         // We insert a clone of our `MutableVec` into a Bevy resource. This makes it
         // accessible to any system that needs to read or modify the list of colors,

@@ -2,6 +2,7 @@
 #![allow(missing_docs)]
 
 use bevy::{color::palettes::css::*, prelude::*};
+use jonmo::JonmoPlugin;
 use rand::prelude::IndexedRandom;
 
 pub(crate) static COLORS: &[Color] = &[
@@ -142,4 +143,58 @@ pub(crate) static COLORS: &[Color] = &[
 pub(crate) fn random_color() -> Color {
     let mut rng = rand::rng();
     COLORS.choose(&mut rng).copied().unwrap()
+}
+
+#[allow(clippy::type_complexity)]
+fn mark_default_ui_camera(cameras: Query<Entity, Or<(With<Camera2d>, With<Camera3d>)>>, mut commands: Commands) {
+    if let Ok(entity) = cameras.single()
+        && let Ok(mut entity) = commands.get_entity(entity)
+    {
+        entity.try_insert(IsDefaultUiCamera);
+    }
+}
+
+pub(crate) fn examples_plugin(app: &mut App) {
+    app.add_plugins((
+        bevy::DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                #[cfg(feature = "deployed_wasm_example")]
+                canvas: Some("#bevy".to_string()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: true,
+                ..default()
+            }),
+            ..default()
+        }),
+        JonmoPlugin,
+        #[cfg(feature = "debug")]
+        DebugUiPlugin,
+    ))
+    .add_systems(
+        PostStartup,
+        mark_default_ui_camera.run_if(not(any_with_component::<IsDefaultUiCamera>)),
+    );
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "debug")] {
+        const OVERLAY_TOGGLE_KEY: KeyCode = KeyCode::F1;
+
+        fn toggle_overlay(
+            input: Res<ButtonInput<KeyCode>>,
+            mut options: ResMut<UiDebugOptions>,
+        ) {
+            if input.just_pressed(OVERLAY_TOGGLE_KEY) {
+                options.toggle();
+            }
+        }
+
+        struct DebugUiPlugin;
+
+        impl Plugin for DebugUiPlugin {
+            fn build(&self, app: &mut App) {
+                app.add_systems(Update, toggle_overlay.run_if(any_with_component::<IsDefaultUiCamera>));
+            }
+        }
+    }
 }
