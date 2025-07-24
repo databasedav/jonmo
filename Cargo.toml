@@ -28,6 +28,7 @@ cfg-if = "1.0"
 
 [features]
 debug = ["bevy/bevy_ui_debug"]
+deployed_wasm_example = []
 
 [dev-dependencies]
 bevy = "0.16"
