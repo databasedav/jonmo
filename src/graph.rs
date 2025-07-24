@@ -1,5 +1,5 @@
 //! Signal graph management and runtime.
-use super::utils::*;
+use super::utils::SSs;
 use bevy_derive::Deref;
 use bevy_ecs::{
     component::HookContext,
@@ -8,6 +8,7 @@ use bevy_ecs::{
     system::{SystemId, SystemState},
     world::DeferredWorld,
 };
+#[cfg(feature = "tracing")]
 use bevy_log::prelude::*;
 use bevy_platform::{
     collections::{HashMap, HashSet},

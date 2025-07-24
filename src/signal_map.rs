@@ -1,12 +1,15 @@
 //! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
 //! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
+use crate::prelude::clone;
 use super::{
-    graph::*,
-    signal::*,
-    signal_vec::{SignalVec, VecDiff},
-    utils::*,
+    graph::{
+        LazySignal, LazySystem, SignalHandle, SignalSystem, downcast_any_clone, lazy_signal_from_system, pipe_signal,
+        poll_signal, process_signals, register_signal,
+    },
+    signal::{Signal, SignalBuilder, SignalExt},
+    signal_vec::{SignalVec, VecDiff, Replayable},
+    utils::{LazyEntity, SSs},
 };
-use crate::signal_vec::Replayable;
 use alloc::collections::BTreeMap;
 use bevy_ecs::prelude::*;
 use bevy_platform::{

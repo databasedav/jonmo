@@ -1,7 +1,7 @@
 import re
 
 # Read the content of counter.rs
-with open('examples/lifetime_list.rs', 'r') as file:
+with open('examples/counter.rs', 'r') as file:
     lines = file.readlines()
 
 # Join the lines into a single string

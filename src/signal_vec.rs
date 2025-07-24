@@ -1,8 +1,17 @@
 //! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
 //! [`Vec`] mutations, see [`MutableVec`] and [`SignalVecExt`].
-use super::{graph::*, signal::*, utils::*};
+use super::{
+    graph::{
+        LazySignal, LazySystem, SignalHandle, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system,
+        pipe_signal, poll_signal, process_signals, register_signal,
+    },
+    signal::{Dedupe, Signal, SignalBuilder, SignalExt},
+    utils::{LazyEntity, SSs},
+};
+use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
+#[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
     collections::HashMap,

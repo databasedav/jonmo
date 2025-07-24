@@ -1,15 +1,11 @@
 //!
 
 mod utils;
-use std::any::Any;
 
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::{
-    graph::{downcast_any_clone, poll_signal},
-    prelude::*,
-};
+use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();

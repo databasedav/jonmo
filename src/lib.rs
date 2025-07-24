@@ -1,4 +1,10 @@
 #![doc = include_str!("../README.md")]
+//! ## feature flags
+#![cfg_attr(
+    feature = "document-features",
+    doc = document_features::document_features!()
+)]
+
 #![no_std]
 
 extern crate alloc;
@@ -7,6 +13,7 @@ use alloc::vec::Vec;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 
+#[cfg(feature = "builder")]
 pub mod builder;
 pub mod graph;
 pub mod signal;

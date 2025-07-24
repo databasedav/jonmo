@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::*;
-use bevy_platform::sync::*;
+use bevy_platform::sync::{Arc, OnceLock};
 #[doc(no_inline)]
 pub use enclose::enclose as clone;
 

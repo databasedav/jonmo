@@ -1,11 +1,16 @@
 //! Signal builders and combinators for constructing reactive [`System`] dependency graphs, see
 //! [`SignalExt`].
 use super::{
-    graph::*,
+    graph::{
+        LazySignal, SignalHandle, SignalSystem, Upstream, UpstreamIter, downcast_any_clone, lazy_signal_from_system,
+        pipe_signal, poll_signal, process_signals,
+    },
     signal_vec::{Replayable, SignalVec, SignalVecExt, VecDiff},
-    utils::*,
+    utils::{LazyEntity, SSs, ancestor_map},
 };
+use crate::prelude::clone;
 use bevy_ecs::{prelude::*, system::SystemState};
+#[cfg(feature = "tracing")]
 use bevy_log::prelude::*;
 use bevy_platform::prelude::*;
 use bevy_time::{Time, Timer, TimerMode};
