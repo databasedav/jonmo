@@ -2,7 +2,7 @@ let { build_example, ci, cleanup_pr_previews, examples_on_main, pr_previews, rel
 let REPO = "https://github.com/databasedav/jonmo" in
 let GITHUB_PAGES_URL = "https://databasedav.github.io/jonmo" in
 {
-    build_example_ = build_example "bevy/webgpu",
+    build_example_ = build_example false "bevy/webgpu",
     ci_ = ci,
     cleanup_pr_previews_ = cleanup_pr_previews REPO,
     pr_previews_ = pr_previews REPO GITHUB_PAGES_URL,

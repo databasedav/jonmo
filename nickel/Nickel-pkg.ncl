@@ -5,6 +5,10 @@
   minimal_nickel_version = "1.12.2",
   description = "github actions ci generation for jonmo",
   dependencies = {
-    kaaj = 'Git { url = "https://github.com/databasedav/haalka", path = "kaaj", ref = 'Commit "a638cec554b2c1c2e06b46ad49bf36f395ccf653" },
+    kaaj = 'Git {
+      url = "https://github.com/databasedav/haalka",
+      path = "kaaj",
+      ref = 'Commit "6b570340a68bb5128514e7887b5aa3571a763f59"
+    },
   }
 } | std.package.Manifest
