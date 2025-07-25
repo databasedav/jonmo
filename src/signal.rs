@@ -380,9 +380,8 @@ where
     }
 }
 
-/// A signal that dynamically switches its output to track the `VecDiff`s of different `SignalVec`s.
-///
-/// Created by the [`SwitchSignalVecExt::switch_signal_vec`] method.
+/// Signal graph node which maps its upstream to a [`SignalVec`], see
+/// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
 #[derive(Clone)]
 pub struct SwitchSignalVec<Upstream, Switched>
 where

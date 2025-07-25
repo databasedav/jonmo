@@ -1038,8 +1038,8 @@ where
     }
 }
 
-/// Blanket trait for transforming [`Signal`]s into [`SignalEither::Left`] or
-/// [`SignalEither::Right`].
+/// Blanket trait for transforming [`SignalVec`]s into [`SignalVecEither::Left`] or
+/// [`SignalVecEither::Right`].
 #[allow(missing_docs)]
 pub trait IntoSignalVecEither: Sized
 where
