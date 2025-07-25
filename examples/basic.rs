@@ -1,4 +1,5 @@
-//!
+//! A simple increasing timer, without using the entity builder, showcasing the least invasive way
+//! to start using jonmo signals in existing Bevy apps.
 
 mod utils;
 use utils::*;
@@ -54,4 +55,3 @@ fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Quer
 fn camera(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
-

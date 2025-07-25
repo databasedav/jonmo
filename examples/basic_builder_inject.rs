@@ -1,4 +1,5 @@
-//!
+//! A simple increasing timer, injecting the entity builder into an existing entity, showcasing a
+//! less invasive way to start using jonmo signals in existing Bevy apps.
 mod utils;
 use utils::*;
 

@@ -615,18 +615,26 @@ impl SignalBuilder {
         Self::from_system(move |_: In<()>| entity.get())
     }
 
+    /// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
+    /// [`Entity`]. Passing `0` to `generation` will output the [`Entity`] itself.
     pub fn from_ancestor(entity: Entity, generations: usize) -> Map<Source<Entity>, Entity> {
         Self::from_entity(entity).map(ancestor_map(generations))
     }
 
+    /// Creates a [`Source`] signal from a [`LazyEntity`]'s `generations`-th generation ancestor's
+    /// [`Entity`]. Passing `0` to `generation` will output the [`LazyEntity`]'s  [`Entity`] itself.
     pub fn from_ancestor_lazy(entity: LazyEntity, generations: usize) -> Map<Source<Entity>, Entity> {
         Self::from_lazy_entity(entity).map(ancestor_map(generations))
     }
 
+    /// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`]. Passing `0` to
+    /// `generation` will output the [`Entity`] itself.
     pub fn from_parent(entity: Entity) -> Map<Source<Entity>, Entity> {
         Self::from_ancestor(entity, 1)
     }
 
+    /// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`]. Passing `0` to
+    /// `generation` will output the [`LazyEntity`]'s [`Entity`] itself.
     pub fn from_parent_lazy(entity: LazyEntity) -> Map<Source<Entity>, Entity> {
         Self::from_ancestor_lazy(entity, 1)
     }
@@ -1848,11 +1856,15 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         JonmoPlugin,
-        prelude::{MutableVec, SignalVecExt},
+        graph::{LazySignalHolder, SignalRegistrationCount},
+        prelude::{MutableVec, SignalVecExt, clone},
+        signal::{SignalBuilder, SignalExt, Upstream},
+        signal_vec::VecDiff,
+        utils::SSs,
     };
+    use core::{convert::identity, fmt};
 
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
@@ -1860,7 +1872,7 @@ mod tests {
     use bevy_time::TimeUpdateStrategy;
 
     // Add Duration
-    use core::{convert::identity, time::Duration};
+    use core::time::Duration;
 
     // Helper component and resource for testing Add Default
     #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
@@ -2624,7 +2636,7 @@ mod tests {
         // --- Test Some case ---
         let source_some = SignalBuilder::from_system(|_: In<()>| Some(42));
         let signal_some = source_some
-            .map_some(|In(val): In<i32>| format!("Got {}", val))
+            .map_some(|In(val): In<i32>| format!("Got {val}"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();

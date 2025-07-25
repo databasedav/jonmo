@@ -219,8 +219,8 @@ impl JonmoBuilder {
     } */
 
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
-    /// `generations`-nth generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
-    /// will return this builder's [`Entity`] itself.
+    /// `generations`-th generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
+    /// will output this builder's [`Entity`] itself.
     ///
     /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn signal_from_ancestor<S, F>(self, generations: usize, f: F) -> Self

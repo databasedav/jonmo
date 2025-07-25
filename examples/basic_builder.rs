@@ -1,4 +1,4 @@
-//!
+//! A simple increasing timer, using the entity builder, showcasing the recommended, idiomatic way to use jonmo signals.
 mod utils;
 use utils::*;
 

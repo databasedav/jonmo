@@ -1,8 +1,9 @@
-//!
+//! Diverse filtering options for a list of items, showcasing the power of vector signals.
 mod utils;
 use utils::*;
 
-use std::collections::BTreeMap;
+extern crate alloc;
+use alloc::collections::BTreeMap;
 
 use bevy_platform::collections::HashMap;
 

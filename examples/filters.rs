@@ -207,7 +207,7 @@ fn text_node(text: &'static str) -> JonmoBuilder {
     ))
 }
 
-fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, value: T) {
+fn toggle<T: Eq + core::hash::Hash>(set: &mut HashSet<T>, value: T) {
     if !set.remove(&value) {
         set.insert(value);
     }

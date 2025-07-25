@@ -1,7 +1,6 @@
-//!
-
+#![allow(missing_docs)]
+#![allow(unused_variables)]
 mod utils;
-
 use utils::*;
 
 use bevy::prelude::*;
