@@ -8,7 +8,7 @@
     kaaj = 'Git {
       url = "https://github.com/databasedav/haalka",
       path = "kaaj",
-      ref = 'Commit "6b570340a68bb5128514e7887b5aa3571a763f59"
+      ref = 'Commit "460bc00514cc61b5476c8a5028ea22b1e6a02d10"
     },
   }
 } | std.package.Manifest
