@@ -1,17 +1,19 @@
 //! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
 //! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
-use crate::prelude::clone;
 use super::{
     graph::{
         LazySignal, LazySystem, SignalHandle, SignalSystem, downcast_any_clone, lazy_signal_from_system, pipe_signal,
         poll_signal, process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
-    signal_vec::{SignalVec, VecDiff, Replayable},
+    signal_vec::{Replayable, SignalVec, VecDiff},
     utils::{LazyEntity, SSs},
 };
+use crate::prelude::clone;
 use alloc::collections::BTreeMap;
 use bevy_ecs::prelude::*;
+#[cfg(feature = "tracing")]
+use bevy_log::debug;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
@@ -221,6 +223,33 @@ where
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.inner.register_signal(world)
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tracing")] {
+        /// Signal graph node that debug logs its upstream's "raw" [`Vec<MapDiff>`]s, see
+        /// [`.debug`](SignalMapExt::debug).
+        #[derive(Clone)]
+        pub struct Debug<Upstream>
+        where
+            Upstream: SignalMap,
+        {
+            #[allow(clippy::type_complexity)]
+            signal: ForEach<Upstream, Vec<MapDiff<Upstream::Key, Upstream::Value>>>,
+        }
+
+        impl<Upstream> SignalMap for Debug<Upstream>
+        where
+            Upstream: SignalMap,
+        {
+            type Key = Upstream::Key;
+            type Value = Upstream::Value;
+
+            fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+                self.signal.register(world)
+            }
+        }
     }
 }
 
@@ -613,6 +642,34 @@ pub trait SignalMapExt: SignalMap {
                     }
                 },
             ),
+        }
+    }
+
+    #[cfg(feature = "tracing")]
+    /// Adds debug logging to this [`SignalMap`]'s raw [`MapDiff`] outputs.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let mut map = MutableBTreeMap::from([(1, 2), (3, 4)]);
+    /// let signal = map.signal_map().debug();
+    /// signal; // logs `[ Replace { entries: [ (1, 2), (3, 4) ] } ]`
+    /// map.write().insert(5, 6);
+    /// commands.queue(vec.flush());
+    /// signal; // logs `[ Insert { key: 5, value: 6 } ]`
+    /// ```
+    fn debug(self) -> Debug<Self>
+    where
+        Self: Sized,
+        Self::Key: fmt::Debug + Clone + 'static,
+        Self::Value: fmt::Debug + Clone + 'static,
+    {
+        let location = core::panic::Location::caller();
+        Debug {
+            signal: self.for_each(move |In(item)| {
+                debug!("[{}] {:#?}", location, item);
+                item
+            }),
         }
     }
 

@@ -10,11 +10,20 @@ use super::{
 };
 use crate::prelude::clone;
 use bevy_ecs::{prelude::*, system::SystemState};
-#[cfg(feature = "tracing")]
-use bevy_log::prelude::*;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tracing")] {
+        use bevy_log::prelude::*;
+        use core::fmt;
+    }
+}
 use bevy_platform::prelude::*;
-use bevy_time::{Time, Timer, TimerMode};
-use core::{fmt, marker::PhantomData, ops, time::Duration};
+cfg_if::cfg_if! {
+    if #[cfg(feature = "time")] {
+        use bevy_time::{Time, Timer, TimerMode};
+        use core::time::Duration;
+    }
+}
+use core::{marker::PhantomData, ops};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
@@ -398,24 +407,28 @@ where
     }
 }
 
-/// Signal graph node which delays the propagation of subsequent upstream outputs, see
-/// [`.throttle`](SignalExt::throttle).
-#[derive(Clone)]
-pub struct Throttle<Upstream>
-where
-    Upstream: Signal,
-{
-    signal: Map<Upstream, Upstream::Item>,
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "time")] {
+        /// Signal graph node which delays the propagation of subsequent upstream outputs, see
+        /// [`.throttle`](SignalExt::throttle).
+        #[derive(Clone)]
+        pub struct Throttle<Upstream>
+        where
+            Upstream: Signal,
+        {
+            signal: Map<Upstream, Upstream::Item>,
+        }
 
-impl<Upstream> Signal for Throttle<Upstream>
-where
-    Upstream: Signal,
-{
-    type Item = Upstream::Item;
+        impl<Upstream> Signal for Throttle<Upstream>
+        where
+            Upstream: Signal,
+        {
+            type Item = Upstream::Item;
 
-    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
+            fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+                self.signal.register(world)
+            }
+        }
     }
 }
 
@@ -562,23 +575,27 @@ where
     }
 }
 
-/// Signal graph node that debug logs its upstream's output, see [`.debug`](SignalExt::debug).
-#[derive(Clone)]
-pub struct Debug<Upstream>
-where
-    Upstream: Signal,
-{
-    signal: Map<Upstream, Upstream::Item>,
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tracing")] {
+        /// Signal graph node that debug logs its upstream's output, see [`.debug`](SignalExt::debug).
+        #[derive(Clone)]
+        pub struct Debug<Upstream>
+        where
+            Upstream: Signal,
+        {
+            signal: Map<Upstream, Upstream::Item>,
+        }
 
-impl<Upstream> Signal for Debug<Upstream>
-where
-    Upstream: Signal,
-{
-    type Item = Upstream::Item;
+        impl<Upstream> Signal for Debug<Upstream>
+        where
+            Upstream: Signal,
+        {
+            type Item = Upstream::Item;
 
-    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
+            fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+                self.signal.register(world)
+            }
+        }
     }
 }
 
@@ -1426,6 +1443,7 @@ pub trait SignalExt: Signal {
         }
     }
 
+    #[cfg(feature = "time")]
     /// Delays subsequent outputs from this [`Signal`] for some [`Duration`].
     ///
     /// # Example
@@ -1780,6 +1798,7 @@ pub trait SignalExt: Signal {
         }
     }
 
+    #[cfg(feature = "tracing")]
     /// Adds debug logging to this [`Signal`]'s ouptut.
     ///
     /// # Example

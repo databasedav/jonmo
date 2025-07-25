@@ -983,24 +983,28 @@ where
     }
 } */
 
-/// Signal graph node that debug logs its upstream's "raw" [`Vec<VecDiff>`]s, see
-/// [`.debug`](SignalVecExt::debug).
-#[derive(Clone)]
-pub struct Debug<Upstream>
-where
-    Upstream: SignalVec,
-{
-    signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "tracing")] {
+        /// Signal graph node that debug logs its upstream's "raw" [`Vec<VecDiff>`]s, see
+        /// [`.debug`](SignalVecExt::debug).
+        #[derive(Clone)]
+        pub struct Debug<Upstream>
+        where
+            Upstream: SignalVec,
+        {
+            signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+        }
 
-impl<Upstream> SignalVec for Debug<Upstream>
-where
-    Upstream: SignalVec,
-{
-    type Item = Upstream::Item;
+        impl<Upstream> SignalVec for Debug<Upstream>
+        where
+            Upstream: SignalVec,
+        {
+            type Item = Upstream::Item;
 
-    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
-        self.signal.register(world)
+            fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+                self.signal.register(world)
+            }
+        }
     }
 }
 
@@ -3339,6 +3343,7 @@ pub trait SignalVecExt: SignalVec {
         }
     } */
 
+    #[cfg(feature = "tracing")]
     /// Adds debug logging to this [`SignalVec`]'s raw [`VecDiff`] outputs.
     ///
     /// # Example

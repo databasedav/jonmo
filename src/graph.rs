@@ -116,6 +116,7 @@ fn would_create_cycle(world: &World, source: SignalSystem, target: SignalSystem)
 pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: SignalSystem) {
     if would_create_cycle(world, source, target) {
         // TODO: panic instead ?
+        #[cfg(feature = "tracing")]
         error!("cycle detected when attempting to pipe {:?} → {:?}", source, target);
         return;
     }
@@ -169,11 +170,15 @@ where
                 .and_then(Into::into)
                 .map(|o| Box::new(o) as Box<dyn AnyClone>),
             Err(_) => {
-                let expected_type = core::any::type_name::<I>();
-                error!(
-                    "failed to downcast input for system {:?}. expected input type: `{}`",
-                    self.system, expected_type
-                );
+                cfg_if::cfg_if! {
+                    if #[cfg(feature = "tracing")] {
+                        let expected_type = core::any::type_name::<I>();
+                        error!(
+                            "failed to downcast input for system {:?}. expected input type: `{}`",
+                            self.system, expected_type
+                        );
+                    }
+                }
                 None
             }
         }

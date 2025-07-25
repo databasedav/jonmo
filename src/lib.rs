@@ -4,7 +4,6 @@
     feature = "document-features",
     doc = document_features::document_features!()
 )]
-
 #![no_std]
 
 extern crate alloc;
@@ -63,13 +62,14 @@ impl Plugin for JonmoPlugin {
 pub mod prelude {
     pub use crate::{
         JonmoPlugin,
-        builder::JonmoBuilder,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
         signal_vec::{IntoSignalVecEither, MutableVec, SignalVec, SignalVecEither, SignalVecExt},
         utils::{LazyEntity, clone},
     };
+    #[cfg(feature = "builder")]
+    pub use crate::builder::JonmoBuilder;
     #[doc(no_inline)]
     pub use apply::{Also, Apply};
 }

@@ -34,7 +34,7 @@ fn main() {
 
 const ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct LetterData {
     count: usize,
     pressed: bool,
@@ -92,7 +92,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                 ..default()
             })
             .children(row.chars().map(
-                clone!((letters) move |l| letter(l, letters.signal_map().key(l).map_in(Option::unwrap_or_default))),
+                clone!((letters) move |l| letter(l, letters.signal_map().debug().key(l).map_in(Option::unwrap_or_default))),
             ))
             .child(
                 JonmoBuilder::from(Node {

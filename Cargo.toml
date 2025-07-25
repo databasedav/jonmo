@@ -79,6 +79,17 @@ std_instead_of_core = "warn"
 std_instead_of_alloc = "warn"
 alloc_instead_of_core = "warn"
 
+[package.metadata.cargo-all-features]
+allowlist = [
+  "builder",
+  "tracing",
+  "time",
+  "debug",
+  "std",
+  "critical-section",
+  "web",
+]
+
 [[example]]
 name = "basic"
 path = "examples/basic.rs"
