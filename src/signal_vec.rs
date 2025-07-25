@@ -1200,7 +1200,7 @@ pub trait SignalVecExt: SignalVec {
         self.map(move |In(item)| function(&item))
     }
 
-    /// Pass each [`Item`][`item`] of this [`SignalVec`] to a [`System`] that produces a [`Signal`],
+    /// Pass each [`Item`] of this [`SignalVec`] to a [`System`] that produces a [`Signal`],
     /// forwarding the output of each resulting [`Signal`].
     ///
     /// # Example
@@ -1211,8 +1211,6 @@ pub trait SignalVecExt: SignalVec {
     ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
     ///     ) // outputs `SignalVec -> [2, 4, 6]`
     /// ```
-    ///
-    /// [`item`]: SignalVec::Item
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
         Self: Sized,
@@ -2195,7 +2193,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```no_run
     /// let mut vec = MutableVec::from([1, 2, 3]);
     /// let signal = vec.signal_vec().is_empty();
     /// signal; // outputs `6`
@@ -2887,7 +2885,6 @@ pub trait SignalVecExt: SignalVec {
                                     state.values = new_values;
                                     state.sorted_indices = (0..state.values.len()).collect();
 
-                                    // Fix: Clone the values _before_ the sort to avoid borrow conflict.
                                     let values_for_sort = state.values.clone();
                                     state.sorted_indices.sort_unstable_by(|&a, &b| {
                                         let val_a = values_for_sort[a].clone();
@@ -3008,8 +3005,8 @@ pub trait SignalVecExt: SignalVec {
     }
 
     /// Sorts this [`SignalVec`] with a key extraction [`System`] which takes [`In`] an
-    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which
-    /// the output will be sorted by.
+    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which the output
+    /// will be sorted by.
     ///
     /// # Example
     ///
@@ -3657,7 +3654,7 @@ impl<T> MutableVec<T> {
 
             // This is the system for the one-and-only broadcaster. It just drains diffs that `flush` has put
             // into its component.
-            let source_system_logic = clone!((self_entity) move | _: In <() >, world: & mut World | {
+            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
                 if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()) {
                     if diffs.0.is_empty() {
                         None

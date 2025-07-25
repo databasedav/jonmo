@@ -815,8 +815,8 @@ pub trait SignalExt: Signal {
     /// the [`FnMut`] returns [`Some`] or terminating for the frame if it returns [`None`]. If the
     /// [`FnMut`] logic is infallible, wrapping the result in an [`Option`] is unnecessary.
     ///
-    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s
-    /// aren't necessary and the target function expects a reference.
+    /// Convenient when additional [`SystemParam`](bevy_ecs::system::SystemParam)s aren't necessary
+    /// and the target function expects a reference.
     ///
     /// # Example
     ///
@@ -1842,7 +1842,7 @@ pub trait SignalExt: Signal {
     }
 
     /// Erases the type of this [`Signal`], allowing it to be used in conjunction with [`Signal`]s
-    /// of other concrete types.
+    /// of other concrete types, particularly in cases where the consumer requires [`Clone`].
     ///
     /// # Example
     ///

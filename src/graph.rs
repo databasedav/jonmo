@@ -66,7 +66,6 @@ where
 
 // TODO: many to many relationships
 #[derive(Component, Deref, Clone)]
-// #[component(on_remove = downstream_syncer)]
 pub(crate) struct Upstream(pub(crate) HashSet<SignalSystem>);
 
 impl<'a> IntoIterator for &'a Upstream {
@@ -206,7 +205,7 @@ pub(crate) fn process_signals(
     let mut iter = signals.into_iter().peekable();
     if let Some(first_signal) = iter.next() {
         // avoid cloning the input if there's only a single downstream, according to
-        // gemini, the compiler cannot capable of doing this intelligently
+        // gemini, the compiler cannot do this automatically
         if iter.peek().is_none() {
             if let Some(runner) = world
                 .get_entity(*first_signal)

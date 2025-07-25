@@ -1,4 +1,4 @@
-//! Diverse filtering options for a list of items, showcasing the power of vector signals.
+//! Simple key press counter, showcasing map reactivity.
 mod utils;
 use utils::*;
 
@@ -92,7 +92,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                 ..default()
             })
             .children(row.chars().map(
-                clone!((letters) move |l| letter(l, letters.signal_map().debug().key(l).map_in(Option::unwrap_or_default))),
+                clone!((letters) move |l| letter(l, letters.signal_map().key(l).map_in(Option::unwrap_or_default))),
             ))
             .child(
                 JonmoBuilder::from(Node {

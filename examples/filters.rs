@@ -1,4 +1,4 @@
-//! Reactive swappable list filters.
+//! Diverse filtering options for a list of items, showcasing vector reactivity.
 
 mod utils;
 use utils::*;

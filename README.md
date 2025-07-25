@@ -218,15 +218,31 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
 - [**`basic`**](https://github.com/databasedav/jonmo/blob/main/examples/basic.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/basic/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/basic/)
 
-    a simple increasing timer, without using the entity builder, showcasing the least invasive way to start using jonmo signals in existing Bevy apps
+    a simple increasing timer without using the entity builder, showcasing the least invasive way to start using jonmo signals in existing Bevy apps
+
+- [**`basic_builder_inject`**](https://github.com/databasedav/jonmo/blob/main/examples/basic_builder_inject.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/basic_builder_inject/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/basic_builder_inject/)
+
+    a simple increasing timer injecting the entity builder into an existing entity, showcasing a less invasive way to start using jonmo signals in existing Bevy apps.
 
 - [**`basic_builder`**](https://github.com/databasedav/jonmo/blob/main/examples/basic_builder.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/basic_builder/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/basic_builder/)
 
-    a simple increasing timer, using the entity builder, showcasing the recommended, idiomatic way to use jonmo signals
+    a simple increasing timer using the entity builder, showcasing the recommended, idiomatic way to use jonmo signals
+
+- [**`counter`**](https://github.com/databasedav/jonmo/blob/main/examples/counter.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/counter/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/counter/)
+
+    the example above, a simple counter
 
 - [**`lifetimes`**](https://github.com/databasedav/jonmo/blob/main/examples/lifetimes.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/lifetimes/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/lifetimes/)
 
-    the example above, a reactive enumerated list of colors, each with an independent lifetime timer
+    a reactive enumerated list of colors, each with an independent lifetime timer
+
+- [**`letters`**](https://github.com/databasedav/jonmo/blob/main/examples/letters.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/letters/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/letters/)
+
+    simple key press counter, showcasing map reactivity
+
+- [**`filters`**](https://github.com/databasedav/jonmo/blob/main/examples/filters.rs) [webgl2](https://databasedav.github.io/jonmo/examples/webgl2/filters/) [webgpu](https://databasedav.github.io/jonmo/examples/webgpu/filters/)
+
+    diverse filtering options for a list of items, showcasing vector reactivity
 
 ## Bevy compatibility
 

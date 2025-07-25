@@ -1,4 +1,4 @@
-//! A simple increasing timer, without using the entity builder, showcasing the least invasive way
+//! A simple increasing timer without using the entity builder, showcasing the least invasive way
 //! to start using jonmo signals in existing Bevy apps.
 
 mod utils;

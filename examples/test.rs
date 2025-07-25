@@ -91,7 +91,6 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
             //         JonmoBuilder::from(Node::default()).component_signal(
             //             index_signal
-            //                 .clone() // TODO: this clone shouldn't be required ??
             //                 .debug()
             //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
             //         )

@@ -589,16 +589,14 @@ pub trait SignalMapExt: SignalMap {
         }
     }
 
-    /// Maps this [`SignalMap`] to a [`Key`][`key`]-lookup [`Signal`] which outputs [`Some<Value>`]
-    /// if the [`Key`][`key`] is present and [`None`] otherwise.
+    /// Maps this [`SignalMap`] to a [`Key`]-lookup [`Signal`] which outputs [`Some<Value>`] if the
+    /// [`Key`] is present and [`None`] otherwise.
     ///
     /// # Example
     ///
     /// ```no_run
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().key(1); // outputs `2`
     /// ```
-    ///
-    /// [`key`]: SignalMap::Key
     fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
