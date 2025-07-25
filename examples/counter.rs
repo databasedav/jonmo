@@ -9,9 +9,8 @@
 //! 2. **Declarative UI with `JonmoBuilder`**: The entire UI tree is defined up-front in a clean,
 //!    declarative style.
 //!
-//! 3. **The `LazyEntity` Pattern**: UI elements (like buttons and text) can refer to the
-//!    state-holding entity *before* it has been spawned, solving a common ordering problem in UI
-//!    construction.
+//! 3. **The `LazyEntity` Pattern**: entities (like buttons and text) can refer to the state-holding
+//!    entity *before* it has been spawned, solving a common ordering problem in UI construction.
 //!
 //! 4. **Reactivity with `component_signal`**: A signal is created that reads the state component.
 //!    Its output is then used to reactively update other components, like the `Text` for the
@@ -20,7 +19,6 @@
 //! 5. **Event Handling with `observe`**: User input (a button click) is handled by a Bevy observer
 //!    system that mutates the state component, which in turn triggers the reactive signal chain.
 
-// The `utils` module contains boilerplate for setting up a basic Bevy app.
 mod utils;
 use utils::{BLUE, PINK, examples_plugin};
 
@@ -41,7 +39,6 @@ fn main() {
                 |world: &mut World| {
                     ui_root().spawn(world);
                 },
-                // A standard Bevy system to spawn a camera is also needed.
                 camera,
             ),
         )
@@ -97,14 +94,13 @@ fn ui_root() -> JonmoBuilder {
             // This `JonmoBuilder` creates the text display for the counter value.
             JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
                 // --- Reactivity ---
-                // `component_signal` is the heart of `jonmo`'s reactivity. It takes a
-                // signal as an argument and uses its output to insert or update a
-                // component on the entity being built. Here, we're creating a signal
-                // that will produce a `Text` component whenever the counter changes.
+                // `component_signal` is a core fixture of `jonmo`'s reactivity. It takes a signal as an argument and
+                // uses its output to insert or update a component on the entity being built. Here,
+                // we're creating a signal that will produce a `Text` component whenever the counter
+                // changes.
                 .component_signal(
-                    // `SignalBuilder::from_component_lazy` creates a signal that reactively
-                    // reads a component from an entity that doesn't exist yet, identified
-                    // by our `LazyEntity`.
+                    // `SignalBuilder::from_component_lazy` creates a signal that reactively reads a component from an
+                    // entity that doesn't exist yet, identified by our `LazyEntity`.
                     SignalBuilder::from_component_lazy::<Counter>(counter_holder.clone())
                         // The signal chain transforms the data step-by-step:
                         // 1. The signal emits `Counter(i32)`. `.map_in` extracts the inner `i32`.
@@ -150,11 +146,7 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         // Bevy's UI plugins automatically handle hit-testing and generating Pointer events
         // for UI nodes.
         world.entity_mut(entity).observe(
-            move |// The `Trigger` contains information about the event that fired.
-                  // Here, we listen for `Pointer<Click>`.
-                  trigger: Trigger<Pointer<Click>>,
-                  // We request write access to all `Counter` components in the world.
-                  mut counters: Query<&mut Counter>| {
+            move |trigger: Trigger<Pointer<Click>>, mut counters: Query<&mut Counter>| {
                 // Check if it was a primary (e.g., left) mouse click.
                 if matches!(trigger.button, PointerButton::Primary) {
                     // Use the fulfilled `LazyEntity` to get mutable access to the *specific*

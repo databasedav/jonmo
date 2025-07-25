@@ -3634,8 +3634,8 @@ struct MutableVecState<T> {
     signal: Option<LazySignal>,
 }
 
-/// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them as a batch on
-/// [`flush`](MutableVec::flush), enabling diff-less constant time reactive updates for downstream
+/// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them on
+/// [`.flush`](MutableVec::flush), enabling diff-less constant time reactive updates for downstream
 /// [`SignalVec`]s.
 #[derive(Clone)]
 pub struct MutableVec<T> {
