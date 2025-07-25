@@ -35,7 +35,12 @@ fn ui(world: &mut World) {
     ui_root.add_child(text);
 
     JonmoBuilder::new()
-        .component_signal_from_component(|signal| signal.dedupe().map(|In(value): In<Value>| Text(value.0.to_string())))
+        .component_signal_from_component(|signal| {
+            signal
+                .dedupe()
+                .map(|In(value): In<Value>| Text(value.0.to_string()))
+                .map_in(Some)
+        })
         .spawn_on_entity(world, text);
 }
 

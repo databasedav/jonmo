@@ -41,7 +41,10 @@ fn ui() -> JonmoBuilder {
         JonmoBuilder::from((Node::default(), TextFont::from_font_size(100.)))
             .insert(Value(0))
             .component_signal_from_component(|signal| {
-                signal.dedupe().map(|In(value): In<Value>| Text(value.0.to_string()))
+                signal
+                    .dedupe()
+                    .map(|In(value): In<Value>| Text(value.0.to_string()))
+                    .map_in(Some)
             }),
     )
 }
