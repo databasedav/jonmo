@@ -26,9 +26,6 @@ fn main() {
         .run();
 }
 
-const BLUE: Color = Color::srgb(91. / 255., 206. / 255., 250. / 255.);
-const PINK: Color = Color::srgb(245. / 255., 169. / 255., 184. / 255.);
-
 fn random_data() -> Data {
     let mut rng = rand::rng();
     Data {

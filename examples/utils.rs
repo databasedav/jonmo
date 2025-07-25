@@ -5,6 +5,9 @@ use bevy::{color::palettes::css::*, prelude::*};
 use jonmo::JonmoPlugin;
 use rand::prelude::IndexedRandom;
 
+pub(crate) const BLUE: Color = Color::srgb(91. / 255., 206. / 255., 250. / 255.);
+pub(crate) const PINK: Color = Color::srgb(245. / 255., 169. / 255., 184. / 255.);
+
 pub(crate) static COLORS: &[Color] = &[
     bevy::prelude::Color::Srgba(ALICE_BLUE),
     bevy::prelude::Color::Srgba(ANTIQUE_WHITE),
@@ -111,7 +114,7 @@ pub(crate) static COLORS: &[Color] = &[
     bevy::prelude::Color::Srgba(PAPAYA_WHIP),
     bevy::prelude::Color::Srgba(PEACHPUFF),
     bevy::prelude::Color::Srgba(PERU),
-    bevy::prelude::Color::Srgba(PINK),
+    bevy::prelude::Color::Srgba(bevy::color::palettes::css::PINK),
     bevy::prelude::Color::Srgba(PLUM),
     bevy::prelude::Color::Srgba(POWDER_BLUE),
     bevy::prelude::Color::Srgba(REBECCA_PURPLE),

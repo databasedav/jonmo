@@ -71,7 +71,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
             })
             .child(
                 text_node()
-                    .insert(TextFont::from_font_size(LETTER_SIZE))
+                    .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                     .with_component::<Node>(|mut node| node.height = Val::Px(100.))
                     .component_signal(
                         letters
@@ -104,7 +104,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                 })
                 .child(
                     text_node()
-                        .insert(TextFont::from_font_size(LETTER_SIZE))
+                        .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .component_signal(
                             letters
                                 .signal_vec_entries()
@@ -158,7 +158,7 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
                 ..default()
             }),
     )
-    .child(text_node().insert((Text(letter.to_string()), TextFont::from_font_size(LETTER_SIZE))))
+    .child(text_node().insert((Text(letter.to_string()), TextColor(PINK), TextFont::from_font_size(LETTER_SIZE))))
     .child(
         text_node()
             .insert(TextFont::from_font_size(LETTER_SIZE / 1.5))

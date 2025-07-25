@@ -22,7 +22,7 @@
 
 // The `utils` module contains boilerplate for setting up a basic Bevy app.
 mod utils;
-use utils::*;
+use utils::{BLUE, PINK, examples_plugin};
 
 use bevy::prelude::*;
 use jonmo::prelude::*;
@@ -92,7 +92,7 @@ fn ui_root() -> JonmoBuilder {
         .entity_sync(counter_holder.clone())
         // Now that the `counter_holder` promise is set to be fulfilled, we can
         // create the child elements that depend on it.
-        .child(counter_button(counter_holder.clone(), "-", -1))
+        .child(counter_button(counter_holder.clone(), PINK, "-", -1))
         .child(
             // This `JonmoBuilder` creates the text display for the counter value.
             JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
@@ -121,17 +121,12 @@ fn ui_root() -> JonmoBuilder {
                         .map_in(Some),
                 ),
         )
-        .child(counter_button(counter_holder, "+", 1)),
+        .child(counter_button(counter_holder, BLUE, "+", 1)),
     )
 }
 
 /// A factory function that creates a `JonmoBuilder` for a counter button.
-///
-/// # Arguments
-/// * `counter_holder`: A `LazyEntity` pointing to the node with the `Counter` component.
-/// * `label`: The text to display on the button (e.g., "+" or "-").
-/// * `step`: The amount to add to the counter when this button is clicked.
-fn counter_button(counter_holder: LazyEntity, label: &'static str, step: i32) -> JonmoBuilder {
+fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str, step: i32) -> JonmoBuilder {
     JonmoBuilder::from((
         // A styled node for the button's appearance.
         Node {
@@ -141,7 +136,7 @@ fn counter_button(counter_holder: LazyEntity, label: &'static str, step: i32) ->
             ..default()
         },
         BorderRadius::MAX,
-        BackgroundColor(Color::hsl(300., 0.75, 0.75)),
+        BackgroundColor(color),
     ))
     // The button needs to react to user input. We achieve this by setting up an
     // event listener when the button entity is spawned.

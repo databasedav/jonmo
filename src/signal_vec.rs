@@ -1038,7 +1038,7 @@ where
     }
 }
 
-/// Blanket trait for transforming [`SignalVec`]s into [`SignalVecEither::Left`] or
+/// Blanket trait for transforming [`Signal`]s into [`SignalVecEither::Left`] or
 /// [`SignalVecEither::Right`].
 #[allow(missing_docs)]
 pub trait IntoSignalVecEither: Sized
@@ -1090,7 +1090,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3]).signal_vec().map(|In(x): In<i32>| x * 2); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map<O, F, M>(self, system: F) -> Map<Self, O>
@@ -1166,7 +1169,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map_in<O, F>(self, mut function: F) -> Map<Self, O>
@@ -1187,7 +1193,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3]).signal_vec().map_in_ref(ToString::to_string); // outputs `SignalVec -> ["1", "2", "3"]`
     /// ```
     fn map_in_ref<O, F>(self, mut function: F) -> Map<Self, O>
@@ -1200,16 +1209,19 @@ pub trait SignalVecExt: SignalVec {
         self.map(move |In(item)| function(&item))
     }
 
-    /// Pass each [`Item`] of this [`SignalVec`] to a [`System`] that produces a [`Signal`],
-    /// forwarding the output of each resulting [`Signal`].
+    /// Pass each [`Item`](SignalVec::Item) of this [`SignalVec`] to a [`System`] that produces a
+    /// [`Signal`], forwarding the output of each resulting [`Signal`].
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3]).signal_vec()
     ///     .map_signal(|In(x): In<i32>|
     ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
-    ///     ) // outputs `SignalVec -> [2, 4, 6]`
+    ///     ); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
@@ -1504,7 +1516,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3, 4]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0); // outputs `SignalVec -> [2, 4]`
     /// ```
     fn filter<F, M>(self, predicate: F) -> Filter<Self>
@@ -1546,9 +1561,12 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from(["1", "two", "NaN", "four", "5"]).signal_vec()
-    ///     .filter_map(|In(s): In<&'static str>| s.parse().ok()); // outputs `SignalVec -> [1, 5]`
+    ///     .filter_map(|In(s): In<&'static str>| s.parse::<u32>().ok()); // outputs `SignalVec -> [1, 5]`
     /// ```
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, Self::Item>
     where
@@ -1582,13 +1600,16 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// #[derive(Resource, Clone)]
     /// struct Even(bool);
     ///
     /// MutableVec::from([1, 2, 3, 4]).signal_vec()
-    ///      .filter_signal(|In(x): In<i32>, even: Res<Even>| {
-    ///          x % 2 == if even.0 { 0 } else { 1 }
+    ///      .filter_signal(|In(x): In<i32>| {
+    ///          SignalBuilder::from_resource().map_in(move |even: Even| x % 2 == if even.0 { 0 } else { 1 })
     ///      }); // outputs `SignalVec -> [2, 4]` when `Even(true)` and `SignalVec -> [1, 3]` when `Even(false)`
     /// ```
     fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
@@ -1929,13 +1950,17 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// let mut vec = MutableVec::from([1, 2, 5])
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// let mut vec = MutableVec::from([1, 2, 5]);
     /// let signal = vec.signal_vec().enumerate();
-    /// signal; // outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 2), (Signal -> Some(2), 5)]`
+    /// // signal outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 2), (Signal -> Some(2), 5)]`
     /// vec.write().remove(1);
-    /// commands.queue(vec.flush());
-    /// signal; // outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 5)]`
+    /// world.commands().queue(vec.flush());
+    /// // signal outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 5)]`
     /// ```
     fn enumerate(self) -> Enumerate<Self>
     where
@@ -2100,8 +2125,11 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// MutableVec::from([1, 2, 3]).signal_vec().to_signal(|In(vec): In<Vec<i32>>| vec.position(|&x| x == 2)); // outputs `1`
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// MutableVec::from([1, 2, 3]).signal_vec().to_signal().map_in(|vec: Vec<i32>| vec[1]); // outputs `2`
     /// ```
     fn to_signal(self) -> ToSignal<Self>
     where
@@ -2149,12 +2177,16 @@ pub trait SignalVecExt: SignalVec {
     /// # Example
     ///
     /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
     /// let mut vec = MutableVec::from([1]);
     /// let signal = vec.signal_vec().is_empty();
-    /// signal; // outputs `false`
+    /// // `signal` outputs `false`
     /// vec.write().pop();
-    /// commands.queue(vec.flush());
-    /// signal; // outputs `true`
+    /// world.commands().queue(vec.flush());
+    /// // `signal` outputs `true`
     /// ```
     #[allow(clippy::wrong_self_convention)]
     fn is_empty(self) -> IsEmpty<Self>
@@ -2172,12 +2204,16 @@ pub trait SignalVecExt: SignalVec {
     /// # Example
     ///
     /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
     /// let mut vec = MutableVec::from([1]);
     /// let signal = vec.signal_vec().is_empty();
-    /// signal; // outputs `1`
+    /// // `signal` outputs `1`
     /// vec.write().pop();
-    /// commands.queue(vec.flush());
-    /// signal; // outputs `0`
+    /// world.commands().queue(vec.flush());
+    /// // `signal` outputs `0`
     /// ```
     fn len(self) -> Len<Self>
     where
@@ -2193,13 +2229,17 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
     /// let mut vec = MutableVec::from([1, 2, 3]);
     /// let signal = vec.signal_vec().is_empty();
-    /// signal; // outputs `6`
+    /// // `signal` outputs `6`
     /// vec.write().push(4);
-    /// commands.queue(vec.flush());
-    /// signal; // outputs `10`
+    /// world.commands().queue(vec.flush());
+    /// // `signal` outputs `10`
     /// ```
     fn sum(self) -> Sum<Self>
     where
@@ -2219,7 +2259,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 3]).signal_vec().chain(MutableVec::from([2, 4]).signal_vec()); // outputs `SignalVec -> [1, 3, 2, 4]`
     /// ```
     fn chain<S>(self, other: S) -> Chain<Self, S>
@@ -2375,7 +2418,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([1, 2, 3]).signal_vec().intersperse(0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse(self, separator: Self::Item) -> Intersperse<Self>
@@ -2533,8 +2579,11 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse_with(|_: In<()>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::{prelude::*, signal::{Dedupe, Source}};
+    ///
+    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse_with(|_: In<Dedupe<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where
@@ -2830,8 +2879,11 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(right)) // outputs `SignalVec -> [1, 2, 3]`
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right)); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
     where
@@ -2885,6 +2937,7 @@ pub trait SignalVecExt: SignalVec {
                                     state.values = new_values;
                                     state.sorted_indices = (0..state.values.len()).collect();
 
+                                    // Fix: Clone the values _before_ the sort to avoid borrow conflict.
                                     let values_for_sort = state.values.clone();
                                     state.sorted_indices.sort_unstable_by(|&a, &b| {
                                         let val_a = values_for_sort[a].clone();
@@ -2993,7 +3046,10 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([3, 2, 1]).signal_vec().sort_by_cmp(); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by_cmp(self) -> SortBy<Self>
@@ -3005,12 +3061,15 @@ pub trait SignalVecExt: SignalVec {
     }
 
     /// Sorts this [`SignalVec`] with a key extraction [`System`] which takes [`In`] an
-    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which the output
-    /// will be sorted by.
+    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which
+    /// the output will be sorted by.
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// MutableVec::from([3, 2, 1]).signal_vec().sort_by_key(|In(x): In<i32>| -x); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by_key<K, F, M>(self, system: F) -> SortByKey<Self>
@@ -3345,13 +3404,17 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
     /// let mut vec = MutableVec::from([1, 2, 3]);
     /// let signal = vec.signal_vec().debug();
-    /// signal; // logs `[ Replace { values: [ 1, 2, 3 ] } ]`
+    /// // signal logs `[ Replace { values: [ 1, 2, 3 ] } ]`
     /// vec.write().push(4);
-    /// commands.queue(vec.flush());
-    /// signal; // logs `[ Push { value: 4 } ]`
+    /// world.commands().queue(vec.flush());
+    /// // signal logs `[ Push { value: 4 } ]`
     /// ```
     fn debug(self) -> Debug<Self>
     where
@@ -3372,12 +3435,16 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let condition = true;
     /// let signal = if condition {
-    ///     MutableVec::from([1, 2, 3]).map(...).boxed() // this is a `Map<Source<i32>>`
+    ///     MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     MutableVec::from([1, 2, 3]).filter(...).boxed() // this is a `Filter<Source<i32>>`
-    /// } // without the `.boxed()`, the compiler would not allow this
+    ///     MutableVec::from([1, 2, 3]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0).boxed() // this is a `Filter<Source<i32>>`
+    /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>>
     where
@@ -3392,14 +3459,18 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// .switch_signal_vec(
-    ///     let signal = if condition {
-    ///         MutableVec::from([1, 2, 3]).map(...).boxed_clone() // this is a `Map<Source<i32>>`
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system(|_: In<()>| true)
+    /// .switch_signal_vec(|In(condition): In<bool>| {
+    ///     if condition {
+    ///         MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2).boxed_clone() // this is a `Map<Source<i32>>`
     ///     } else {
-    ///         MutableVec::from([1, 2, 3]).filter(...).boxed_clone() // this is a `Filter<Source<i32>>`
+    ///         MutableVec::from([1, 2, 3]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0).boxed_clone() // this is a `Filter<Source<i32>>`
     ///     } // without the `.boxed_clone()`, the compiler would not allow this
-    /// )
+    /// });
     /// ```
     fn boxed_clone(self) -> Box<dyn SignalVecClone<Item = Self::Item> + Send + Sync>
     where
@@ -3654,7 +3725,7 @@ impl<T> MutableVec<T> {
 
             // This is the system for the one-and-only broadcaster. It just drains diffs that `flush` has put
             // into its component.
-            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
+            let source_system_logic = clone!((self_entity) move | _: In <() >, world: & mut World | {
                 if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()) {
                     if diffs.0.is_empty() {
                         None

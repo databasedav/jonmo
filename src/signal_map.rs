@@ -322,7 +322,10 @@ pub trait SignalMapExt: SignalMap {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    /// 
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value(|In(x)| x * 2); // outputs `SignalMap -> {1: 2, 3: 4}`
     /// ```
     fn map_value<O, F, M>(self, system: F) -> MapValue<Self, O>
@@ -361,7 +364,10 @@ pub trait SignalMapExt: SignalMap {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    /// 
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map()
     ///     .map_value_signal(|In(x)|
     ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
@@ -594,7 +600,9 @@ pub trait SignalMapExt: SignalMap {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use jonmo::prelude::*;
+    ///
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().key(1); // outputs `2`
     /// ```
     fn key(self, key: Self::Key) -> Key<Self>
@@ -648,13 +656,17 @@ pub trait SignalMapExt: SignalMap {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
     /// let mut map = MutableBTreeMap::from([(1, 2), (3, 4)]);
     /// let signal = map.signal_map().debug();
-    /// signal; // logs `[ Replace { entries: [ (1, 2), (3, 4) ] } ]`
+    /// // `signal` logs `[ Replace { entries: [ (1, 2), (3, 4) ] } ]`
     /// map.write().insert(5, 6);
-    /// commands.queue(vec.flush());
-    /// signal; // logs `[ Insert { key: 5, value: 6 } ]`
+    /// world.commands().queue(map.flush());
+    /// // `signal` logs `[ Insert { key: 5, value: 6 } ]`
     /// ```
     fn debug(self) -> Debug<Self>
     where
@@ -676,12 +688,16 @@ pub trait SignalMapExt: SignalMap {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let condition = true;
     /// let signal = if condition {
-    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).map_value(...).boxed() // this is a `MapValue<Source<i32, i32>>`
+    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value(|In(x): In<i32>| x * 2).boxed() // this is a `MapValue<Source<i32, i32>>`
     /// } else {
-    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).map_value_signal(...).boxed() // this is a `MapValueSignal<Source<i32, i32>>`
-    /// } // without the `.boxed()`, the compiler would not allow this
+    ///     MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value_signal(|In(x): In<i32>| SignalBuilder::from_system(move |_: In<()>| x * 2)).boxed() // this is a `MapValueSignal<Source<i32, i32>>`
+    /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn SignalMap<Key = Self::Key, Value = Self::Value>>
     where

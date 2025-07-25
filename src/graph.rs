@@ -627,8 +627,13 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
 ///
 /// # Example
 ///
-/// ```no_run
-/// poll_signal(world, signal).and_then(downcast_any_clone::<usize>) // assuming this `signal` outputs a `usize`, this will return an `Option<usize>`
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, graph::*};
+///
+/// let mut world = World::new();
+/// let signal = *SignalBuilder::from_system(|_: In<()>| 1).register(&mut world);
+/// poll_signal(&mut world, signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
 /// ```
 pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {
     (any_clone as Box<dyn Any>).downcast::<T>().map(|o| *o).ok()

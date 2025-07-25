@@ -771,7 +771,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system(|_: In<()>| 1).map(|In(x): In<i32>| x * 2); // outputs `2`
     /// ```
     fn map<O, IOO, F, M>(self, system: F) -> Map<Self, O>
@@ -797,7 +800,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2); // outputs `2`
     /// ```
     fn map_in<O, IOO, F>(self, mut function: F) -> Map<Self, O>
@@ -820,7 +826,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system(|_: In<()>| 1).map_in_ref(ToString::to_string); // outputs `"1"`
     /// ```
     fn map_in_ref<O, IOO, F>(self, mut function: F) -> Map<Self, O>
@@ -839,10 +848,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// #[derive(Component)]
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Component, Clone)]
     /// struct Value(u32);
     ///
+    /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
     /// SignalBuilder::from_entity(entity).component::<Value>(); // outputs `Value(0)`
     ///
@@ -865,10 +878,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// #[derive(Component)]
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Component, Clone)]
     /// struct Value(u32);
     ///
+    /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
     /// SignalBuilder::from_entity(entity).component_option::<Value>(); // outputs `Some(Value(0))`
     ///
@@ -892,10 +909,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// #[derive(Component)]
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Component, Clone)]
     /// struct Value(u32);
     ///
+    /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
     /// SignalBuilder::from_entity(entity).has_component::<Value>(); // outputs `true`
     ///
@@ -918,7 +939,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
@@ -958,7 +982,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
@@ -988,7 +1015,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
     /// signal.clone().eq(0); // outputs `true`
     /// signal.eq(1); // outputs `false`
@@ -1007,7 +1037,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
     /// signal.clone().neq(0); // outputs `false`
     /// signal.neq(1); // outputs `true`
@@ -1026,7 +1059,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system(|_: In<()>| true).not(); // outputs `false`
     /// ```
     fn not(self) -> Not<Self>
@@ -1044,7 +1080,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
@@ -1089,7 +1128,10 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
     /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
     /// signal_1.combine(signal_2); // outputs `(1, 2)`
@@ -1132,20 +1174,29 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
-    /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
     ///
-    /// #[derive(Resource)]
+    /// #[derive(Resource, Clone, PartialEq)]
     /// struct Toggle(bool);
     ///
+    /// let mut world = World::new();
+    /// world.insert_resource(Toggle(false));
     /// let signal = SignalBuilder::from_resource::<Toggle>()
-    ///     .map(move |In(toggle): In<Toggle>| if toggle.0 { signal_1.clone() } else { signal_2.clone() })
+    ///     .dedupe()
+    ///     .map(move |In(toggle): In<Toggle>| {
+    ///         if toggle.0 {
+    ///             SignalBuilder::from_system(|_: In<()>| 1)
+    ///         } else {
+    ///             SignalBuilder::from_system(|_: In<()>| 2)
+    ///        }
+    ///     })
     ///     .flatten();
     ///
-    /// signal; // outputs `2`
+    /// // `signal` outputs `2`
     /// world.resource_mut::<Toggle>().0 = true;
-    /// signal; // outputs `1`
+    /// // `signal` outputs `1`
     /// ```
     fn flatten(self) -> Flatten<Self>
     where
@@ -1266,19 +1317,21 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
-    /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
     ///
-    /// #[derive(Resource)]
+    /// #[derive(Resource, Clone, PartialEq)]
     /// struct Toggle(bool);
     ///
+    /// let mut world = World::new();
+    /// world.insert_resource(Toggle(false));
     /// let signal = SignalBuilder::from_resource::<Toggle>()
-    ///     .switch(move |In(toggle): In<Toggle>| if toggle.0 { signal_1.clone() } else { signal_2.clone() });
-    ///
-    /// signal; // outputs `2`
+    ///     .dedupe()
+    ///     .switch(move |In(toggle): In<Toggle>| if toggle.0 { SignalBuilder::from_system(|_: In<()>| 1) } else { SignalBuilder::from_system(|_: In<()>| 2) });
+    /// // `signal` outputs `2`
     /// world.resource_mut::<Toggle>().0 = true;
-    /// signal; // outputs `1`
+    /// // `signal` outputs `1`
     /// ```
     fn switch<S, F, M>(self, switcher: F) -> Switch<Self, S>
     where
@@ -1310,7 +1363,9 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use jonmo::prelude::*;
+    ///
     /// # use bevy::prelude::*;
     /// # use jonmo::prelude::*;
     /// # use jonmo::signal::SwitchSignalVecExt;
@@ -1447,11 +1502,15 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use core::time::Duration;
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .throttle(Duration::from_secs(1)); // outputs `1`, terminates for the next 1 second of frames, outputs `2`, terminates for the next 1 second of frames, outputs `3`, ...
@@ -1487,11 +1546,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///        *state = !*state;
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_bool(
@@ -1538,11 +1600,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///        *state = !*state;
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_true(
@@ -1583,11 +1648,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///        *state = !*state;
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_false(
@@ -1627,11 +1695,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_option(
@@ -1677,11 +1748,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_some(
@@ -1720,11 +1794,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        state
+    ///        *state
     ///     }
     /// })
     /// .map_none(
@@ -1769,10 +1846,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Vec<usize>>| {
-    ///        *state.push(state.get(state.len().saturating_sub(1)).map(|last| last + 1).unwrap_or_default());
+    ///        let new = state.get(state.len().saturating_sub(1)).map(|last| last + 1).unwrap_or_default();
+    ///        state.push(new);
     ///        state.clone()
     ///     }
     /// })
@@ -1802,11 +1883,14 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
     /// SignalBuilder::from_system(|_: In<()>| 1)
     ///     .debug() // logs `1`
-    ///     .map(|In(x): In<i32>| x * 2);
-    ///     .debug() // logs `2`
+    ///     .map_in(|x: i32| x * 2);
+    ///     .debug(); // logs `2`
     /// ```
     fn debug(self) -> Debug<Self>
     where
@@ -1827,12 +1911,16 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let condition = true;
     /// let signal = if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
     /// } else {
     ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
-    /// } // without the `.boxed()`, the compiler would not allow this
+    /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn Signal<Item = Self::Item>>
     where
@@ -1846,12 +1934,16 @@ pub trait SignalExt: Signal {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// let signal = if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map(...).boxed() // this is a `Map<Source<i32>>`
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let condition = true;
+    /// if condition {
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
     /// } else {
     ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
-    /// } // without the `.boxed()`, the compiler would not allow this
+    /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed_clone(self) -> Box<dyn SignalClone<Item = Self::Item>>
     where
