@@ -136,7 +136,6 @@ fn counter_button(counter_holder: LazyEntity, label: &'static str, step: i32) ->
         // A styled node for the button's appearance.
         Node {
             width: Val::Px(45.0),
-            height: Val::Px(45.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             ..default()
