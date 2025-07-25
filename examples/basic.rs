@@ -1,10 +1,15 @@
+//! A simple increasing timer without using the entity builder, showcasing the least invasive way
+//! to start using jonmo signals in existing Bevy apps.
+
+mod utils;
+use utils::*;
+
 use bevy::prelude::*;
 use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(JonmoPlugin)
+    app.add_plugins(examples_plugin)
         .add_systems(Startup, (ui, camera))
         .add_systems(Update, incr_value)
         .insert_resource(ValueTicker(Timer::from_seconds(1., TimerMode::Repeating)))

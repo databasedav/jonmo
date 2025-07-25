@@ -1,30 +1,38 @@
 //! Reactive entity builder ported from [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
-
-use core::cmp::Ordering;
-
-use super::{graph::*, signal::*, signal_vec::*, utils::*};
-use bevy_ecs::prelude::*;
+use super::{
+    graph::{SignalHandle, SignalHandles},
+    signal::{Signal, SignalBuilder, SignalExt},
+    signal_vec::{SignalVec, SignalVecExt, VecDiff},
+    utils::{LazyEntity, SSs, ancestor_map},
+};
+use bevy_ecs::{component::Mutable, prelude::*};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
 };
+use core::cmp::Ordering;
 
 fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
     if let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut handlers) = entity.get_mut::<SignalHandles>()
+        && let Some(mut handles) = entity.get_mut::<SignalHandles>()
     {
-        handlers.add(handle);
+        handles.add(handle);
     }
 }
 
 // TODO: the fluent interface link breaks cargo fmt ??
-/// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of reactive components
-/// and children using a declarative [fluent](https://en.wikipedia.org/wiki/Fluent_interface) builder pattern. All its methods are deferred until the
-/// corresponding [`Entity`] is spawned so its state *and how that state should change* depending on
-/// the state of the [`World`] can be specified up front, in a tidy colocated package, without a
+/// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of
+/// reactive components and children using a declarative
+/// [fluent](https://en.wikipedia.org/wiki/Fluent_interface) builder pattern. All
+/// its methods are deferred until the corresponding [`Entity`] is spawned so its
+/// state _and how that state should change_ depending on the state of the
+/// [`World`] can be specified up front, in a tidy colocated package, without a
 /// `&mut World` or [`Commands`].
 ///
-/// Port of [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html), and [haalka](https://github.com/databasedav/haalka)'s [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
+/// Port of [Dominator](https://github.com/Pauan/rust-dominator)'s
+/// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html),
+/// and [haalka](https://github.com/databasedav/haalka)'s
+/// [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
 #[derive(Clone)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
@@ -53,11 +61,28 @@ impl JonmoBuilder {
         self
     }
 
+    /// Run a function with this builder's [`EntityWorldMut`].
+    pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
+        self.on_spawn(move |world, entity| {
+            if let Ok(entity) = world.get_entity_mut(entity) {
+                f(entity);
+            }
+        })
+    }
+
     /// Adds a [`Bundle`] onto this builder's [`Entity`].
     pub fn insert<T: Bundle>(self, bundle: T) -> Self {
-        self.on_spawn(move |world, entity| {
-            if let Ok(mut entity) = world.get_entity_mut(entity) {
-                entity.insert(bundle);
+        self.with_entity(move |mut entity| {
+            entity.insert(bundle);
+        })
+    }
+
+    /// Run a function with mutable access (via [`Mut`]) to this builder's `C` [`Component`] if it
+    /// exists.
+    pub fn with_component<C: Component<Mutability = Mutable>>(self, f: impl FnOnce(Mut<C>) + SSs) -> Self {
+        self.with_entity(|mut entity| {
+            if let Some(component) = entity.get_mut::<C>() {
+                f(component);
             }
         })
     }
@@ -80,6 +105,31 @@ impl JonmoBuilder {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle =
                 Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
+            add_handle(world, entity, handle);
+        };
+        self.on_spawn(on_spawn)
+    }
+
+    /// Reactively run a function with mutable access (via [`Mut`]) to this builder's [`Entity`]'s
+    /// `C` [`Component`] if it exists and the output of a [`Signal`].
+    ///
+    /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn on_signal_with_component<C, I, S, F, M>(self, signal: S, mut f: F) -> Self
+    where
+        C: Component<Mutability = Mutable>,
+        I: Clone + 'static,
+        S: Signal<Item = I> + SSs,
+        F: FnMut(Mut<C>, I) + SSs,
+    {
+        let on_spawn = move |world: &mut World, entity: Entity| {
+            let handle = Signal::register_signal(
+                signal.map(move |In(input): In<I>, mut components: Query<&mut C>| {
+                    if let Ok(component) = components.get_mut(entity) {
+                        f(component, input)
+                    }
+                }),
+                world,
+            );
             add_handle(world, entity, handle);
         };
         self.on_spawn(on_spawn)
@@ -134,9 +184,43 @@ impl JonmoBuilder {
         })
     }
 
+    // TODO: ehh these could be useful but one should really just use LazyEntity ...
+    /* pub fn signal_from_ancestor_find<S, F, P, M>(self, f: F, predicate: P) -> Self
+    where
+        S: Signal,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>) -> S + SSs,
+        P: IntoSystem<In<Entity>, bool, M> + SSs
+    {
+        let system = Arc::new(OnceLock::new());
+        self.on_spawn(clone!((system) move|world, entity| {
+            let system_id = world.register_system(predicate);
+            world.entity_mut(entity).add_child(system_id.entity());
+            let _ =system.set(system_id);
+        }))
+        .signal_from_entity(move |signal| {
+            f(signal.map(move |In(entity): In<Entity>, world: &mut World| {
+                let mutancestors = SystemState::<Query<&ChildOf>>::new(world);
+                let ancestors = ancestors.get(world);
+                let ancestors = ancestors.iter_ancestors(entity).collect::<Vec<_>>();
+                ancestors.into_iter().find(|&ancestor| {
+                    world.run_system_with(system.get().copied().unwrap(), ancestor) .ok().unwrap_or(false)
+                })
+            }))
+        })
+    }
+
+    pub fn signal_from_ancestor_with_component<C, S, F>(self, f: F) -> Self
+    where
+        C: Component,
+        S: Signal,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>)-> S + SSs
+    {
+        self.signal_from_ancestor_find(f, |In(entity), components:Query<&C>| components.contains(entity))
+    } */
+
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
-    /// `generations`-nth generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
-    /// will return this builder's [`Entity`] itself.
+    /// `generations`-th generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
+    /// will output this builder's [`Entity`] itself.
     ///
     /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn signal_from_ancestor<S, F>(self, generations: usize, f: F) -> Self
@@ -144,14 +228,7 @@ impl JonmoBuilder {
         S: Signal,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
-        self.signal_from_entity(move |signal| {
-            f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
-                [entity]
-                    .into_iter()
-                    .chain(parents.iter_ancestors(entity))
-                    .nth(generations)
-            }))
-        })
+        self.signal_from_entity(move |signal| f(signal.map(ancestor_map(generations))))
     }
 
     /// Run a function that takes a [`Signal`] which outputs this builder's parent's [`Entity`] and
@@ -167,20 +244,19 @@ impl JonmoBuilder {
     }
 
     /// Reactively set this builder's [`Entity`]'s `C` [`Component`] with a [`Signal`] that outputs
-    /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is
-    /// removed. If the [`Signal`]'s output is infallible, wrapping the result in an [`Option`] is
+    /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
+    /// If the [`Signal`]'s output is infallible, wrapping the result in an [`Option`] is
     /// unnecessary.
-    pub fn component_signal<C, IOC, S>(self, signal: S) -> Self
+    pub fn component_signal<C, S>(self, signal: S) -> Self
     where
-        C: Component,
-        IOC: Into<Option<C>> + Clone + 'static,
-        S: Signal<Item = IOC> + SSs,
+        C: Component + Clone,
+        S: Signal<Item = Option<C>> + SSs,
     {
         self.on_signal(
             signal,
-            move |In((entity, component_option)): In<(Entity, IOC)>, world: &mut World| {
+            move |In((entity, component_option)): In<(Entity, Option<C>)>, world: &mut World| {
                 if let Ok(mut entity) = world.get_entity_mut(entity) {
-                    if let Some(component) = component_option.into() {
+                    if let Some(component) = component_option {
                         entity.insert(component);
                     } else {
                         entity.remove::<C>();
@@ -193,20 +269,18 @@ impl JonmoBuilder {
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
     /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
     /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
-    /// [`Component`] is removed. If the resulting [`Signal`]'s output is infallible, wrapping the
-    /// result in an [`Option`] is unnecessary.
-    pub fn component_signal_from_entity<C, IOC, S, F>(self, f: F) -> Self
+    /// [`Component`] is removed.
+    pub fn component_signal_from_entity<C, S, F>(self, f: F) -> Self
     where
         C: Component,
-        IOC: Into<Option<C>> + 'static,
-        S: Signal<Item = IOC>,
+        S: Signal<Item = Option<C>>,
         F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
         self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
-            f(signal).map(move |In(component_option): In<IOC>, world: &mut World| {
+            f(signal).map(move |In(component_option): In<Option<C>>, world: &mut World| {
                 if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
-                    if let Some(component) = component_option.into() {
+                    if let Some(component) = component_option {
                         entity.insert(component);
                     } else {
                         entity.remove::<C>();
@@ -216,19 +290,59 @@ impl JonmoBuilder {
         })
     }
 
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
+    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
+    /// [`Component`] is removed.
+    pub fn component_signal_from_ancestor<C, S, F>(self, generations: usize, f: F) -> Self
+    where
+        C: Component,
+        S: Signal<Item = Option<C>>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
+    {
+        let entity = LazyEntity::new();
+        self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
+            f(signal.map(move |In(entity): In<Entity>, parents: Query<&ChildOf>| {
+                [entity]
+                    .into_iter()
+                    .chain(parents.iter_ancestors(entity))
+                    .nth(generations)
+            }))
+            .map(move |In(component_option): In<Option<C>>, world: &mut World| {
+                if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
+                    if let Some(component) = component_option {
+                        entity.insert(component);
+                    } else {
+                        entity.remove::<C>();
+                    }
+                }
+            })
+        })
+    }
+
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
+    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
+    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
+    /// [`Component`] is removed.
+    pub fn component_signal_from_parent<C, S, F>(self, f: F) -> Self
+    where
+        C: Component,
+        S: Signal<Item = Option<C>>,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
+    {
+        self.component_signal_from_ancestor(1, f)
+    }
+
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
     /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
-    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the
-    /// [`Signal`] outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`]
-    /// does not have a `C` [`Component`], the [`Signal`]'s execution path will terminate for
-    /// that frame. If the resulting [`Signal`]'s output is infallible, wrapping the result in an
-    /// [`Option`] is unnecessary.
-    pub fn component_signal_from_component<I, O, IOO, S, F>(self, f: F) -> Self
+    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`]
+    /// outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`] does not
+    /// have a `C` [`Component`], the [`Signal`]'s execution path will terminate for that frame.
+    pub fn component_signal_from_component<I, O, S, F>(self, f: F) -> Self
     where
         I: Component + Clone,
         O: Component,
-        IOO: Into<Option<O>> + 'static,
-        S: Signal<Item = IOO> + SSs,
+        S: Signal<Item = Option<O>> + SSs,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
@@ -238,17 +352,15 @@ impl JonmoBuilder {
 
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
     /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
-    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the
-    /// [`Signal`] outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`]
-    /// does not have a `C` [`Component`], the input [`Signal`] will output [`None`] and continue
-    /// propagation. If the resulting [`Signal`]'s output is infallible, wrapping the result in an
-    /// [`Option`] is unnecessary.
-    pub fn component_signal_from_component_option<I, O, IOO, S, F>(self, f: F) -> Self
+    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`]
+    /// outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`] does not
+    /// have a `C` [`Component`], the input [`Signal`] will output [`None`] and continue
+    /// propagation.
+    pub fn component_signal_from_component_option<I, O, S, F>(self, f: F) -> Self
     where
         I: Component + Clone,
         O: Component,
-        IOO: Into<Option<O>> + 'static,
-        S: Signal<Item = IOO> + SSs,
+        S: Signal<Item = Option<O>> + SSs,
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<I>>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
@@ -317,29 +429,25 @@ impl JonmoBuilder {
     /// Declare static children.
     pub fn children(self, children: impl IntoIterator<Item = impl Into<JonmoBuilder>> + Send + 'static) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
-        let children_vec: Vec<JonmoBuilder> = children.into_iter().map(Into::into).collect(); // Collect into Vec
+        let children_vec: Vec<JonmoBuilder> = children.into_iter().map(Into::into).collect();
         let population = children_vec.len();
         self.child_block_populations.lock().unwrap().push(population);
-        let child_block_populations = self.child_block_populations.clone(); // Clone Arc
-
+        let child_block_populations = self.child_block_populations.clone();
         let on_spawn = move |world: &mut World, parent: Entity| {
             let mut children_entities = Vec::with_capacity(children_vec.len());
             for _ in 0..children_vec.len() {
                 children_entities.push(world.spawn_empty().id());
             }
-
             if let Ok(mut parent) = world.get_entity_mut(parent) {
-                let offset = offset(block, &child_block_populations.lock().unwrap()); // Recalculate offset
+                let offset = offset(block, &child_block_populations.lock().unwrap());
                 parent.insert_children(offset, &children_entities);
                 for (child, child_entity) in children_vec.into_iter().zip(children_entities.iter().copied()) {
-                    // Use copied iterator
                     child.spawn_on_entity(world, child_entity);
                 }
             } else {
-                // Parent despawned during child spawning
                 for child_entity in children_entities {
                     if let Ok(child) = world.get_entity_mut(child_entity) {
-                        child.despawn();
+                        child.despawn(); // removes from parent
                     }
                 }
             }
@@ -436,6 +544,7 @@ impl JonmoBuilder {
                         }
                         VecDiff::Move { old_index, new_index } => {
                             children_entities.swap(old_index, new_index);
+
                             fn move_from_to(
                                 parent: &mut EntityWorldMut,
                                 children_entities: &[Entity],
@@ -449,6 +558,7 @@ impl JonmoBuilder {
                                     parent.insert_children(new_index, &[old_entity]);
                                 }
                             }
+
                             fn swap(parent: &mut EntityWorldMut, children_entities: &[Entity], a: usize, b: usize) {
                                 move_from_to(parent, children_entities, a, b);
                                 match a.cmp(&b) {
@@ -459,6 +569,7 @@ impl JonmoBuilder {
                                     _ => {}
                                 }
                             }
+
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
                                 let offset = offset(block, &child_block_populations.lock().unwrap());
                                 swap(&mut parent, &children_entities, offset + old_index, offset + new_index);
@@ -467,7 +578,8 @@ impl JonmoBuilder {
                         VecDiff::RemoveAt { index } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
                                 if let Ok(child) = world.get_entity_mut(existing_child) {
-                                    child.despawn(); // removes from parent
+                                    // removes from parent
+                                    child.despawn();
                                 }
                                 children_entities.remove(index);
                                 child_block_populations.lock().unwrap()[block] = children_entities.len();

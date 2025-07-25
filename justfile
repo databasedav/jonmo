@@ -1,4 +1,4 @@
-KAAJ_HAALKA_COMMIT := "5e06f448c3515fa0dc1cb9ad66fcc0192756fdaf"
+KAAJ_HAALKA_COMMIT := "27104c4f47980cb53ec64c6d5e7874cf4f3caaec"
 
 fetch_kaaj_justfile:
   curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just

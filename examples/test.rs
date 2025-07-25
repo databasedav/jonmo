@@ -1,21 +1,15 @@
-//!
-
+#![allow(missing_docs)]
+#![allow(unused_variables)]
 mod utils;
-use std::any::Any;
-
 use utils::*;
 
 use bevy::prelude::*;
-use jonmo::{
-    graph::{downcast_any_clone, poll_signal},
-    prelude::*,
-};
+use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
     let numbers = MutableVec::from([1, 2, 3, 4, 5]);
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(JonmoPlugin)
+    app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
             PostStartup,
@@ -71,11 +65,11 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             // })
             // .dedupe()
             // .to_signal_vec()
-            // .filter_signal(|In(n)| {
-            //     SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
-            //         n % 2 == if toggle.0 { 0 } else { 1 }
-            //     })
-            // })
+            .filter_signal(|In(n)| {
+                SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+                    n % 2 == if toggle.0 { 0 } else { 1 }
+                })
+            })
             // .map_signal(|In(n): In<i32>| {
             //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
             // })
@@ -97,7 +91,6 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
             //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
             //         JonmoBuilder::from(Node::default()).component_signal(
             //             index_signal
-            //                 .clone()
             //                 .debug()
             //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
             //         )
