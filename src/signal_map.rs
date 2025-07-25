@@ -325,7 +325,7 @@ pub trait SignalMapExt: SignalMap {
     /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
-    /// 
+    ///
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map().map_value(|In(x)| x * 2); // outputs `SignalMap -> {1: 2, 3: 4}`
     /// ```
     fn map_value<O, F, M>(self, system: F) -> MapValue<Self, O>
@@ -367,7 +367,7 @@ pub trait SignalMapExt: SignalMap {
     /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
-    /// 
+    ///
     /// MutableBTreeMap::from([(1, 2), (3, 4)]).signal_map()
     ///     .map_value_signal(|In(x)|
     ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()

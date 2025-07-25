@@ -158,7 +158,11 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
                 ..default()
             }),
     )
-    .child(text_node().insert((Text(letter.to_string()), TextColor(PINK), TextFont::from_font_size(LETTER_SIZE))))
+    .child(text_node().insert((
+        Text(letter.to_string()),
+        TextColor(PINK),
+        TextFont::from_font_size(LETTER_SIZE),
+    )))
     .child(
         text_node()
             .insert(TextFont::from_font_size(LETTER_SIZE / 1.5))
