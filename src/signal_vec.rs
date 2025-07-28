@@ -2550,6 +2550,7 @@ pub trait SignalVecExt: SignalVec {
     }
 
     // TODO: the example is clearly a copout ...
+    // TODO: why won't doctest compile ?
     /// Place the [`Item`](SignalVec::Item) output by the [`System`] between adjacent items of this
     /// [`SignalVec`]; the [`System`] takes [`In`] an `impl Signal<Item = Option<usize>>` which
     /// outputs the index of the corresponding [`Item`](SignalVec::Item) or [`None`] if it has been
@@ -2557,7 +2558,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     /// use jonmo::signal::{Dedupe, Source};

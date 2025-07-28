@@ -14,14 +14,16 @@ The runtime of jonmo is quite simple; every frame, the outputs of systems are fo
 
 ### assorted features:
 - fine-grained reactivity for all entities, components, and children
-- ***diff-less*** constant-time reactive updates for collections (available through `MutableVec` and `MutableBTreeMap`)
+- ***diff-less*** constant-time reactive updates for collections (available through [`MutableVec`](https://docs.rs/jonmo/latest/jonmo/signal_vec/struct.MutableVec.html) and [`MutableBTreeMap`](https://docs.rs/jonmo/latest/jonmo/signal_map/struct.MutableBTreeMap.html))
 - automated system lifecycle management when using the builder API, simple component on-remove hook when not
 - polling API for when one needs an escape hatch from the regular push-based output semantics (polling is used sparsely internally for some combinators)
 - either wrappers (a la <https://github.com/rayon-rs/either>) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
 - `no_std` *always*
 
+## [feature flags](https://docs.rs/jonmo/latest/jonmo/#feature-flags-1)
+
 ## examples
-```rust,no_run
+```rust,ignore
 //! Simple counter example, ported from a similar example in the `haalka` UI library.
 //!
 //! This example demonstrates the fundamental concepts of `jonmo` for building

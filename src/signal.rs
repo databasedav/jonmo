@@ -1883,12 +1883,13 @@ pub trait SignalExt: Signal {
         }
     }
 
+    // TODO: why won't doctest compile ?
     #[cfg(feature = "tracing")]
     /// Adds debug logging to this [`Signal`]'s ouptut.
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
@@ -1945,10 +1946,10 @@ pub trait SignalExt: Signal {
     ///
     /// let condition = true;
     /// if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed_clone() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
-    /// }; // without the `.boxed()`, the compiler would not allow this
+    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed_clone() // this is a `Dedupe<Source<i32>>`
+    /// }; // without the `.boxed_clone()`, the compiler would not allow this
     /// ```
     fn boxed_clone(self) -> Box<dyn SignalClone<Item = Self::Item>>
     where

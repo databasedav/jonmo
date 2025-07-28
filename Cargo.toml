@@ -26,13 +26,13 @@ document-features = { version = "0.2", optional = true }
 [features]
 default = ["builder", "tracing", "time", "std"]
 
-## Enables access to jonmo's high-level entity builder, `JonmoBuilder`.
+## Enables access to jonmo's high-level entity builder, [`JonmoBuilder`](https://docs.rs/jonmo/latest/jonmo/builder/struct.JonmoBuilder.html).
 builder = []
 
 ## Enables access to signal ext `.debug` methods, which conveniently logs signal outputs at any step.
 tracing = ["bevy_log"]
 
-## Enables access to `SignalExt::throttle`, which delays subsequent outputs by some `Duration`.
+## Enables access to [`SignalExt::throttle`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html#method.throttle), which delays subsequent outputs by some `Duration`.
 time = ["bevy_time"]
 
 ## `DebugUiPlugin` which enables toggling [`bevy_dev_tools::ui_debug_overlay::DebugUiPlugin`](https://docs.rs/bevy/latest/bevy/dev_tools/ui_debug_overlay/struct.DebugUiPlugin.html) with the `F1` key; requires a camera to be marked with the [`IsDefaultCamera`](https://docs.rs/bevy/latest/bevy/prelude/struct.IsDefaultUiCamera.html#) component.
