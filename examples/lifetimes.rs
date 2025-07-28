@@ -100,7 +100,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         // The first element of the tuple is a *new signal* that will always contain
         // the current index of that specific item, or `None` if it has been removed.
         // This is crucial for displaying the index or for actions like removing a specific item.
-        colors.enumerate().map_in(|(index, color)| item(index, color)),
+        colors.enumerate().map_in(|(index, color)| item(index.dedupe(), color)),
     )
     .child(
         JonmoBuilder::from((

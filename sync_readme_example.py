@@ -13,7 +13,7 @@ with open('README.md', 'r') as file:
 
 # Insert the content after the marker
 # Define the start and end markers for the Rust code block
-start_marker = '```rust no_run'
+start_marker = '```rust,no_run'
 end_marker = '```'
 
 # Find the start and end positions of the Rust code block

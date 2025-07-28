@@ -30,7 +30,7 @@ pub(crate) fn get_ancestor(child_ofs: &Query<&ChildOf>, entity: Entity, generati
     [entity]
         .into_iter()
         .chain(child_ofs.iter_ancestors(entity))
-        .nth(generations.saturating_sub(1))
+        .nth(generations)
 }
 
 pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&ChildOf>) -> Option<Entity> {

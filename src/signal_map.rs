@@ -1002,7 +1002,7 @@ impl<K, V> MutableBTreeMap<K, V> {
 
     /// Returns a [`SignalVec`] which outputs this [`MutableBTreeMap`]'s [`Key`](SignalMap::Key)s in
     /// sorted order.
-    pub fn signal_vec_keys(&self) -> SignalVecKeys<Self>
+    pub fn signal_vec_keys(&self) -> SignalVecKeys<K>
     where
         K: Ord + Clone + SSs,
         V: Clone + SSs,
@@ -1150,7 +1150,7 @@ impl<K, V> MutableBTreeMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::JonmoPlugin;
+    use crate::{JonmoPlugin, signal_vec::SignalVecExt};
     use bevy::prelude::*;
 
     // Helper resource to capture the output diffs from a SignalMap for assertions.
@@ -1220,6 +1220,94 @@ mod tests {
                 _ => false,
             }
         }
+    }
+
+    #[test]
+    fn test_for_each() {
+        let mut app = create_test_app();
+
+        // The output of our `for_each` system will be the full, reconstructed BTreeMap.
+        app.init_resource::<SignalOutput<BTreeMap<u32, String>>>();
+        let source_map = MutableBTreeMap::from([(1, "one".to_string()), (2, "two".to_string())]);
+
+        // This system reconstructs the state of the map by applying the diffs it
+        // receives. It then outputs the complete, current state of the map. This allows
+        // us to verify that `for_each` is receiving the diffs correctly.
+        let reconstructor_system = |In(diffs): In<Vec<MapDiff<u32, String>>>,
+                                    mut state: Local<BTreeMap<u32, String>>| {
+            for diff in diffs {
+                match diff {
+                    MapDiff::Replace { entries } => {
+                        *state = entries.into_iter().collect();
+                    }
+                    MapDiff::Insert { key, value } | MapDiff::Update { key, value } => {
+                        state.insert(key, value);
+                    }
+                    MapDiff::Remove { key } => {
+                        state.remove(&key);
+                    }
+                    MapDiff::Clear => {
+                        state.clear();
+                    }
+                }
+            }
+
+            // Output the current reconstructed state
+            state.clone()
+        };
+        let handle = source_map
+            .signal_map()
+            .for_each(reconstructor_system)
+            .map(capture_output::<BTreeMap<u32, String>>)
+            .register(app.world_mut());
+
+        // Test 1: Initial State. The initial `Replace` diff should be received and
+        // processed.
+        app.update();
+        let expected_initial_state: BTreeMap<_, _> =
+            [(1, "one".to_string()), (2, "two".to_string())].into_iter().collect();
+        assert_eq!(
+            get_output::<BTreeMap<u32, String>>(app.world_mut()),
+            Some(expected_initial_state.clone()),
+            "Initial state was not reconstructed correctly"
+        );
+
+        // Test 2: Batched Mutations. We'll perform multiple operations before flushing to
+        // test batch processing.
+        {
+            let mut writer = source_map.write();
+
+            // Insert
+            writer.insert(3, "three".to_string());
+
+            // Update
+            writer.insert(1, "one_v2".to_string());
+
+            // Remove
+            writer.remove(&2);
+        }
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let expected_batched_state: BTreeMap<_, _> = [(1, "one_v2".to_string()), (3, "three".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            get_output::<BTreeMap<u32, String>>(app.world_mut()),
+            Some(expected_batched_state.clone()),
+            "State after batched mutations was not reconstructed correctly"
+        );
+
+        // Test 3: Clear. The `Clear` diff should result in an empty map.
+        source_map.write().clear();
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let expected_cleared_state: BTreeMap<u32, String> = BTreeMap::new();
+        assert_eq!(
+            get_output::<BTreeMap<u32, String>>(app.world_mut()),
+            Some(expected_cleared_state.clone()),
+            "State after Clear was not reconstructed correctly"
+        );
+        handle.cleanup(app.world_mut());
     }
 
     #[test]
@@ -1565,91 +1653,249 @@ mod tests {
         handle.cleanup(app.world_mut());
     }
 
+    #[derive(Resource, Default, Debug)]
+    struct SignalVecOutput<T: SSs + Clone + fmt::Debug>(Vec<VecDiff<T>>);
+
+    fn capture_vec_output<T>(In(diffs): In<Vec<VecDiff<T>>>, mut output: ResMut<SignalVecOutput<T>>)
+    where
+        T: SSs + Clone + fmt::Debug,
+    {
+        output.0.extend(diffs);
+    }
+
+    fn get_and_clear_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
+        world
+            .get_resource_mut::<SignalVecOutput<T>>()
+            .map(|mut res| core::mem::take(&mut res.0))
+            .unwrap_or_default()
+    }
+
+    fn apply_diffs_to_vec<T: Clone>(vec: &mut Vec<T>, diffs: &[VecDiff<T>]) {
+        for diff in diffs {
+            diff.apply_to_vec(vec);
+        }
+    }
+
+    // ADD: The comprehensive unit test for `signal_vec_keys`.
     #[test]
-    fn test_for_each() {
+    fn test_signal_vec_keys() {
+        // --- 1. Setup ---
         let mut app = create_test_app();
+        app.init_resource::<SignalVecOutput<u32>>(); // Keys are u32
 
-        // The output of our `for_each` system will be the full, reconstructed BTreeMap.
-        app.init_resource::<SignalOutput<BTreeMap<u32, String>>>();
-        let source_map = MutableBTreeMap::from([(1, "one".to_string()), (2, "two".to_string())]);
+        // Start with unsorted data to verify initial sort.
+        let source_map = MutableBTreeMap::from([(3, 'c'), (1, 'a'), (4, 'd')]);
 
-        // This system reconstructs the state of the map by applying the diffs it
-        // receives. It then outputs the complete, current state of the map. This allows
-        // us to verify that `for_each` is receiving the diffs correctly.
-        let reconstructor_system = |In(diffs): In<Vec<MapDiff<u32, String>>>,
-                                    mut state: Local<BTreeMap<u32, String>>| {
-            for diff in diffs {
-                match diff {
-                    MapDiff::Replace { entries } => {
-                        *state = entries.into_iter().collect();
-                    }
-                    MapDiff::Insert { key, value } | MapDiff::Update { key, value } => {
-                        state.insert(key, value);
-                    }
-                    MapDiff::Remove { key } => {
-                        state.remove(&key);
-                    }
-                    MapDiff::Clear => {
-                        state.clear();
-                    }
-                }
-            }
-
-            // Output the current reconstructed state
-            state.clone()
-        };
-        let handle = source_map
-            .signal_map()
-            .for_each(reconstructor_system)
-            .map(capture_output::<BTreeMap<u32, String>>)
+        let keys_signal = source_map.signal_vec_keys();
+        let handle = keys_signal
+            .for_each(capture_vec_output::<u32>)
             .register(app.world_mut());
 
-        // Test 1: Initial State. The initial `Replace` diff should be received and
-        // processed.
-        app.update();
-        let expected_initial_state: BTreeMap<_, _> =
-            [(1, "one".to_string()), (2, "two".to_string())].into_iter().collect();
-        assert_eq!(
-            get_output::<BTreeMap<u32, String>>(app.world_mut()),
-            Some(expected_initial_state.clone()),
-            "Initial state was not reconstructed correctly"
-        );
+        // Local mirror of the key state for verification.
+        let mut current_keys: Vec<u32> = vec![];
 
-        // Test 2: Batched Mutations. We'll perform multiple operations before flushing to
-        // test batch processing.
+        // --- 2. Test Initial State ---
+        app.update();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+        assert_eq!(
+            diffs[0],
+            VecDiff::Replace { values: vec![1, 3, 4] },
+            "Initial state should be a Replace with sorted keys."
+        );
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert_eq!(current_keys, vec![1, 3, 4]);
+
+        // --- 3. Test Insert ---
+        // Insert a key that goes in the middle.
+        source_map.write().insert(2, 'b');
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::InsertAt { index: 1, value: 2 });
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert_eq!(current_keys, vec![1, 2, 3, 4]);
+
+        // Insert a key at the beginning.
+        source_map.write().insert(0, 'z');
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::InsertAt { index: 0, value: 0 });
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert_eq!(current_keys, vec![0, 1, 2, 3, 4]);
+
+        // --- 4. Test Update (No Key Change) ---
+        // This should produce NO diffs for the keys vector.
+        source_map.write().insert(3, 'C'); // Update value for key 3
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert!(diffs.is_empty(), "Updating a value should not produce a key diff.");
+        assert_eq!(current_keys, vec![0, 1, 2, 3, 4]); // State unchanged
+
+        // --- 5. Test Remove ---
+        // Remove key '3' from the middle of the sorted list.
+        source_map.write().remove(&3);
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 3 }); // '3' was at index 3
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert_eq!(current_keys, vec![0, 1, 2, 4]);
+
+        // --- 6. Test Batched Diffs ---
         {
             let mut writer = source_map.write();
-
-            // Insert
-            writer.insert(3, "three".to_string());
-
-            // Update
-            writer.insert(1, "one_v2".to_string());
-
-            // Remove
-            writer.remove(&2);
+            writer.remove(&1); // current_keys should become [0, 2, 4]
+            writer.insert(5, 'e'); // current_keys should become [0, 2, 4, 5]
         }
         source_map.flush_into_world(app.world_mut());
         app.update();
-        let expected_batched_state: BTreeMap<_, _> = [(1, "one_v2".to_string()), (3, "three".to_string())]
-            .into_iter()
-            .collect();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
         assert_eq!(
-            get_output::<BTreeMap<u32, String>>(app.world_mut()),
-            Some(expected_batched_state.clone()),
-            "State after batched mutations was not reconstructed correctly"
+            diffs,
+            vec![VecDiff::RemoveAt { index: 1 }, VecDiff::InsertAt { index: 3, value: 5 }],
+            "Batched diffs were not processed correctly."
+        );
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert_eq!(
+            current_keys,
+            vec![0, 2, 4, 5],
+            "State after batched diffs is incorrect."
         );
 
-        // Test 3: Clear. The `Clear` diff should result in an empty map.
+        // --- 7. Test Clear ---
         source_map.write().clear();
         source_map.flush_into_world(app.world_mut());
         app.update();
-        let expected_cleared_state: BTreeMap<u32, String> = BTreeMap::new();
+        let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::Clear);
+        apply_diffs_to_vec(&mut current_keys, &diffs);
+        assert!(current_keys.is_empty());
+
+        // --- 8. Cleanup ---
+        handle.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_signal_vec_entries() {
+        // --- 1. Setup ---
+        let mut app = create_test_app();
+        app.init_resource::<SignalVecOutput<(u32, char)>>(); // Entries are (u32, char)
+
+        // Start with unsorted data to verify initial sort.
+        let source_map = MutableBTreeMap::from([(3, 'c'), (1, 'a'), (4, 'd')]);
+
+        let entries_signal = source_map.signal_vec_entries();
+        let handle = entries_signal
+            .for_each(capture_vec_output::<(u32, char)>)
+            .register(app.world_mut());
+
+        // Local mirror of the entry state for verification.
+        let mut current_entries: Vec<(u32, char)> = vec![];
+
+        // --- 2. Test Initial State ---
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
         assert_eq!(
-            get_output::<BTreeMap<u32, String>>(app.world_mut()),
-            Some(expected_cleared_state.clone()),
-            "State after Clear was not reconstructed correctly"
+            diffs[0],
+            VecDiff::Replace {
+                values: vec![(1, 'a'), (3, 'c'), (4, 'd')]
+            },
+            "Initial state should be a Replace with sorted entries."
         );
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert_eq!(current_entries, vec![(1, 'a'), (3, 'c'), (4, 'd')]);
+
+        // --- 3. Test Insert ---
+        // Insert an entry that goes in the middle of the sorted list.
+        source_map.write().insert(2, 'b');
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(
+            diffs[0],
+            VecDiff::InsertAt {
+                index: 1,
+                value: (2, 'b')
+            }
+        );
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert_eq!(current_entries, vec![(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]);
+
+        // --- 4. Test Update ---
+        // Update the value for an existing key. The index should remain the same.
+        source_map.write().insert(3, 'C'); // Update value for key 3
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(
+            diffs[0],
+            VecDiff::UpdateAt {
+                index: 2, // '3' is at index 2 in the sorted list
+                value: (3, 'C')
+            }
+        );
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert_eq!(current_entries, vec![(1, 'a'), (2, 'b'), (3, 'C'), (4, 'd')]);
+
+        // --- 5. Test Remove ---
+        // Remove key '1' from the beginning of the sorted list.
+        source_map.write().remove(&1);
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 }); // '1' was at index 0
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert_eq!(current_entries, vec![(2, 'b'), (3, 'C'), (4, 'd')]);
+
+        // --- 6. Test Batched Diffs ---
+        {
+            let mut writer = source_map.write();
+            writer.remove(&4); // current_entries should become [(2, 'b'), (3, 'C')]
+            writer.insert(0, 'z'); // current_entries should become [(0, 'z'), (2, 'b'), (3, 'C')]
+        }
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(
+            diffs,
+            vec![
+                VecDiff::RemoveAt { index: 2 }, // '4' was at index 2
+                VecDiff::InsertAt {
+                    index: 0,
+                    value: (0, 'z')
+                }  // '0' is inserted at index 0
+            ],
+            "Batched diffs were not processed correctly."
+        );
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert_eq!(
+            current_entries,
+            vec![(0, 'z'), (2, 'b'), (3, 'C')],
+            "State after batched diffs is incorrect."
+        );
+
+        // --- 7. Test Clear ---
+        source_map.write().clear();
+        source_map.flush_into_world(app.world_mut());
+        app.update();
+        let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0], VecDiff::Clear);
+        apply_diffs_to_vec(&mut current_entries, &diffs);
+        assert!(current_entries.is_empty());
+
+        // --- 8. Cleanup ---
         handle.cleanup(app.world_mut());
     }
 }

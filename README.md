@@ -21,7 +21,7 @@ The runtime of jonmo is quite simple; every frame, the outputs of systems are fo
 - `no_std` *always*
 
 ## examples
-```rust no_run
+```rust,no_run
 //! Simple counter example, ported from a similar example in the `haalka` UI library.
 //!
 //! This example demonstrates the fundamental concepts of `jonmo` for building
@@ -33,9 +33,8 @@ The runtime of jonmo is quite simple; every frame, the outputs of systems are fo
 //! 2. **Declarative UI with `JonmoBuilder`**: The entire UI tree is defined up-front in a clean,
 //!    declarative style.
 //!
-//! 3. **The `LazyEntity` Pattern**: entities (like buttons and text) can refer to the
-//!    state-holding entity *before* it has been spawned, solving a common ordering problem in UI
-//!    construction.
+//! 3. **The `LazyEntity` Pattern**: entities (like buttons and text) can refer to the state-holding
+//!    entity *before* it has been spawned, solving a common ordering problem in UI construction.
 //!
 //! 4. **Reactivity with `component_signal`**: A signal is created that reads the state component.
 //!    Its output is then used to reactively update other components, like the `Text` for the
@@ -119,9 +118,10 @@ fn ui_root() -> JonmoBuilder {
             // This `JonmoBuilder` creates the text display for the counter value.
             JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
                 // --- Reactivity ---
-                // `component_signal` is core fixture of `jonmo`'s reactivity. It takes a signal as an argument and uses
-                // its output to insert or update a component on the entity being built. Here, we're creating a signal
-                // that will produce a `Text` component whenever the counter changes.
+                // `component_signal` is a core fixture of `jonmo`'s reactivity. It takes a signal as an argument and
+                // uses its output to insert or update a component on the entity being built. Here,
+                // we're creating a signal that will produce a `Text` component whenever the counter
+                // changes.
                 .component_signal(
                     // `SignalBuilder::from_component_lazy` creates a signal that reactively reads a component from an
                     // entity that doesn't exist yet, identified by our `LazyEntity`.

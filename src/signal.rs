@@ -193,7 +193,7 @@ where
     }
 }
 
-/// Signal graph node that terminates after forwarding a single upstream value, see
+/// Signal graph node that terminates forever after forwarding a single upstream value, see
 /// [`.first`](SignalExt::first).
 #[derive(Clone)]
 pub struct First<Upstream>
@@ -632,31 +632,35 @@ impl SignalBuilder {
     }
 
     /// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
-    /// [`Entity`]. Passing `0` to `generation` will output the [`Entity`] itself.
+    /// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
+    /// output the [`Entity`] itself.
     pub fn from_ancestor(entity: Entity, generations: usize) -> Map<Source<Entity>, Entity> {
         Self::from_entity(entity).map(ancestor_map(generations))
     }
 
     /// Creates a [`Source`] signal from a [`LazyEntity`]'s `generations`-th generation ancestor's
-    /// [`Entity`]. Passing `0` to `generation` will output the [`LazyEntity`]'s  [`Entity`] itself.
+    /// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
+    /// output the [`LazyEntity`]'s  [`Entity`] itself.
     pub fn from_ancestor_lazy(entity: LazyEntity, generations: usize) -> Map<Source<Entity>, Entity> {
         Self::from_lazy_entity(entity).map(ancestor_map(generations))
     }
 
-    /// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`]. Passing `0` to
-    /// `generation` will output the [`Entity`] itself.
+    /// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`], terminating for frames
+    /// where it does not exist. Passing `0` to `generation` will output the [`Entity`] itself.
     pub fn from_parent(entity: Entity) -> Map<Source<Entity>, Entity> {
         Self::from_ancestor(entity, 1)
     }
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`]. Passing `0` to
-    /// `generation` will output the [`LazyEntity`]'s [`Entity`] itself.
+    /// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`], terminating for
+    /// frames where it does not exist. Passing `0` to `generation` will output the
+    /// [`LazyEntity`]'s [`Entity`] itself.
     pub fn from_parent_lazy(entity: LazyEntity) -> Map<Source<Entity>, Entity> {
         Self::from_ancestor_lazy(entity, 1)
     }
 
-    /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating if the
-    /// [`Entity`] does not exist or the [`Component`] does not exist on the [`Entity`].
+    /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating for the
+    /// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
+    /// [`Entity`].
     pub fn from_component<C>(entity: Entity) -> Source<C>
     where
         C: Component + Clone,
@@ -664,9 +668,9 @@ impl SignalBuilder {
         Self::from_system(move |_: In<()>, components: Query<&C>| components.get(entity).ok().cloned())
     }
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating if the
-    /// [`Entity`] does not exist or the [`Component`] does not exist on the corresponding
-    /// [`Entity`].
+    /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating for the
+    /// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
+    /// corresponding [`Entity`].
     pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
     where
         C: Component + Clone,
@@ -692,7 +696,8 @@ impl SignalBuilder {
         Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity.get()).ok().cloned()))
     }
 
-    /// Creates a signal from a [`Resource`], terminating if the [`Resource`] does not exist.
+    /// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
+    /// exist.
     pub fn from_resource<R>() -> Source<R>
     where
         R: Resource + Clone,
@@ -1596,7 +1601,7 @@ pub trait SignalExt: Signal {
     }
 
     /// If this [`Signal`] outputs [`true`], output the result of some [`System`], otherwise
-    /// terminate for this frame.
+    /// terminate for the frame.
     ///
     /// # Example
     ///
@@ -1644,7 +1649,7 @@ pub trait SignalExt: Signal {
     }
 
     /// If this [`Signal`] outputs [`false`], output the result of some [`System`], otherwise
-    /// terminate for this frame.
+    /// terminate for the frame.
     ///
     /// # Example
     ///
@@ -1744,7 +1749,7 @@ pub trait SignalExt: Signal {
     }
 
     /// If this [`Signal`] outputs [`Some`], output the result of some [`System`] which takes [`In`]
-    /// the [`Some`] value, otherwise terminate for this frame.
+    /// the [`Some`] value, otherwise terminate for the frame.
     ///
     /// # Example
     ///
@@ -1790,7 +1795,7 @@ pub trait SignalExt: Signal {
     }
 
     /// If this [`Signal`] outputs [`None`], output the result of some [`System`], otherwise
-    /// terminate for this frame.
+    /// terminate for the frame.
     ///
     /// # Example
     ///
@@ -1972,7 +1977,7 @@ mod tests {
         prelude::{MutableVec, SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
         signal_vec::VecDiff,
-        utils::SSs,
+        utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
 
@@ -1985,7 +1990,7 @@ mod tests {
     use core::time::Duration;
 
     // Helper component and resource for testing Add Default
-    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
+    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default, Resource)]
     struct TestData(i32);
 
     #[derive(Resource, Default, Debug)]
@@ -2022,6 +2027,227 @@ mod tests {
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
         signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_map_in() {
+        // === Part 1: Basic Infallible Mapping ===
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<String>>();
+        let signal = SignalBuilder::from_system(|_: In<()>| 10i32)
+            .map_in(|x: i32| format!("Value: {x}"))
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("Value: 10".to_string()),
+            "Infallible mapping from i32 to String failed."
+        );
+        signal.cleanup(app.world_mut());
+
+        // Reset for next test part
+        app.world_mut().resource_mut::<SignalOutput<String>>().0 = None;
+
+        // === Part 2: Fallible Mapping (Some/None) ===
+        app.init_resource::<SignalOutput<i32>>();
+        // Note: .pop() removes from the end, so the sequence is 4, 3, 2, 1
+        let inputs = Arc::new(Mutex::new(vec![1, 2, 3, 4]));
+        let source_signal = SignalBuilder::from_system(clone!((inputs) move |_: In<()>| {
+            inputs.lock().unwrap().pop()
+        }));
+
+        let signal = source_signal
+            .map_in(|x: i32| if x % 2 == 0 { Some(x * 10) } else { None })
+            .map(capture_output::<i32>)
+            .register(app.world_mut());
+
+        // Input: 4 (even) -> Some(40)
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(40), "Failed on first valid item.");
+
+        // Input: 3 (odd) -> None. Output should remain 40.
+        app.update();
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            Some(40),
+            "Output should not change when closure returns None."
+        );
+
+        // Input: 2 (even) -> Some(20)
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(20), "Failed on second valid item.");
+
+        // Input: 1 (odd) -> None. Output should remain 20.
+        app.update();
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            Some(20),
+            "Output should not change on subsequent None."
+        );
+        signal.cleanup(app.world_mut());
+
+        // === Part 3: FnMut Stateful Closure ===
+        app.init_resource::<SignalOutput<()>>(); // We don't care about the value, just that it runs
+        let call_count = Arc::new(Mutex::new(0));
+        let signal = SignalBuilder::from_system(|_: In<()>| ())
+            .map_in(clone!((call_count) move |_: ()| {
+                *call_count.lock().unwrap() += 1;
+            }))
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        app.update();
+        app.update();
+
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            3,
+            "FnMut closure should be called on each update"
+        );
+        signal.cleanup(app.world_mut());
+
+        // === Part 4: Cleanup ===
+        app.init_resource::<SignalOutput<i32>>();
+        let signal = SignalBuilder::from_system(|_: In<()>| 123)
+            .map_in(|x| x)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(123));
+
+        // Cleanup and reset
+        signal.cleanup(app.world_mut());
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+
+        app.update();
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            None,
+            "Signal should not fire after cleanup"
+        );
+    }
+
+    #[test]
+    fn test_map_in_ref() {
+        // === Part 1: Basic Infallible Mapping ===
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<String>>();
+        let signal = SignalBuilder::from_system(|_: In<()>| 42i32)
+            // Use a function that takes a reference, the primary use case for map_in_ref.
+            .map_in_ref(ToString::to_string)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("42".to_string()),
+            "Infallible mapping by reference failed."
+        );
+        signal.cleanup(app.world_mut());
+
+        // Reset for next test part
+        app.world_mut().resource_mut::<SignalOutput<String>>().0 = None;
+
+        // === Part 2: Fallible Mapping (Some/None) ===
+        // Note: .pop() removes from the end, so the sequence is "FOUR", "three", "TWO", "one"
+        let inputs = Arc::new(Mutex::new(vec!["one", "TWO", "three", "FOUR"]));
+        let source_signal = SignalBuilder::from_system(clone!((inputs) move |_: In<()>| {
+            inputs.lock().unwrap().pop()
+        }));
+
+        let signal = source_signal
+            // The closure takes a reference to the item. Since the item is &'static str,
+            // the closure gets &&'static str.
+            .map_in_ref(|s: &&'static str| {
+                if s.chars().all(char::is_uppercase) {
+                    Some(s.to_lowercase())
+                } else {
+                    None
+                }
+            })
+            .map(capture_output::<String>)
+            .register(app.world_mut());
+
+        // Input: "FOUR" (uppercase) -> Some("four")
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("four".to_string()),
+            "Failed on first valid item."
+        );
+
+        // Input: "three" (lowercase) -> None. Output should remain "four".
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("four".to_string()),
+            "Output should not change when closure returns None."
+        );
+
+        // Input: "TWO" (uppercase) -> Some("two")
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("two".to_string()),
+            "Failed on second valid item."
+        );
+
+        // Input: "one" (lowercase) -> None. Output should remain "two".
+        app.update();
+        assert_eq!(
+            get_output::<String>(app.world()),
+            Some("two".to_string()),
+            "Output should not change on subsequent None."
+        );
+        signal.cleanup(app.world_mut());
+
+        // === Part 3: FnMut Stateful Closure ===
+        app.init_resource::<SignalOutput<()>>();
+        let call_count = Arc::new(Mutex::new(0));
+        let signal = SignalBuilder::from_system(|_: In<()>| 1i32)
+            .map_in_ref(clone!((call_count) move |_: &i32| {
+                *call_count.lock().unwrap() += 1;
+            }))
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        app.update();
+        app.update();
+
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            3,
+            "FnMut closure should be called on each update"
+        );
+        signal.cleanup(app.world_mut());
+
+        // === Part 4: Cleanup ===
+        app.init_resource::<SignalOutput<i32>>();
+        let signal = SignalBuilder::from_system(|_: In<()>| 123)
+            // Simple dereference to pass the value through
+            .map_in_ref(|x: &i32| *x)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(123));
+
+        // Cleanup and reset
+        signal.cleanup(app.world_mut());
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+
+        app.update();
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            None,
+            "Signal should not fire after cleanup"
+        );
     }
 
     #[test]
@@ -2285,6 +2511,24 @@ mod tests {
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(2));
         signal.cleanup(app.world_mut());
+    }
+
+    // Ensure these helpers are also present in the tests module.
+    #[derive(Resource, Default, Debug)]
+    struct SignalVecOutput<T: SSs + Clone + fmt::Debug>(Vec<VecDiff<T>>);
+
+    fn capture_vec_output<T>(In(diffs): In<Vec<VecDiff<T>>>, mut output: ResMut<SignalVecOutput<T>>)
+    where
+        T: SSs + Clone + fmt::Debug,
+    {
+        output.0.extend(diffs);
+    }
+
+    fn get_and_clear_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
+        world
+            .get_resource_mut::<SignalVecOutput<T>>()
+            .map(|mut res| core::mem::take(&mut res.0))
+            .unwrap_or_default()
     }
 
     #[test]
@@ -2809,7 +3053,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_signal_vec_from_vec_signal() {
+    fn test_to_signal_vec() {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<i32>>();
         let source_vec = Arc::new(Mutex::new(None::<Vec<i32>>));
@@ -2858,22 +3102,328 @@ mod tests {
         handle.cleanup(app.world_mut());
     }
 
-    // Ensure these helpers are also present in the tests module.
-    #[derive(Resource, Default, Debug)]
-    struct SignalVecOutput<T: SSs + Clone + fmt::Debug>(Vec<VecDiff<T>>);
+    #[test]
+    fn test_builder_from_system() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
 
-    fn capture_vec_output<T>(In(diffs): In<Vec<VecDiff<T>>>, mut output: ResMut<SignalVecOutput<T>>)
-    where
-        T: SSs + Clone + fmt::Debug,
-    {
-        output.0.extend(diffs);
+        let signal = SignalBuilder::from_system(|_: In<()>| 42)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+        signal.cleanup(app.world_mut());
     }
 
-    fn get_and_clear_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
-        world
-            .get_resource_mut::<SignalVecOutput<T>>()
-            .map(|mut res| core::mem::take(&mut res.0))
-            .unwrap_or_default()
+    #[test]
+    fn test_builder_from_entity() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let test_entity = app.world_mut().spawn_empty().id();
+        let signal = SignalBuilder::from_entity(test_entity)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(test_entity));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_lazy_entity() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let lazy = LazyEntity::new();
+        let test_entity = app.world_mut().spawn_empty().id();
+        lazy.set(test_entity);
+
+        let signal = SignalBuilder::from_lazy_entity(lazy)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(test_entity));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_ancestor() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let grandparent = app.world_mut().spawn_empty().id();
+        let parent = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(grandparent).add_child(parent);
+        app.world_mut().entity_mut(parent).add_child(child);
+
+        // Test self (generations = 0)
+        let signal_self = SignalBuilder::from_ancestor(child, 0)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(child));
+        signal_self.cleanup(app.world_mut());
+
+        // Test parent (generations = 1)
+        let signal_parent = SignalBuilder::from_ancestor(child, 1)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(parent));
+        signal_parent.cleanup(app.world_mut());
+
+        // Test grandparent (generations = 2)
+        let signal_gp = SignalBuilder::from_ancestor(child, 2)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(grandparent));
+        signal_gp.cleanup(app.world_mut());
+
+        // Test invalid generation
+        app.world_mut().resource_mut::<SignalOutput<Entity>>().0 = None;
+        let signal_invalid = SignalBuilder::from_ancestor(child, 3)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Entity>(app.world()),
+            None,
+            "Should terminate for invalid ancestor"
+        );
+        signal_invalid.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_ancestor_lazy() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let lazy_child = LazyEntity::new();
+        let grandparent = app.world_mut().spawn_empty().id();
+        let parent = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(grandparent).add_child(parent);
+        app.world_mut().entity_mut(parent).add_child(child);
+        lazy_child.set(child);
+
+        // Test parent (generations = 1)
+        let signal_parent = SignalBuilder::from_ancestor_lazy(lazy_child.clone(), 1)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(parent));
+        signal_parent.cleanup(app.world_mut());
+
+        // Test grandparent (generations = 2)
+        let signal_gp = SignalBuilder::from_ancestor_lazy(lazy_child, 2)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(grandparent));
+        signal_gp.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_parent() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let parent = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(parent).add_child(child);
+
+        let signal = SignalBuilder::from_parent(child)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(parent));
+        signal.cleanup(app.world_mut());
+
+        // Test no parent
+        app.world_mut().resource_mut::<SignalOutput<Entity>>().0 = None;
+        let no_parent_entity = app.world_mut().spawn_empty().id();
+        let signal_no_parent = SignalBuilder::from_parent(no_parent_entity)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Entity>(app.world()),
+            None,
+            "Should terminate for entity with no parent"
+        );
+        signal_no_parent.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_parent_lazy() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
+
+        let lazy_child = LazyEntity::new();
+        let parent = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(parent).add_child(child);
+        lazy_child.set(child);
+
+        let signal = SignalBuilder::from_parent_lazy(lazy_child)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Entity>(app.world()), Some(parent));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_component() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        // Test component exists
+        let entity_with = app.world_mut().spawn(TestData(42)).id();
+        let signal_with = SignalBuilder::from_component::<TestData>(entity_with)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+        signal_with.cleanup(app.world_mut());
+
+        // Test component missing
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        let entity_without = app.world_mut().spawn_empty().id();
+        let signal_without = SignalBuilder::from_component::<TestData>(entity_without)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when component is missing"
+        );
+        signal_without.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_component_lazy() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        let lazy = LazyEntity::new();
+        let entity_with = app.world_mut().spawn(TestData(42)).id();
+        lazy.set(entity_with);
+
+        let signal = SignalBuilder::from_component_lazy::<TestData>(lazy)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_component_option() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<Option<TestData>>>();
+
+        // Test component exists
+        let entity_with = app.world_mut().spawn(TestData(42)).id();
+        let signal_with = SignalBuilder::from_component_option::<TestData>(entity_with)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(42))));
+        signal_with.cleanup(app.world_mut());
+
+        // Test component missing
+        let entity_without = app.world_mut().spawn_empty().id();
+        let signal_without = SignalBuilder::from_component_option::<TestData>(entity_without)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<TestData>>(app.world()),
+            Some(None),
+            "Should output Some(None) when component is missing"
+        );
+        signal_without.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_component_option_lazy() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<Option<TestData>>>();
+
+        let lazy = LazyEntity::new();
+        let entity_with = app.world_mut().spawn(TestData(42)).id();
+        lazy.set(entity_with);
+
+        let signal = SignalBuilder::from_component_option_lazy::<TestData>(lazy)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(42))));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_resource() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        // Test resource exists
+        app.insert_resource(TestData(42));
+        let signal_with = SignalBuilder::from_resource::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+        signal_with.cleanup(app.world_mut());
+
+        // Test resource missing
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.world_mut().remove_resource::<TestData>();
+        let signal_without = SignalBuilder::from_resource::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when resource is missing"
+        );
+        signal_without.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_resource_option() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<Option<TestData>>>();
+
+        // Test resource exists
+        app.insert_resource(TestData(42));
+        let signal_with = SignalBuilder::from_resource_option::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(42))));
+        signal_with.cleanup(app.world_mut());
+
+        // Test resource missing
+        app.world_mut().remove_resource::<TestData>();
+        let signal_without = SignalBuilder::from_resource_option::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<TestData>>(app.world()),
+            Some(None),
+            "Should output Some(None) when resource is missing"
+        );
+        signal_without.cleanup(app.world_mut());
     }
 
     #[test]

@@ -460,7 +460,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                         .map_in(move |color_filters: ColorFilters| color_filters.0.contains(&color))
                         .dedupe()
                 }))
-                .map_in(|(index, data)| item(index, data)),
+                .map_in(|(index, data)| item(index.dedupe(), data)),
         ),
     )
 }

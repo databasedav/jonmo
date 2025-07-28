@@ -249,7 +249,7 @@ pub(crate) fn process_signal_graph(world: &mut World) {
 /// Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`] will take care
 /// of this when the corresponding [`Entity`] is despawned, and using the
 /// [`JonmoBuilder`](super::builder::JonmoBuilder) will manage this internally.
-#[derive(Clone, Deref)]
+#[derive(Clone, Deref, Debug)]
 pub struct SignalHandle(pub SignalSystem);
 
 impl From<SignalSystem> for SignalHandle {
@@ -286,7 +286,7 @@ fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: 
 
 /// Stores [`SignalHandle`]s tied to the lifetime of some [`Entity`],
 /// [`.cleanup`](SignalHandle::cleanup)-ing them when the [`Entity`] is despawned.
-#[derive(Component, Default)]
+#[derive(Component, Default, Deref, Clone)]
 #[component(on_remove = cleanup_signal_handles)]
 pub struct SignalHandles(Vec<SignalHandle>);
 
