@@ -61,6 +61,7 @@ fn ui_root() -> JonmoBuilder {
             flex_direction: FlexDirection::Row,
             column_gap: Val::Px(15.0),
             align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(25.)),
             ..default()
         })
         .insert(Counter(0))
