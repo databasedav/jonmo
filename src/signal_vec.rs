@@ -473,7 +473,7 @@ fn spawn_filter_signal<T: Clone + SSs>(
     parent: Entity,
 ) -> (SignalHandle, bool) {
     let entity = LazyEntity::new();
-    let processor_system = clone!((entity) move | In(filter): In < bool >, world: & mut World | {
+    let processor_system = clone!((entity) move |In(filter): In<bool>, world: &mut World| {
         let self_entity = entity.get();
 
         // The processor might run after its parent has been cleaned up.
@@ -1252,7 +1252,7 @@ pub trait SignalVecExt: SignalVec {
                 .expect("map_signal's inner signal must emit an initial value");
             temp_handle.cleanup(world);
             let processor_entity = LazyEntity::new();
-            let processor_logic = clone!((processor_entity) move | In(value): In < Item >, world: & mut World | {
+            let processor_logic = clone!((processor_entity) move |In(value): In<Item>, world: &mut World| {
                 if let Some(item_index_comp) = world.get::<ItemIndex>(processor_entity.get()) {
                     let current_index = item_index_comp.0;
                     if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(queue_entity) {
@@ -1633,7 +1633,7 @@ pub trait SignalVecExt: SignalVec {
                 self
                     .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                         clone!(
-                            (parent_entity) move | In(source_diffs): In < Vec < VecDiff < Self:: Item >>>,
+                            (parent_entity) move |In(source_diffs): In<Vec<VecDiff<Self::Item>>>,
                             world: & mut World | {
                                 let parent = parent_entity.get();
                                 let mut generated_diffs = vec![];
@@ -1977,7 +1977,7 @@ pub trait SignalVecExt: SignalVec {
         let signal = LazySignal::new(move |world: &mut World| {
             let processor_entity_handle = LazyEntity::new();
             let processor_logic = clone!(
-                (processor_entity_handle) move | In(diffs): In < Vec < VecDiff < Self:: Item >>>,
+                (processor_entity_handle) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
                     let processor_entity = processor_entity_handle.get();
                     let mut state = world.get_mut::<EnumerateState>(processor_entity).unwrap();
@@ -1995,7 +1995,7 @@ pub trait SignalVecExt: SignalVec {
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
                         SignalBuilder::from_system(
-                            clone!((processor_entity_handle) move | _: In <() >, query: Query <& EnumerateState >| {
+                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState>| {
                                 Some(
                                     query
                                         .get(processor_entity_handle.get())
@@ -2583,8 +2583,8 @@ pub trait SignalVecExt: SignalVec {
             let create_index_signal = clone!((state_entity_handle) move | key: usize | {
                 SignalBuilder::from_system(
                     clone!(
-                        (state_entity_handle) move | _: In <() >,
-                        query: Query <& IntersperseState < Self:: Item >>| {
+                        (state_entity_handle) move |_: In<()>,
+                        query: Query<&IntersperseState<Self::Item>>| {
                             Some(
                                 query
                                     .get(state_entity_handle.get())
@@ -2598,7 +2598,7 @@ pub trait SignalVecExt: SignalVec {
 
             // 4. Define the main processor logic that handles incoming diffs.
             let processor_logic = clone!(
-                (state_entity_handle, create_index_signal) move | In(diffs): In < Vec < VecDiff < Self:: Item >>>,
+                (state_entity_handle, create_index_signal) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
                     let state_entity = state_entity_handle.get();
                     let mut out_diffs = Vec::new();
@@ -2917,7 +2917,6 @@ pub trait SignalVecExt: SignalVec {
                                     state.values = new_values;
                                     state.sorted_indices = (0..state.values.len()).collect();
 
-                                    // Fix: Clone the values _before_ the sort to avoid borrow conflict.
                                     let values_for_sort = state.values.clone();
                                     state.sorted_indices.sort_unstable_by(|&a, &b| {
                                         let val_a = values_for_sort[a].clone();
@@ -3057,8 +3056,8 @@ pub trait SignalVecExt: SignalVec {
     }
 
     /// Sorts this [`SignalVec`] with a key extraction [`System`] which takes [`In`] an
-    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which
-    /// the output will be sorted by.
+    /// [`Item`](SignalVec::Item) and returns a key `K` that implements [`Ord`] which the output
+    /// will be sorted by.
     ///
     /// # Example
     ///
@@ -3103,7 +3102,6 @@ pub trait SignalVecExt: SignalVec {
             }
 
             let SignalHandle(signal) = self
-                // Fix 1: Add turbofish to specify the generic type for `for_each`.
                 .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                           world: &mut World,
@@ -3119,7 +3117,6 @@ pub trait SignalVecExt: SignalVec {
                                     state.keys = state.values.iter().map(|v| get_key(world, v.clone())).collect();
                                     state.sorted_indices = (0..state.values.len()).collect();
 
-                                    // Fix 2: Clone keys before sorting to avoid mutable/immutable borrow conflict.
                                     let keys_for_sort = state.keys.clone();
                                     state
                                         .sorted_indices
@@ -3736,7 +3733,7 @@ impl<T> MutableVec<T> {
 
             // This is the system for the one-and-only broadcaster. It just drains diffs that `flush` has put
             // into its component.
-            let source_system_logic = clone!((self_entity) move | _: In <() >, world: & mut World | {
+            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
                 if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()) {
                     if diffs.0.is_empty() {
                         None

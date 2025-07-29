@@ -24,7 +24,7 @@ fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
 /// reactive components and children using a declarative
 /// [fluent](https://en.wikipedia.org/wiki/Fluent_interface) builder pattern. All
 /// its methods are deferred until the corresponding [`Entity`] is spawned so its
-/// state _and how that state should change_ depending on the state of the
+/// state *and how that state should change* depending on the state of the
 /// [`World`] can be specified up front, in a tidy colocated package, without a
 /// `&mut World` or [`Commands`].
 ///
@@ -236,8 +236,9 @@ impl JonmoBuilder {
     } */
 
     /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
-    /// `generations`-th generation ancestor and returns a [`Signal`]. Passing `0` to `generations`
-    /// will output this builder's [`Entity`] itself.
+    /// `generations`-th generation ancestor if it exists (terminating for the frame otherwise) and
+    /// returns a [`Signal`]. Passing `0` to `generations` will output this builder's [`Entity`]
+    /// itself.
     ///
     /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn signal_from_ancestor<S, F>(self, generations: usize, f: F) -> Self
@@ -248,8 +249,8 @@ impl JonmoBuilder {
         self.signal_from_entity(move |signal| f(signal.map(ancestor_map(generations))))
     }
 
-    /// Run a function that takes a [`Signal`] which outputs this builder's parent's [`Entity`] and
-    /// returns a [`Signal`].
+    /// Run a function that takes a [`Signal`] which outputs this builder's parent's [`Entity`] if
+    /// it exists (terminating for the frame otherwise) and returns a [`Signal`].
     ///
     /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn signal_from_parent<S, F>(self, f: F) -> Self
@@ -262,8 +263,6 @@ impl JonmoBuilder {
 
     /// Reactively set this builder's [`Entity`]'s `C` [`Component`] with a [`Signal`] that outputs
     /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
-    /// If the [`Signal`]'s output is infallible, wrapping the result in an [`Option`] is
-    /// unnecessary.
     pub fn component_signal<C, S>(self, signal: S) -> Self
     where
         C: Component + Clone,

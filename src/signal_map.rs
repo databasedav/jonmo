@@ -906,7 +906,7 @@ impl<K, V> MutableBTreeMap<K, V> {
 
             // This is the system for the one-and-only broadcaster. It just drains diffs that
             // `flush` has put into its component.
-            let source_system_logic = clone!((self_entity) move | _: In <() >, world: & mut World | {
+            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
                 if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<K, V>>(self_entity.get()) {
                     if diffs.0.is_empty() {
                         None
@@ -943,42 +943,47 @@ impl<K, V> MutableBTreeMap<K, V> {
         let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move | world: & mut World | {
             let self_entity = LazyEntity::new();
             let broadcaster_system = broadcaster_signal.register(world);
+
             let replay_system_logic =
-                clone!((self_entity) move | In(upstream_diffs): In < Vec < MapDiff < K, V >>>, world: & mut World | {
-                    // Get the locally queued diffs (the initial 'Replace' diff).
-                    let mut diffs =
-                        world
-                            .get_entity_mut(self_entity.get())
-                            .ok()
-                            .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
-                            .map(|queued| queued.0)
-                            .unwrap_or_default();
-
-                    // Add the diffs from upstream (the broadcaster).
-                    diffs.extend(upstream_diffs);
-
-                    // If there are any diffs to process, return them.
-                    if diffs.is_empty() {
-                        None
-                    } else {
-                        Some(diffs)
+                clone!(
+                    (self_entity) move | In(upstream_diffs): In<Vec<MapDiff<K, V>>>,
+                    world: & mut World,
+                    mut has_run: Local < bool >| {
+                        if !*has_run {
+                            // First run: This is triggered manually by the `MapReplayTrigger`.
+                            // It processes the initial state queued on its own entity and ignores upstream.
+                            *has_run = true;
+                            let initial_diffs =
+                                world
+                                    .get_entity_mut(self_entity.get())
+                                    .ok()
+                                    .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
+                                    .map(|queued| queued.0)
+                                    .unwrap_or_default();
+                            if initial_diffs.is_empty() {
+                                None
+                            } else {
+                                Some(initial_diffs)
+                            }
+                        } else {
+                            // Subsequent runs: Triggered by the broadcaster. Process upstream diffs.
+                            if upstream_diffs.is_empty() {
+                                None
+                            } else {
+                                Some(upstream_diffs)
+                            }
+                        }
                     }
-                });
+                );
 
             // 1. Register the replay system.
             let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
             self_entity.set(*replay_signal);
 
-            // This closure is the core of the replay trigger. It checks if the broadcaster is
-            // idle.
+            // The trigger now unconditionally pokes the replay system with an empty input.
+            // The replay system's own logic will handle whether it's the first run or not.
             let trigger = Box::new(move |world: &mut World| {
-                // If the broadcaster's queue has no diffs, it's an idle frame, so we trigger a
-                // replay.
-                if world.get::<QueuedMapDiffs<K, V>>(*broadcaster_system).is_some_and(|q| q.0.is_empty()) {
-                    // Trigger with an empty vec, forcing the replay_system_logic to check its own
-                    // queue.
-                    process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
-                }
+                process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
             });
 
             // 2. Queue the initial state for this new subscriber.

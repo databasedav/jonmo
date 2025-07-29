@@ -1333,7 +1333,14 @@ pub trait SignalExt: Signal {
     /// world.insert_resource(Toggle(false));
     /// let signal = SignalBuilder::from_resource::<Toggle>()
     ///     .dedupe()
-    ///     .switch(move |In(toggle): In<Toggle>| if toggle.0 { SignalBuilder::from_system(|_: In<()>| 1) } else { SignalBuilder::from_system(|_: In<()>| 2) });
+    ///     .switch(move |In(toggle): In<Toggle>| {
+    ///         if toggle.0 {
+    ///             SignalBuilder::from_system(|_: In<()>| 1)
+    ///         } else {
+    ///             SignalBuilder::from_system(|_: In<()>| 2)
+    ///         }
+    ///     }
+    /// );
     /// // `signal` outputs `2`
     /// world.resource_mut::<Toggle>().0 = true;
     /// // `signal` outputs `1`
@@ -1351,47 +1358,36 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Dynamically switches to a new `SignalVec` based on the signal's output.
-    ///
-    /// Takes a `switcher` system that receives `In<Self::Item>` and returns a `SignalVec`. This
-    /// signal then behaves like the `SignalVec` returned by `switcher`.
-    ///
-    /// When the upstream signal emits a new value, the `switcher` is run again. If it returns a
-    /// _different_ `SignalVec` than the one currently active, a single `VecDiff::Replace` is
-    /// emitted, atomically clearing the old state and establishing the new one by polling the new
-    /// `SignalVec`'s current state.
-    ///
-    /// This is the idiomatic way to handle dynamic list sources, like sorting by different criteria
-    /// or showing different lists based on a UI mode. For this to work correctly, the `SignalVec`s
-    /// returned by the `switcher` should be "replayable" (like those from
-    /// [`MutableVec::signal_vec`](super::signal_vec::MutableVec::signal_vec)).
+    /// Maps this [`Signal`]'s output to a [`SignalVec`], switching to its output. Useful when the
+    /// reactive list target changes depending on some other state.
     ///
     /// # Example
     ///
     /// ```
+    /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// # use bevy::prelude::*;
-    /// # use jonmo::prelude::*;
-    /// # use jonmo::signal::SwitchSignalVecExt;
-    ///
-    /// #[derive(Clone, Copy, PartialEq, Eq)]
-    /// enum ListMode { A, B }
+    /// #[derive(Resource, Clone, PartialEq)]
+    /// struct Toggle(bool);
     ///
     /// let list_a = MutableVec::from([1, 2, 3]);
     /// let list_b = MutableVec::from([10, 20]);
     ///
-    /// // A signal that controls which list is active
-    /// let mode_signal = SignalBuilder::from_system(|_: In<()>| ListMode::A);
-    ///
-    /// let switched_list = mode_signal.switch_signal_vec(move |In(mode): In<ListMode>| {
-    ///     match mode {
-    ///         ListMode::A => list_a.signal_vec(),
-    ///         ListMode::B => list_b.signal_vec(),
+    /// let mut world = World::new();
+    /// world.insert_resource(Toggle(false));
+    /// let signal = SignalBuilder::from_resource::<Toggle>()
+    ///     .dedupe()
+    ///     .switch_signal_vec(move |In(toggle): In<Toggle>| {
+    ///         if toggle.0 {
+    ///             list_a.signal_vec()
+    ///         } else {
+    ///             list_b.signal_vec()
+    ///         }
     ///     }
-    /// });
-    /// // `switched_list` will now emit diffs corresponding to `list_a` or `list_b`
-    /// // based on the value of `mode_signal`.
+    /// );
+    /// // `signal` outputs `SignalVec -> [10, 20]`
+    /// world.resource_mut::<Toggle>().0 = true;
+    /// // `signal` outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn switch_signal_vec<S, F, M>(self, switcher: F) -> SwitchSignalVec<Self, S>
     where
@@ -1409,7 +1405,7 @@ pub trait SignalExt: Signal {
             // The output system is a "poller". It runs when poked and drains its own queue.
             let output_system_entity = LazyEntity::new();
             let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move | _: In <() >, mut q: Query <& mut SwitcherQueue < S:: Item >>| {
+                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
                     if let Ok(mut queue) = q.get_mut(output_system_entity.get()) {
                         if queue.0.is_empty() {
                             None
@@ -2315,7 +2311,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
         let values = Arc::new(Mutex::new(vec![1, 1, 2, 3, 3, 3, 4]));
-        let signal = SignalBuilder::from_system(clone!((values) move | _: In <() >| {
+        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -2324,7 +2320,7 @@ mod tests {
             }
         }))
         .dedupe()
-        .map(clone!((counter) move | In(val): In < i32 >| {
+        .map(clone!((counter) move |In(val): In<i32>| {
             *counter.lock().unwrap() += 1;
             val
         }))
@@ -2345,7 +2341,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
         let values = Arc::new(Mutex::new(vec![10, 20, 30]));
-        let signal = SignalBuilder::from_system(clone!((values) move | _: In <() >| {
+        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -2354,7 +2350,7 @@ mod tests {
             }
         }))
         .first()
-        .map(clone!((counter) move | In(val): In < i32 >| {
+        .map(clone!((counter) move |In(val): In<i32>| {
             *counter.lock().unwrap() += 1;
             val
         }))
@@ -2556,7 +2552,7 @@ mod tests {
 
         // The signal chain under test.
         let switched_signal = control_signal.dedupe().switch_signal_vec(
-            clone!((list_a, list_b) move | In(selector): In < ListSelector >| match selector {
+            clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
                 ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
                 ListSelector:: B => list_b.signal_vec().boxed_clone(),
             }),
@@ -2660,7 +2656,7 @@ mod tests {
 
         // Throttle duration
         let throttle_duration = Duration::from_millis(100);
-        let signal = SignalBuilder::from_system(clone!((counter) move | _: In <() >| {
+        let signal = SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
             let mut c = counter.lock().unwrap();
             *c += 1;
 
@@ -2668,7 +2664,7 @@ mod tests {
             Some(*c)
         }))
         .throttle(throttle_duration)
-        .map(clone!((emit_count) move | In(val): In < i32 >| {
+        .map(clone!((emit_count) move |In(val): In<i32>| {
             let mut count = emit_count.lock().unwrap();
             *count += 1;
 
@@ -3058,7 +3054,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<i32>>();
         let source_vec = Arc::new(Mutex::new(None::<Vec<i32>>));
-        let source_signal = SignalBuilder::from_system(clone!((source_vec) move | _: In <() >| {
+        let source_signal = SignalBuilder::from_system(clone!((source_vec) move |_: In<()>| {
             source_vec.lock().unwrap().take()
         }));
         let signal_vec = source_signal.to_signal_vec();

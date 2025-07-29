@@ -124,13 +124,18 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                     column_gap: Val::Px(GAP),
                     ..default()
                 })
-                .children_signal_vec(items.signal_vec().enumerate().map_in(|(index, data)| item(index, data))),
+                .children_signal_vec(
+                    items
+                        .signal_vec()
+                        .enumerate()
+                        .map_in(|(index, data)| item(index.dedupe(), data)),
+                ),
             ),
         )
         .children_signal_vec(
             rows.signal_vec()
                 .enumerate()
-                .map_in(clone!((items) move |(index, _)| row(index, items.clone()))),
+                .map_in(clone!((items) move |(index, _)| row(index.dedupe(), items.clone()))),
         )
         .child(
             JonmoBuilder::from((
