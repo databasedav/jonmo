@@ -27,7 +27,6 @@ The runtime of jonmo is quite simple; every frame, the outputs of systems are fo
   <img src="https://raw.githubusercontent.com/databasedav/jonmo/fill/docs/static/counter.gif">
 </p>
 
-## examples
 ```rust,ignore
 //! Simple counter example, ported from a similar example in haalka.
 //!
