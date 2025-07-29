@@ -24,7 +24,7 @@ The runtime of jonmo is quite simple; every frame, the outputs of systems are fo
 
 ## examples
 <p align="center">
-  <img src="https://raw.githubusercontent.com/databasedav/jonmo/fill/docs/static/counter.gif">
+  <img src="https://raw.githubusercontent.com/databasedav/jonmo/main/docs/static/counter.gif">
 </p>
 
 ```rust,ignore
