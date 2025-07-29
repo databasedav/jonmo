@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 
 use bevy_platform::collections::HashMap;
 
-use bevy::prelude::*;
+use bevy::{prelude::*, window::WindowResolution};
 use jonmo::prelude::*;
 
 fn main() {
@@ -49,6 +49,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
+        justify_content: JustifyContent::Center,
         ..default()
     })
     .child(
@@ -56,7 +57,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(GAP * 2.),
             padding: UiRect::all(Val::Px(GAP * 2.)),
-            width: Val::Percent(100.),
+            width: Val::Px(WindowResolution::default().physical_width() as f32),
             justify_content: JustifyContent::Center,
             ..default()
         })
