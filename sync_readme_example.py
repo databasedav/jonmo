@@ -1,11 +1,23 @@
 import re
 
 # Read the content of counter.rs
-with open('examples/lifetime_list.rs', 'r') as file:
+with open('examples/counter.rs', 'r') as file:
     lines = file.readlines()
+
+def position(iterable, predicate):
+    for i, value in enumerate(iterable):
+        if predicate(value):
+            return i
+    return None
+
+mod_utils_line = position(lines, lambda line: line.startswith('mod utils'))
+lines = lines[:mod_utils_line] + lines[mod_utils_line + 3:]
 
 # Join the lines into a single string
 content = ''.join(lines)
+
+# Replace `example_plugin` with `((DefaultPlugins, JonmoPlugin))`
+content = re.sub(r'examples_plugin', '(DefaultPlugins, JonmoPlugin)', content)
 
 # Read the content of README.md
 with open('README.md', 'r') as file:
@@ -13,7 +25,7 @@ with open('README.md', 'r') as file:
 
 # Insert the content after the marker
 # Define the start and end markers for the Rust code block
-start_marker = '```rust no_run'
+start_marker = '```rust,ignore'
 end_marker = '```'
 
 # Find the start and end positions of the Rust code block

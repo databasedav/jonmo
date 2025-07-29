@@ -2,7 +2,11 @@
 #![allow(missing_docs)]
 
 use bevy::{color::palettes::css::*, prelude::*};
+use jonmo::JonmoPlugin;
 use rand::prelude::IndexedRandom;
+
+pub(crate) const BLUE: Color = Color::srgb(91. / 255., 206. / 255., 250. / 255.);
+pub(crate) const PINK: Color = Color::srgb(245. / 255., 169. / 255., 184. / 255.);
 
 pub(crate) static COLORS: &[Color] = &[
     bevy::prelude::Color::Srgba(ALICE_BLUE),
@@ -110,7 +114,7 @@ pub(crate) static COLORS: &[Color] = &[
     bevy::prelude::Color::Srgba(PAPAYA_WHIP),
     bevy::prelude::Color::Srgba(PEACHPUFF),
     bevy::prelude::Color::Srgba(PERU),
-    bevy::prelude::Color::Srgba(PINK),
+    bevy::prelude::Color::Srgba(bevy::color::palettes::css::PINK),
     bevy::prelude::Color::Srgba(PLUM),
     bevy::prelude::Color::Srgba(POWDER_BLUE),
     bevy::prelude::Color::Srgba(REBECCA_PURPLE),
@@ -142,4 +146,58 @@ pub(crate) static COLORS: &[Color] = &[
 pub(crate) fn random_color() -> Color {
     let mut rng = rand::rng();
     COLORS.choose(&mut rng).copied().unwrap()
+}
+
+#[allow(clippy::type_complexity)]
+fn mark_default_ui_camera(cameras: Query<Entity, Or<(With<Camera2d>, With<Camera3d>)>>, mut commands: Commands) {
+    if let Ok(entity) = cameras.single()
+        && let Ok(mut entity) = commands.get_entity(entity)
+    {
+        entity.try_insert(IsDefaultUiCamera);
+    }
+}
+
+pub(crate) fn examples_plugin(app: &mut App) {
+    app.add_plugins((
+        bevy::DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                #[cfg(feature = "deployed_wasm_example")]
+                canvas: Some("#bevy".to_string()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: true,
+                ..default()
+            }),
+            ..default()
+        }),
+        JonmoPlugin,
+        #[cfg(feature = "debug")]
+        DebugUiPlugin,
+    ))
+    .add_systems(
+        PostStartup,
+        mark_default_ui_camera.run_if(not(any_with_component::<IsDefaultUiCamera>)),
+    );
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "debug")] {
+        const OVERLAY_TOGGLE_KEY: KeyCode = KeyCode::F1;
+
+        fn toggle_overlay(
+            input: Res<ButtonInput<KeyCode>>,
+            mut options: ResMut<UiDebugOptions>,
+        ) {
+            if input.just_pressed(OVERLAY_TOGGLE_KEY) {
+                options.toggle();
+            }
+        }
+
+        struct DebugUiPlugin;
+
+        impl Plugin for DebugUiPlugin {
+            fn build(&self, app: &mut App) {
+                app.add_systems(Update, toggle_overlay.run_if(any_with_component::<IsDefaultUiCamera>));
+            }
+        }
+    }
 }

@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::*;
-use bevy_platform::sync::*;
+use bevy_platform::sync::{Arc, OnceLock};
 #[doc(no_inline)]
 pub use enclose::enclose as clone;
 
@@ -24,6 +24,17 @@ impl LazyEntity {
     pub fn get(&self) -> Entity {
         self.0.get().copied().expect("EntityHolder does not contain an Entity")
     }
+}
+
+pub(crate) fn get_ancestor(child_ofs: &Query<&ChildOf>, entity: Entity, generations: usize) -> Option<Entity> {
+    [entity]
+        .into_iter()
+        .chain(child_ofs.iter_ancestors(entity))
+        .nth(generations)
+}
+
+pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&ChildOf>) -> Option<Entity> {
+    move |In(entity): In<Entity>, child_ofs: Query<&ChildOf>| get_ancestor(&child_ofs, entity, generations)
 }
 
 /// Convenience trait for [`Send`] + [`Sync`] + 'static.

@@ -29,9 +29,7 @@ fn main() {
     // and allows multiple systems to access and modify the same data.
     let colors = MutableVec::from([random_color(), random_color()]);
 
-    app.add_plugins(DefaultPlugins)
-        // Add the main `jonmo` plugin which contains the systems for signal processing.
-        .add_plugins(JonmoPlugin)
+    app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---
         // We insert a clone of our `MutableVec` into a Bevy resource. This makes it
         // accessible to any system that needs to read or modify the list of colors,
@@ -60,8 +58,6 @@ fn main() {
                 // The `live` system increments the lifetime of each list item.
                 // It only runs if there is at least one entity with a `Lifetime` component.
                 live.run_if(any_with_component::<Lifetime>),
-                // The `hotkeys` system listens for keyboard input to add/remove colors.
-                hotkeys,
             ),
         )
         .run();
@@ -104,7 +100,46 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         // The first element of the tuple is a *new signal* that will always contain
         // the current index of that specific item, or `None` if it has been removed.
         // This is crucial for displaying the index or for actions like removing a specific item.
-        colors.enumerate().map_in(|(index, color)| item(index, color)),
+        colors.enumerate().map_in(|(index, color)| item(index.dedupe(), color)),
+    )
+    .child(
+        JonmoBuilder::from((
+            Node {
+                height: Val::Px(40.),
+                width: Val::Px(100.),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(bevy::color::palettes::basic::GREEN.into()),
+        ))
+        // `on_spawn` runs a closure with access to the `World` and the spawned `Entity`
+        // just after the entity is created. This is a good place to set up observers or
+        // other one-time logic.
+        .on_spawn(|world, entity| {
+            // `observe` is a Bevy event-handling pattern. Here, we're setting up this
+            // button entity to listen for a `Click` event.
+            world.entity_mut(entity).observe(
+                // This closure is the event handler that runs when the button is clicked.
+                move |_: Trigger<Pointer<Click>>, colors: Res<Colors>, mut commands: Commands| {
+                    // Try to get the `Index` component from the clicked entity.
+                    // We found the index! Now we can mutate the central data source.
+                    // `colors.0.write()` gets a write lock on the `MutableVec`.
+                    let mut guard = colors.0.write();
+                    guard.insert(guard.len(), random_color());
+                    // IMPORTANT: After mutating a `MutableVec`, you must call `flush()`
+                    // to broadcast the changes to all listening signals.
+                    // We queue the flush command to be run at the end of the frame.
+                    commands.queue(colors.0.flush());
+                },
+            );
+        })
+        .child(JonmoBuilder::from((
+            Node::default(),
+            Text::new("+"),
+            TextColor(Color::WHITE),
+            TextLayout::new_with_justify(JustifyText::Center),
+        ))),
     )
 }
 
@@ -177,13 +212,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
                     // `component_signal` takes a signal and uses its output to insert/update a component.
                     index
                         .clone()
-                        // The index signal is `Option<usize>`. `unwrap_or_default` handles the case where it might be
-                        // `None`.
-                        .map_in(Option::unwrap_or_default)
-                        // Convert the `usize` to a `String`.
-                        .map_in_ref(ToString::to_string)
-                        // Wrap the `String` in a `TextSpan`, which is the component `component_signal` will manage.
-                        .map_in(TextSpan),
+                        .map_in(|index| index.as_ref().map(ToString::to_string).map(TextSpan)),
                 ),
             )
             // Child 3: Another static text span.
@@ -204,7 +233,8 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
                         // Convert the rounded `f32` to a `String`.
                         .map_in_ref(ToString::to_string)
                         // Wrap it in a `TextSpan` component for display.
-                        .map_in(TextSpan),
+                        .map_in(TextSpan)
+                        .map_in(Some),
                 ),
             ),
         )
@@ -250,7 +280,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
         // To make the observer work, the button entity needs to *have* an `Index` component.
         // We use `component_signal` again to reactively insert the `Index` component,
         // driven by the same `index` signal we used for the display text.
-        .component_signal(index.map_in(Option::unwrap_or_default).map_in(Index))
+        .component_signal(index.map_in(|index| index.map(Index)))
         .child(JonmoBuilder::from((
             Node::default(),
             Text::new("x"),
@@ -271,29 +301,5 @@ fn camera(mut commands: Commands) {
 fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
     for mut lifetime in lifetimes.iter_mut() {
         lifetime.0 += time.delta_secs();
-    }
-}
-
-/// This system handles keyboard input for adding and removing colors from the main
-/// `MutableVec` data source.
-fn hotkeys(keys: Res<ButtonInput<KeyCode>>, colors: ResMut<Colors>, mut commands: Commands) {
-    let mut flush = false;
-    // `colors.0.write()` acquires a write lock on the `MutableVec`. The lock is
-    // released when `guard` goes out of scope.
-    let mut guard = colors.0.write();
-    if keys.just_pressed(KeyCode::Equal) {
-        // Add a new random color to the end of the vector.
-        guard.push(random_color());
-        flush = true;
-    } else if keys.just_pressed(KeyCode::Minus) {
-        // Remove the last color from the vector.
-        guard.pop();
-        flush = true;
-    }
-
-    // If we made any changes, we must flush them. This signals to `children_signal_vec`
-    // and any other listeners that the data has changed, so they can update accordingly.
-    if flush {
-        commands.queue(colors.0.flush());
     }
 }

@@ -10,23 +10,85 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/databasedav/jonmo"
 documentation = "https://docs.rs/jonmo"
 
-[lints.rust]
-missing_docs = "warn"
-unsafe_code = "deny"
-
 [dependencies]
 bevy_app = { version = "0.16", default-features = false }
 bevy_derive = { version = "0.16", default-features = false }
 bevy_ecs = { version = "0.16", default-features = false }
-bevy_log = { version = "0.16", default-features = false }
 bevy_platform = { version = "0.16", default-features = false }
-bevy_time = { version = "0.16", default-features = false }
+bevy_log = { version = "0.16", default-features = false, optional = true }
+bevy_time = { version = "0.16", default-features = false, optional = true }
 enclose = "1.2"
 dyn-clone = "1.0"
+apply = "0.3"
+cfg-if = "1.0"
+document-features = { version = "0.2", optional = true }
+
+[features]
+default = ["builder", "tracing", "time", "std"]
+
+## Enables access to jonmo's high-level entity builder, [`JonmoBuilder`](https://docs.rs/jonmo/latest/jonmo/builder/struct.JonmoBuilder.html).
+builder = []
+
+## Enables access to signal ext `.debug` methods, which conveniently logs signal outputs at any step.
+tracing = ["bevy_log"]
+
+## Enables access to [`SignalExt::throttle`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html#method.throttle), which delays subsequent outputs by some `Duration`.
+time = ["bevy_time"]
+
+## `DebugUiPlugin` which enables toggling [`bevy_dev_tools::ui_debug_overlay::DebugUiPlugin`](https://docs.rs/bevy/latest/bevy/dev_tools/ui_debug_overlay/struct.DebugUiPlugin.html) with the `F1` key; requires a camera to be marked with the [`IsDefaultCamera`](https://docs.rs/bevy/latest/bevy/prelude/struct.IsDefaultUiCamera.html#) component.
+debug = ["bevy/bevy_ui_debug"]
+
+## Uses the Rust standard library.
+std = [
+  "bevy_app/std",
+  "bevy_ecs/std",
+  "bevy_platform/std",
+  "bevy_time?/std",
+]
+
+## Rely on `critical-section` for synchronization primitives.
+critical-section = [
+  "bevy_app/critical-section",
+  "bevy_ecs/critical-section",
+  "bevy_platform/critical-section",
+  "bevy_time?/critical-section",
+]
+
+## Enables access to browser APIs in a web context.
+web = [
+  "bevy_app/web",
+  "bevy_platform/web",
+]
+
+deployed_wasm_example = []
 
 [dev-dependencies]
-bevy = "0.16.0"
+bevy = "0.16"
 rand = "0.9"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies.getrandom]
+version = "0.3"
+features = ["wasm_js"]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+std_instead_of_core = "warn"
+std_instead_of_alloc = "warn"
+alloc_instead_of_core = "warn"
+
+[package.metadata.cargo-all-features]
+allowlist = [
+  "builder",
+  "tracing",
+  "time",
+  "debug",
+  "std",
+  "critical-section",
+  "web",
+]
 
 [[example]]
 name = "basic"
@@ -39,8 +101,23 @@ path = "examples/basic_builder.rs"
 doc-scrape-examples = true
 
 [[example]]
-name = "lifetime_list"
-path = "examples/lifetime_list.rs"
+name = "basic_builder_inject"
+path = "examples/basic_builder_inject.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "counter"
+path = "examples/counter.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "lifetimes"
+path = "examples/lifetimes.rs"
+doc-scrape-examples = true
+
+[[example]]
+name = "letters"
+path = "examples/letters.rs"
 doc-scrape-examples = true
 
 [[example]]
