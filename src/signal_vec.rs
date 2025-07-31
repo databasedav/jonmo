@@ -1950,10 +1950,9 @@ pub trait SignalVecExt: SignalVec {
 
     /// Transform each [`Item`](SignalVec::Item) into a tuple where the right item is the original
     /// item and the left item is a [`Signal<Item = Option<usize>>`] which outputs the item's index
-    /// or [`None`] if it was removed.
-    ///
-    /// The [`Signal<Item = Option<usize>>`]s are deduped so any downstream [`Signal`]s are only run
-    /// on frames where the index has changed.
+    /// or [`None`] if it was removed. Note that the [`Signal<Item = Option<usize>>`]s are *not*
+    /// deduped so consumers must call [`.dedupe`](SignalExt::dedupe) if resending the same index
+    /// every frame would be spurious.
     ///
     /// # Example
     ///
@@ -2552,9 +2551,10 @@ pub trait SignalVecExt: SignalVec {
     // TODO: the example is clearly a copout ...
     // TODO: why won't doctest compile ?
     /// Place the [`Item`](SignalVec::Item) output by the [`System`] between adjacent items of this
-    /// [`SignalVec`]; the [`System`] takes [`In`] an `impl Signal<Item = Option<usize>>` which
-    /// outputs the index of the corresponding [`Item`](SignalVec::Item) or [`None`] if it has been
-    /// removed.
+    /// [`SignalVec`]; the [`System`] takes [`In`] a [`Signal<Item = Option<usize>>`] which outputs
+    /// the index of the corresponding [`Item`](SignalVec::Item) or [`None`] if it has been removed.
+    /// Note that the [`Signal<Item = Option<usize>>`]s are *not* deduped so consumers must call
+    /// [`.dedupe`](SignalExt::dedupe) if resending the same index every frame would be spurious.
     ///
     /// # Example
     ///
@@ -2563,7 +2563,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     /// use jonmo::signal::{Dedupe, Source};
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse_with(|_: In<Dedupe<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse_with(|_: In<Source<Option<usize>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where
@@ -3643,7 +3643,7 @@ struct MutableVecState<T> {
 }
 
 /// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them on
-/// [`.flush`](MutableVec::flush), enabling diff-less constant time reactive updates for downstream
+/// [`.flush`](MutableVec::flush), enabling diff-less constant-time reactive updates for downstream
 /// [`SignalVec`]s.
 #[derive(Clone)]
 pub struct MutableVec<T> {

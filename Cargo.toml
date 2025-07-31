@@ -90,6 +90,10 @@ allowlist = [
   "web",
 ]
 
+[package.metadata.docs.rs]
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
+all-features = true
+
 [[example]]
 name = "basic"
 path = "examples/basic.rs"

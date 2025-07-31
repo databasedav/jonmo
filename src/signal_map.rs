@@ -812,8 +812,8 @@ struct MutableBTreeMapState<K, V> {
 #[derive(Component)]
 struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
 
-/// Wrapper around a [`BTreeMap`] that tracks mutations as [`MapDiff`]s and emits them as a batch on
-/// [`flush`](MutableBTreeMap::flush), enabling diff-less constant time reactive updates for
+/// Wrapper around a [`BTreeMap`] that tracks mutations as [`MapDiff`]s and emits them on
+/// [`.flush`](MutableBTreeMap::flush), enabling diff-less constant-time reactive updates for
 /// downstream [`SignalMap`]s.
 #[derive(Clone)]
 pub struct MutableBTreeMap<K, V> {
