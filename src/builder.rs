@@ -46,7 +46,7 @@ impl<T: Bundle> From<T> for JonmoBuilder {
 }
 
 impl JonmoBuilder {
-    #[allow(clippy::new_without_default, missing_docs)]
+    #[allow(missing_docs)]
     pub fn new() -> Self {
         Self::default()
     }
