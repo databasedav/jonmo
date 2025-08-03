@@ -3687,17 +3687,16 @@ impl Replayable for VecReplayTrigger {
     }
 }
 
+impl<T> Default for MutableVec<T> {
+    fn default() -> Self {
+        Self::from(Vec::new())
+    }
+}
+
 impl<T> MutableVec<T> {
     /// Constructs a new, empty [`MutableVec<T>`].
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self {
-            state: Arc::new(RwLock::new(MutableVecState {
-                vec: Vec::new(),
-                pending_diffs: Vec::new(),
-                signal: None,
-            })),
-        }
+        Self::default()
     }
 
     /// Locks this [`MutableVec`] with shared read access, blocking the current thread until it can

@@ -865,11 +865,16 @@ impl Replayable for MapReplayTrigger {
     }
 }
 
+impl<K, V> Default for MutableBTreeMap<K, V> {
+    fn default() -> Self {
+        Self::from(BTreeMap::new())
+    }
+}
+
 impl<K, V> MutableBTreeMap<K, V> {
     /// Constructs a new, emtpy [`MutableBTreeMap<K, V>`].
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self::from(BTreeMap::new())
+        Self::default()
     }
 
     /// Locks this [`MutableBTreeMap`] with shared read access, blocking the current thread until it

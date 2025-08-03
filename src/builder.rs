@@ -32,7 +32,7 @@ fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
 /// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html),
 /// and [haalka](https://github.com/databasedav/haalka)'s
 /// [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
@@ -48,10 +48,7 @@ impl<T: Bundle> From<T> for JonmoBuilder {
 impl JonmoBuilder {
     #[allow(clippy::new_without_default, missing_docs)]
     pub fn new() -> Self {
-        Self {
-            on_spawns: Arc::new(Mutex::new(Vec::new())),
-            child_block_populations: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self::default()
     }
 
     /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
