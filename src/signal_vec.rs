@@ -18,7 +18,7 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
-use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
+use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableVec`] that are piped to downstream
@@ -3501,7 +3501,7 @@ impl<T: ?Sized> SignalVecExt for T where T: SignalVec {}
 
 /// Provides immutable access to the underlying [`Vec`].
 pub struct MutableVecReadGuard<'a, T> {
-    guard: RwLockReadGuard<'a, MutableVecState<T>>,
+    guard: RwLockReadGuard<'a, MutableVecStateInner<T>>,
 }
 
 impl<'a, T> Deref for MutableVecReadGuard<'a, T>
@@ -3517,7 +3517,7 @@ where
 
 /// Provides limited mutable access to the underlying [`Vec`].
 pub struct MutableVecWriteGuard<'a, T> {
-    guard: RwLockWriteGuard<'a, MutableVecState<T>>,
+    guard: RwLockWriteGuard<'a, MutableVecStateInner<T>>,
 }
 
 impl<'a, T> MutableVecWriteGuard<'a, T>
@@ -3636,18 +3636,33 @@ where
     }
 }
 
-struct MutableVecState<T> {
+struct MutableVecStateInner<T> {
     vec: Vec<T>,
     pending_diffs: Vec<VecDiff<T>>,
     signal: Option<LazySignal>,
 }
 
+struct MutableVecState<T> {
+    references: AtomicUsize,
+    inner: RwLock<MutableVecStateInner<T>>,
+}
+
 /// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them on
 /// [`.flush`](MutableVec::flush), enabling diff-less constant-time reactive updates for downstream
 /// [`SignalVec`]s.
-#[derive(Clone)]
 pub struct MutableVec<T> {
-    state: Arc<RwLock<MutableVecState<T>>>,
+    entity: Entity,
+    state: Arc<MutableVecState<T>>,
+}
+
+impl<T> Clone for MutableVec<T> {
+    fn clone(&self) -> Self {
+        self.state.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        Self {
+            entity: self.entity,
+            state: self.state.clone(),
+        }
+    }
 }
 
 #[derive(Component)]
@@ -3659,18 +3674,72 @@ impl<T: Clone> Clone for QueuedVecDiffs<T> {
     }
 }
 
-impl<T, A> From<T> for MutableVec<A>
-where
-    Vec<A>: From<T>,
-{
-    fn from(values: T) -> Self {
-        MutableVec {
-            state: Arc::new(RwLock::new(MutableVecState {
-                vec: values.into(),
+// impl<T, A> From<T> for MutableVec<A>
+// where
+//     Vec<A>: From<T>,
+// {
+//     fn from(values: T) -> Self {
+//         MutableVec {
+//             state: Arc::new(RwLock::new(MutableVecState {
+//                 vec: values.into(),
+//                 pending_diffs: Vec::new(),
+//                 signal: None,
+//             })),
+//         }
+//     }
+// }
+
+// need indirection of a flusher function to avoid a generic component
+#[derive(Component)]
+pub(crate) struct MutableVecFlusher(Box<dyn Fn(&mut Commands) + Send + Sync>);
+
+fn new_mutable_vec<T>(entity: Entity) -> MutableVec<T> {
+    MutableVec {
+        entity,
+        state: Arc::new(MutableVecState {
+            references: AtomicUsize::new(1),
+            inner: RwLock::new(MutableVecStateInner {
+                vec: Vec::new(),
                 pending_diffs: Vec::new(),
                 signal: None,
-            })),
-        }
+            }),
+        }),
+    }
+}
+
+fn mutable_vec_flusher<T>(vec: MutableVec<T>) -> MutableVecFlusher where T: SSs + Clone {
+    MutableVecFlusher(Box::new(clone!((vec) move |commands| {
+        commands.queue(vec.flush());
+    })))
+}
+
+impl<T> From<&mut World> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(world: &mut World) -> Self {
+        let mut entity = world.spawn_empty();
+        let vec = new_mutable_vec(entity.id());
+        entity.insert(mutable_vec_flusher(vec.clone()));
+        vec
+    }
+}
+
+impl<T> From<&mut Commands<'_, '_>> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(commands: &mut Commands) -> Self {
+        let mut entity = commands.spawn_empty();
+        let vec = new_mutable_vec(entity.id());
+        entity.insert(mutable_vec_flusher(vec.clone()));
+        vec
+    }
+}
+
+pub(crate) fn flush_mutable_vecs(mutable_vec_flushers: Query<&MutableVecFlusher>, mut commands: Commands) {
+    for MutableVecFlusher(flusher) in mutable_vec_flushers {
+        flusher(&mut commands)
     }
 }
 
@@ -3687,24 +3756,28 @@ impl Replayable for VecReplayTrigger {
     }
 }
 
-impl<T> MutableVec<T> {
-    /// Constructs a new, empty [`MutableVec<T>`].
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(RwLock::new(MutableVecState {
-                vec: Vec::new(),
-                pending_diffs: Vec::new(),
-                signal: None,
-            })),
+pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
+    let triggers: Vec<Entity> = world
+        .query_filtered::<Entity, With<ReplayTrigger>>()
+        .iter(world)
+        .collect();
+    for trigger_entity in triggers {
+        if let Some(trigger_component) = world
+            .get_entity_mut(trigger_entity)
+            .ok()
+            .and_then(|mut e| e.take::<ReplayTrigger>())
+        {
+            trigger_component.trigger()(world);
         }
     }
+}
 
+impl<T> MutableVec<T> {
     /// Locks this [`MutableVec`] with shared read access, blocking the current thread until it can
     /// be acquired, see [`RwLock::read`].
     pub fn read(&self) -> MutableVecReadGuard<'_, T> {
         MutableVecReadGuard {
-            guard: self.state.read().unwrap(),
+            guard: self.state.inner.read().unwrap(),
         }
     }
 
@@ -3712,7 +3785,7 @@ impl<T> MutableVec<T> {
     /// can be acquired, see [`RwLock::write`].
     pub fn write(&self) -> MutableVecWriteGuard<'_, T> {
         MutableVecWriteGuard {
-            guard: self.state.write().unwrap(),
+            guard: self.state.inner.write().unwrap(),
         }
     }
 
@@ -3720,7 +3793,7 @@ impl<T> MutableVec<T> {
     where
         T: Clone + SSs,
     {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.inner.write().unwrap();
 
         // If the signal already exists, just clone and return it.
         if let Some(lazy_signal) = &state.signal {
@@ -3816,7 +3889,7 @@ impl<T> MutableVec<T> {
             });
 
             // 2. Queue the initial state for this new subscriber.
-            let initial_vec = state.read().unwrap().vec.clone();
+            let initial_vec = state.inner.read().unwrap().vec.clone();
             let initial_diffs = if !initial_vec.is_empty() {
                 vec![VecDiff::Replace { values: initial_vec }]
             } else {
@@ -3839,7 +3912,7 @@ impl<T> MutableVec<T> {
     where
         T: SSs,
     {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.inner.write().unwrap();
         if state.pending_diffs.is_empty() {
             return;
         }
@@ -3984,7 +4057,8 @@ mod tests {
 
         // The output of our `for_each` system will be the full, reconstructed vector.
         app.init_resource::<FinalSignalOutput<Vec<String>>>();
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
+        let source_vec = MutableVec::from(app.world_mut());
+        source_vec.write().replace(vec!["a".to_string(), "b".to_string()]);
 
         // This system reconstructs the state of the vec by applying the diffs it
         // receives. It then outputs the complete, current state. This allows us to
