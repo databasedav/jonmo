@@ -8,7 +8,7 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let numbers = MutableVec::from([1, 2, 3, 4, 5]);
+    let numbers = MutableVecOld::from([1, 2, 3, 4, 5]);
     app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
@@ -26,15 +26,15 @@ fn main() {
 }
 
 #[derive(Resource, Clone)]
-struct Numbers(MutableVec<i32>);
+struct Numbers(MutableVecOld<i32>);
 
 #[derive(Component, Default, Clone)]
 struct Lifetime(f32);
 
 #[rustfmt::skip]
-fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
-    let list_a = MutableVec::from([1, 2, 3, 4, 5]).signal_vec();
-    let list_b = MutableVec::from([3, 4, 5]).signal_vec();
+fn ui_root(numbers: MutableVecOld<i32>) -> JonmoBuilder {
+    let list_a = MutableVecOld::from([1, 2, 3, 4, 5]).signal_vec_old();
+    let list_b = MutableVecOld::from([3, 4, 5]).signal_vec_old();
     let map = MutableBTreeMap::from([(1, 2), (2, 3)]);
     // map.signal_map().
     JonmoBuilder::from(Node {
@@ -50,7 +50,7 @@ fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
     .children_signal_vec(
         // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
         numbers
-            .signal_vec()
+            .signal_vec_old()
             // SignalBuilder::from_system(|_: In<()>| 1)
             // SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
             // .dedupe()
@@ -138,7 +138,7 @@ fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
 
 fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut commands: Commands) {
     let mut flush = false;
-    let mut guard = numbers.0.write();
+    let mut guard = numbers.0.write_old();
     if keys.just_pressed(KeyCode::Equal) {
         guard.push((guard.len() + 1) as i32);
         flush = true;

@@ -16,7 +16,7 @@ use bevy_log::debug;
 use bevy_platform::{
     collections::HashMap,
     prelude::*,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, LazyLock, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
 use dyn_clone::{DynClone, clone_trait_object};
@@ -3500,11 +3500,11 @@ pub trait SignalVecExt: SignalVec {
 impl<T: ?Sized> SignalVecExt for T where T: SignalVec {}
 
 /// Provides immutable access to the underlying [`Vec`].
-pub struct MutableVecReadGuard<'a, T> {
+pub struct MutableVecReadGuardOld<'a, T> {
     guard: RwLockReadGuard<'a, MutableVecStateInner<T>>,
 }
 
-impl<'a, T> Deref for MutableVecReadGuard<'a, T>
+impl<'a, T> Deref for MutableVecReadGuardOld<'a, T>
 where
     T: Clone,
 {
@@ -3515,9 +3515,28 @@ where
     }
 }
 
-/// Provides limited mutable access to the underlying [`Vec`].
-pub struct MutableVecWriteGuard<'a, T> {
-    guard: RwLockWriteGuard<'a, MutableVecStateInner<T>>,
+pub struct MutableVecReadGuard<'s, T> {
+    guard: &'s MutableVecData<T>,
+}
+
+impl<'s, T> Deref for MutableVecReadGuard<'s, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard.vec
+    }
+}
+
+pub struct MutableVecWriteGuard<'s, T> {
+    guard: Mut<'s, MutableVecData<T>>,
+}
+
+impl<'s, T> Deref for MutableVecWriteGuard<'s, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard.vec
+    }
 }
 
 impl<'a, T> MutableVecWriteGuard<'a, T>
@@ -3625,7 +3644,117 @@ where
     }
 }
 
-impl<'a, T> Deref for MutableVecWriteGuard<'a, T>
+/// Provides limited mutable access to the underlying [`Vec`].
+pub struct MutableVecWriteGuardOld<'a, T> {
+    guard: RwLockWriteGuard<'a, MutableVecStateInner<T>>,
+}
+
+impl<'a, T> MutableVecWriteGuardOld<'a, T>
+where
+    T: Clone,
+{
+    /// Appends an element to the back of this [`MutableVec`], queueing a [`VecDiff::Push`].
+    pub fn push(&mut self, value: T) {
+        self.guard.vec.push(value.clone());
+        self.guard.pending_diffs.push(VecDiff::Push { value });
+    }
+
+    /// If this [`MutableVec`] is not empty, removes the last element and returns it, queueing a
+    /// [`VecDiff::Pop`], otherwise returns [`None`].
+    pub fn pop(&mut self) -> Option<T> {
+        let result = self.guard.vec.pop();
+        if result.is_some() {
+            self.guard.pending_diffs.push(VecDiff::Pop);
+        }
+        result
+    }
+
+    /// Inserts an element at `index` within the vector, shifting all elements after it to the
+    /// right, queueing a [`VecDiff::InsertAt`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > len`.
+    pub fn insert(&mut self, index: usize, value: T) {
+        self.guard.vec.insert(index, value.clone());
+        self.guard.pending_diffs.push(VecDiff::InsertAt { index, value });
+    }
+
+    /// Removes and returns the element at position `index` within the vector, shifting all elements
+    /// after it to the left, queueing a [`VecDiff::RemoveAt`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub fn remove(&mut self, index: usize) -> T {
+        let value = self.guard.vec.remove(index);
+        self.guard.pending_diffs.push(VecDiff::RemoveAt { index });
+        value
+    }
+
+    /// Clears this [`MutableVec`], removing all values, queueing a [`VecDiff::Clear`] if it was not
+    /// empty.
+    pub fn clear(&mut self) {
+        if !self.guard.vec.is_empty() {
+            self.guard.vec.clear();
+            self.guard.pending_diffs.push(VecDiff::Clear);
+        }
+    }
+
+    /// Updates the element at `index` with a new `value`, queueing a [`VecDiff::UpdateAt`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub fn set(&mut self, index: usize, value: T) {
+        let len = self.guard.vec.len();
+        if index < len {
+            self.guard.vec[index] = value.clone();
+            self.guard.pending_diffs.push(VecDiff::UpdateAt { index, value });
+        } else {
+            panic!(
+                "MutableVecWriteGuard::set: index {} out of bounds for len {}",
+                index, len
+            );
+        }
+    }
+
+    /// Moves an item from `old_index` to `new_index`. queueing a [`VecDiff::Move`] if the indices
+    /// are different and valid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `old_index` or `new_index` are out of bounds.
+    pub fn move_item(&mut self, old_index: usize, new_index: usize) {
+        let len = self.guard.vec.len();
+        if old_index >= len || new_index >= len {
+            panic!(
+                "MutableVecWriteGuard::move_item: index out of bounds (len: {}, old: {}, new: {})",
+                len, old_index, new_index
+            );
+        }
+        if old_index != new_index {
+            let value = self.guard.vec.remove(old_index);
+            self.guard.vec.insert(new_index, value);
+            self.guard.pending_diffs.push(VecDiff::Move { old_index, new_index });
+        }
+    }
+
+    /// Replaces the entire contents of this [`MutableVec`] with the provided `values`, queueing a
+    /// [`VecDiff::Replace`].
+    pub fn replace<A>(&mut self, values: A)
+    where
+        Vec<T>: From<A>,
+        A: Clone,
+    {
+        self.guard.vec = values.clone().into();
+        self.guard
+            .pending_diffs
+            .push(VecDiff::Replace { values: values.into() });
+    }
+}
+
+impl<'a, T> Deref for MutableVecWriteGuardOld<'a, T>
 where
     T: Clone,
 {
@@ -3650,12 +3779,171 @@ struct MutableVecState<T> {
 /// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them on
 /// [`.flush`](MutableVec::flush), enabling diff-less constant-time reactive updates for downstream
 /// [`SignalVec`]s.
-pub struct MutableVec<T> {
+pub struct MutableVecOld<T> {
     entity: Entity,
     state: Arc<MutableVecState<T>>,
 }
 
+static STALE_MUTABLE_VECS: LazyLock<Mutex<Vec<Entity>>> = LazyLock::new(Mutex::default);
+
+/// (Internal) The component that holds the actual state for a MutableVec.
+#[derive(Component)]
+pub struct MutableVecData<T> {
+    vec: Vec<T>,
+    pending_diffs: Vec<VecDiff<T>>,
+    broadcaster: LazySignal,
+}
+
+/// A lightweight, clone-able handle to a reactive vector living in the ECS.
+pub struct MutableVec<T> {
+    entity: Entity,
+    references: Arc<AtomicUsize>,
+    _marker: PhantomData<fn() -> T>,
+}
+
 impl<T> Clone for MutableVec<T> {
+    fn clone(&self) -> Self {
+        self.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        Self {
+            entity: self.entity,
+            references: self.references.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for MutableVec<T> {
+    fn drop(&mut self) {
+        if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+            STALE_MUTABLE_VECS.lock().unwrap().push(self.entity);
+        }
+    }
+}
+
+impl<T> MutableVec<T> {
+    pub fn read<'s>(&self, mutable_vec_data_reader: impl ReadMutableVecData<'s, T>) -> MutableVecReadGuard<'s, T> where T: SSs {
+        MutableVecReadGuard { guard: mutable_vec_data_reader.read(self.entity) }
+    }
+
+    pub fn write<'w>(&self, mutable_vec_data_writer: impl WriteMutableVecData<'w, T>) -> MutableVecWriteGuard<'w, T> where T: SSs {
+        MutableVecWriteGuard { guard: mutable_vec_data_writer.write(self.entity) }
+    }
+
+    pub fn signal_vec(&self) -> Source<T> where T: Clone + SSs {
+        let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
+            let self_entity = LazyEntity::new();
+            let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
+
+            let replay_system_logic = clone!((self_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
+                if !*has_run {
+                    *has_run = true;
+                    let initial_diffs = world.get_entity_mut(self_entity.get()).ok()
+                        .and_then(|mut entity| entity.take::<QueuedVecDiffs<T>>())
+                        .map(|queued| queued.0)
+                        .unwrap_or_default();
+                    if initial_diffs.is_empty() { None } else { Some(initial_diffs) }
+                } else {
+                    if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
+                }
+            });
+
+            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
+            self_entity.set(*replay_signal);
+            
+            let trigger = Box::new(move |world: &mut World| {
+                process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
+            });
+
+            // 3. Queue the initial state for this new subscriber by reading the data entity.
+            let initial_vec = self_.read(&*world).to_vec();
+            let initial_diffs = if !initial_vec.is_empty() {
+                vec![VecDiff::Replace { values: initial_vec }]
+            } else {
+                vec![]
+            };
+            world.entity_mut(*replay_signal).insert((QueuedVecDiffs(initial_diffs), VecReplayTrigger(trigger)));
+
+            pipe_signal(world, broadcaster_system, replay_signal);
+            replay_signal
+        }));
+
+        Source {
+            signal: replay_lazy_signal,
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub(crate) fn despawn_stale_mutable_vecs(world: &mut World) {
+    let mut queue = STALE_MUTABLE_VECS.lock().unwrap();
+    for entity in queue.drain(..) {
+        world.despawn(entity);
+    }
+}
+
+fn new_mutable_vec_data<T>() -> (MutableVecData<T>, LazyEntity)
+where
+    T: Clone + SSs,
+{
+    let data_entity = LazyEntity::new();
+    let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
+        let source_system = move |_: In<()>, world: &mut World| {
+            if let Ok(mut data) = world.query::<&mut MutableVecData<T>>().get_mut(world, data_entity.get()) {
+                if data.pending_diffs.is_empty() {
+                    None
+                } else {
+                    Some(core::mem::take(&mut data.pending_diffs))
+                }
+            } else {
+                None
+            }
+        };
+        let broadcaster_system = register_signal::<(), Vec<VecDiff<T>>, _, _, _>(world, source_system);
+        broadcaster_system
+    }));
+    (
+        MutableVecData {
+            vec: Vec::<T>::new(),
+            pending_diffs: Vec::new(),
+            broadcaster,
+        },
+        data_entity,
+    )
+}
+
+impl<T> From<&mut World> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(world: &mut World) -> Self {
+        let (data, data_entity) = new_mutable_vec_data::<T>();
+        let entity = world.spawn(data).id();
+        data_entity.set(entity);
+        Self {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> From<&mut Commands<'_, '_>> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(commands: &mut Commands) -> Self {
+        let (data, data_entity) = new_mutable_vec_data::<T>();
+        let entity = commands.spawn(data).id();
+        data_entity.set(entity);
+        Self {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Clone for MutableVecOld<T> {
     fn clone(&self) -> Self {
         self.state.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         Self {
@@ -3693,8 +3981,8 @@ impl<T: Clone> Clone for QueuedVecDiffs<T> {
 #[derive(Component)]
 pub(crate) struct MutableVecFlusher(Box<dyn Fn(&mut Commands) + Send + Sync>);
 
-fn new_mutable_vec<T>(entity: Entity) -> MutableVec<T> {
-    MutableVec {
+fn new_mutable_vec_old<T>(entity: Entity) -> MutableVecOld<T> {
+    MutableVecOld {
         entity,
         state: Arc::new(MutableVecState {
             references: AtomicUsize::new(1),
@@ -3707,31 +3995,34 @@ fn new_mutable_vec<T>(entity: Entity) -> MutableVec<T> {
     }
 }
 
-fn mutable_vec_flusher<T>(vec: MutableVec<T>) -> MutableVecFlusher where T: SSs + Clone {
+fn mutable_vec_flusher<T>(vec: MutableVecOld<T>) -> MutableVecFlusher
+where
+    T: SSs + Clone,
+{
     MutableVecFlusher(Box::new(clone!((vec) move |commands| {
         commands.queue(vec.flush());
     })))
 }
 
-impl<T> From<&mut World> for MutableVec<T>
+impl<T> From<&mut World> for MutableVecOld<T>
 where
     T: Clone + SSs,
 {
     fn from(world: &mut World) -> Self {
         let mut entity = world.spawn_empty();
-        let vec = new_mutable_vec(entity.id());
+        let vec = new_mutable_vec_old(entity.id());
         entity.insert(mutable_vec_flusher(vec.clone()));
         vec
     }
 }
 
-impl<T> From<&mut Commands<'_, '_>> for MutableVec<T>
+impl<T> From<&mut Commands<'_, '_>> for MutableVecOld<T>
 where
     T: Clone + SSs,
 {
     fn from(commands: &mut Commands) -> Self {
         let mut entity = commands.spawn_empty();
-        let vec = new_mutable_vec(entity.id());
+        let vec = new_mutable_vec_old(entity.id());
         entity.insert(mutable_vec_flusher(vec.clone()));
         vec
     }
@@ -3772,19 +4063,51 @@ pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut
     }
 }
 
-impl<T> MutableVec<T> {
+pub trait ReadMutableVecData<'s, T> where T: Send + Sync {
+    fn read(self, entity: Entity) -> &'s MutableVecData<T>;
+}
+
+impl<'s, T> ReadMutableVecData<'s, T> for &'s Query<'_, 's, &MutableVecData<T>> where T: SSs {
+    fn read(self, entity: Entity) -> &'s MutableVecData<T> {
+        self.get(entity).unwrap()
+    }
+}
+
+impl<'s, T> ReadMutableVecData<'s, T> for &'s World where T: SSs {
+    fn read(self, entity: Entity) -> &'s MutableVecData<T> {
+        self.get(entity).unwrap()
+    }
+}
+
+pub trait WriteMutableVecData<'w, T> where T: Send + Sync {
+    fn write(self, entity: Entity) -> Mut<'w, MutableVecData<T>>;
+}
+
+impl<'a, 'w, 's, T> WriteMutableVecData<'a, T> for &'a mut Query<'w, 's, &mut MutableVecData<T>> where T: SSs {
+    fn write(self, entity: Entity) -> Mut<'a, MutableVecData<T>> {
+        self.get_mut(entity).unwrap()
+    }
+}
+
+impl<'w, T> WriteMutableVecData<'w, T> for &'w mut World where T: SSs {
+    fn write(self, entity: Entity) -> Mut<'w, MutableVecData<T>> {
+        self.get_mut(entity).unwrap()
+    }
+}
+
+impl<T> MutableVecOld<T> {
     /// Locks this [`MutableVec`] with shared read access, blocking the current thread until it can
     /// be acquired, see [`RwLock::read`].
-    pub fn read(&self) -> MutableVecReadGuard<'_, T> {
-        MutableVecReadGuard {
+    pub fn read_old(&self) -> MutableVecReadGuardOld<'_, T> {
+        MutableVecReadGuardOld {
             guard: self.state.inner.read().unwrap(),
         }
     }
 
     /// Locks this [`MutableVec`] with exclusive write access, blocking the current thread until it
     /// can be acquired, see [`RwLock::write`].
-    pub fn write(&self) -> MutableVecWriteGuard<'_, T> {
-        MutableVecWriteGuard {
+    pub fn write_old(&self) -> MutableVecWriteGuardOld<'_, T> {
+        MutableVecWriteGuardOld {
             guard: self.state.inner.write().unwrap(),
         }
     }
@@ -3832,7 +4155,7 @@ impl<T> MutableVec<T> {
     }
 
     /// Returns a [`Source`] signal from this [`MutableVec`].
-    pub fn signal_vec(&self) -> Source<T>
+    pub fn signal_vec_old(&self) -> Source<T>
     where
         T: Clone + SSs,
     {
@@ -4057,8 +4380,8 @@ mod tests {
 
         // The output of our `for_each` system will be the full, reconstructed vector.
         app.init_resource::<FinalSignalOutput<Vec<String>>>();
-        let source_vec = MutableVec::from(app.world_mut());
-        source_vec.write().replace(vec!["a".to_string(), "b".to_string()]);
+        let source_vec = MutableVecOld::from(app.world_mut());
+        source_vec.write_old().replace(vec!["a".to_string(), "b".to_string()]);
 
         // This system reconstructs the state of the vec by applying the diffs it
         // receives. It then outputs the complete, current state. This allows us to
@@ -4076,7 +4399,7 @@ mod tests {
         };
 
         let handle = source_vec
-            .signal_vec()
+            .signal_vec_old()
             .for_each(reconstructor_system)
             .map(capture_final_output::<Vec<String>>)
             .register(app.world_mut());
@@ -4094,7 +4417,7 @@ mod tests {
         // --- 3. Test Batched Mutations ---
         // Perform multiple operations before flushing to test batch processing.
         {
-            let mut writer = source_vec.write();
+            let mut writer = source_vec.write_old();
             writer.push("c".to_string()); // source: ["a", "b", "c"]
             writer.set(0, "A".to_string()); // source: ["A", "b", "c"]
             writer.remove(1); // source: ["A", "c"]
@@ -4120,7 +4443,7 @@ mod tests {
 
         // --- 5. Test Clear Operation ---
         // The `Clear` diff should result in an empty vector.
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let expected_cleared_state: Vec<String> = Vec::new();
@@ -4146,7 +4469,7 @@ mod tests {
         app.init_resource::<SignalVecOutput<String>>();
 
         // The source vector that we will mutate.
-        let source_vec = MutableVec::from(vec![1, 10]);
+        let source_vec = MutableVecOld::from(vec![1, 10]);
 
         // Define a resource that the mapping system will depend on. This allows us to
         // test system failure by removing the resource.
@@ -4157,7 +4480,7 @@ mod tests {
         let mapping_system = |In(val): In<i32>, factor: Res<MapFactor>| format!("{}{}", val, factor.0);
 
         // The signal chain under test.
-        let mapped_signal = source_vec.signal_vec().map(mapping_system);
+        let mapped_signal = source_vec.signal_vec_old().map(mapping_system);
 
         // Register the final signal to a system that captures its output diffs.
         let handle = mapped_signal
@@ -4186,7 +4509,7 @@ mod tests {
         assert_eq!(current_state, vec!["1x".to_string(), "10x".to_string()]);
 
         // Test: `Push`
-        source_vec.write().push(4);
+        source_vec.write_old().push(4);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4204,7 +4527,7 @@ mod tests {
         );
 
         // Test: `InsertAt`
-        source_vec.write().insert(1, 5);
+        source_vec.write_old().insert(1, 5);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4223,7 +4546,7 @@ mod tests {
         );
 
         // Test: `UpdateAt`
-        source_vec.write().set(0, 99);
+        source_vec.write_old().set(0, 99);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4242,7 +4565,7 @@ mod tests {
         );
 
         // Test: `RemoveAt` (passes through without mapping)
-        source_vec.write().remove(2); // removes 10
+        source_vec.write_old().remove(2); // removes 10
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4255,7 +4578,7 @@ mod tests {
         );
 
         // Test: `Pop` (passes through without mapping)
-        source_vec.write().pop(); // removes 4
+        source_vec.write_old().pop(); // removes 4
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4265,7 +4588,7 @@ mod tests {
         assert_eq!(current_state, vec!["99x".to_string(), "5x".to_string()]);
 
         // Test: `Move` (passes through without mapping)
-        source_vec.write().move_item(1, 0); // moves 5 to front
+        source_vec.write_old().move_item(1, 0); // moves 5 to front
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4281,7 +4604,7 @@ mod tests {
         assert_eq!(current_state, vec!["5x".to_string(), "99x".to_string()]);
 
         // Test: `Clear` (passes through without mapping)
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4296,7 +4619,7 @@ mod tests {
 
         // Test: `Push` with failing system.
         // The `run_system_with(...).ok()` will return `None`, so the item is dropped.
-        source_vec.write().push(88);
+        source_vec.write_old().push(88);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4309,7 +4632,7 @@ mod tests {
         // Test: `Replace` with failing system.
         // `map` will filter_map over the values, and all will fail. The output should be
         // a `Replace` diff with an empty vector.
-        source_vec.write().replace(vec![1, 2, 3]);
+        source_vec.write_old().replace(vec![1, 2, 3]);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4328,7 +4651,7 @@ mod tests {
 
         // Test: `Push` after recovery. The source vec is [1, 2, 3] from the last
         // replace. Now we push 7. The `map` only processes the `Push` diff.
-        source_vec.write().push(7);
+        source_vec.write_old().push(7);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4359,7 +4682,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<String>>();
 
-        let source_vec = MutableVec::from(vec![1, 10, 100]);
+        let source_vec = MutableVecOld::from(vec![1, 10, 100]);
 
         // A variable to be captured by the `map_in` closure.
         // We'll use this to demonstrate that the closure's captured state is respected
@@ -4367,7 +4690,7 @@ mod tests {
         let mapping_factor = Arc::new(RwLock::new("a".to_string()));
 
         // The signal chain under test, using `map_in` with a `move` closure.
-        let mapped_signal = source_vec.signal_vec().map_in(clone!((mapping_factor) move |val: i32| {
+        let mapped_signal = source_vec.signal_vec_old().map_in(clone!((mapping_factor) move |val: i32| {
             let factor = mapping_factor.read().unwrap();
             format!("{}{}", val, *factor)
         }));
@@ -4406,7 +4729,7 @@ mod tests {
         *mapping_factor.write().unwrap() = "b".to_string();
 
         // Test: `Push` using the new factor "b"
-        source_vec.write().push(4);
+        source_vec.write_old().push(4);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4429,7 +4752,7 @@ mod tests {
         );
 
         // Test: `InsertAt` using the new factor "b"
-        source_vec.write().insert(1, 5);
+        source_vec.write_old().insert(1, 5);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4454,7 +4777,7 @@ mod tests {
         );
 
         // Test: `UpdateAt` using the new factor "b"
-        source_vec.write().set(0, 99);
+        source_vec.write_old().set(0, 99);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4482,7 +4805,7 @@ mod tests {
         // These diffs don't involve mapping values, so they are simply forwarded.
 
         // Test: `RemoveAt`
-        source_vec.write().remove(2); // removes 10
+        source_vec.write_old().remove(2); // removes 10
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4500,7 +4823,7 @@ mod tests {
         );
 
         // Test: `Pop`
-        source_vec.write().pop(); // removes 4
+        source_vec.write_old().pop(); // removes 4
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4513,7 +4836,7 @@ mod tests {
         );
 
         // Test: `Move`
-        source_vec.write().move_item(1, 0); // moves 5 to front
+        source_vec.write_old().move_item(1, 0); // moves 5 to front
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4532,7 +4855,7 @@ mod tests {
         );
 
         // Test: `Clear`
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4555,11 +4878,11 @@ mod tests {
         app.init_resource::<SignalVecOutput<String>>();
 
         // The source vector contains integers.
-        let source_vec = MutableVec::from(vec![10, 20]);
+        let source_vec = MutableVecOld::from(vec![10, 20]);
 
         // The signal chain under test, using `map_in_ref` with a function pointer
         // that operates on a reference (`&i32`). This is an idiomatic use case.
-        let mapped_signal = source_vec.signal_vec().map_in_ref(ToString::to_string);
+        let mapped_signal = source_vec.signal_vec_old().map_in_ref(ToString::to_string);
 
         let handle = mapped_signal
             .for_each(capture_signal_vec_output)
@@ -4585,7 +4908,7 @@ mod tests {
         assert_eq!(current_state, vec!["10".to_string(), "20".to_string()]);
 
         // Test: `Push`
-        source_vec.write().push(30);
+        source_vec.write_old().push(30);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4603,7 +4926,7 @@ mod tests {
         );
 
         // Test: `InsertAt`
-        source_vec.write().insert(1, 5);
+        source_vec.write_old().insert(1, 5);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4622,7 +4945,7 @@ mod tests {
         );
 
         // Test: `UpdateAt`
-        source_vec.write().set(0, 99);
+        source_vec.write_old().set(0, 99);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4644,7 +4967,7 @@ mod tests {
         // These diffs don't involve mapping values, so they are simply forwarded.
 
         // Test: `RemoveAt`
-        source_vec.write().remove(2); // removes 20
+        source_vec.write_old().remove(2); // removes 20
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4654,7 +4977,7 @@ mod tests {
         assert_eq!(current_state, vec!["99".to_string(), "5".to_string(), "30".to_string()]);
 
         // Test: `Pop`
-        source_vec.write().pop(); // removes 30
+        source_vec.write_old().pop(); // removes 30
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4664,7 +4987,7 @@ mod tests {
         assert_eq!(current_state, vec!["99".to_string(), "5".to_string()]);
 
         // Test: `Move`
-        source_vec.write().move_item(1, 0); // moves 5 to front
+        source_vec.write_old().move_item(1, 0); // moves 5 to front
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4680,7 +5003,7 @@ mod tests {
         assert_eq!(current_state, vec!["5".to_string(), "99".to_string()]);
 
         // Test: `Clear`
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -4726,7 +5049,7 @@ mod tests {
 
         // The source vec contains entities. The goal is to create a derived vec that
         // contains the _names_ of these entities.
-        let entity_vec = MutableVec::from([entity_a, entity_b]);
+        let entity_vec = MutableVecOld::from([entity_a, entity_b]);
 
         // This "factory" system takes an entity and creates a signal that tracks its
         // `Name`.
@@ -4734,7 +5057,7 @@ mod tests {
 
         // Apply `map_signal` to transform the SignalVec`<Entity>` into a
         // SignalVec`<Name>`.
-        let name_vec_signal = entity_vec.signal_vec().map_signal(factory_system);
+        let name_vec_signal = entity_vec.signal_vec_old().map_signal(factory_system);
         let handle = name_vec_signal
             .for_each(capture_signal_vec_output)
             .register(app.world_mut());
@@ -4772,7 +5095,7 @@ mod tests {
 
         // Test 4: Source SignalVec Push.
         let entity_c = app.world_mut().spawn(Name::new("Charlie")).id();
-        entity_vec.write().push(entity_c);
+        entity_vec.write_old().push(entity_c);
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4787,7 +5110,7 @@ mod tests {
 
         // Test 5: Source SignalVec InsertAt.
         let entity_d = app.world_mut().spawn(Name::new("David")).id();
-        entity_vec.write().insert(1, entity_d);
+        entity_vec.write_old().insert(1, entity_d);
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4802,7 +5125,7 @@ mod tests {
         );
 
         // Test 6: Source SignalVec RemoveAt. Remove Bob
-        entity_vec.write().remove(2);
+        entity_vec.write_old().remove(2);
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4819,7 +5142,7 @@ mod tests {
         let entity_e = app.world_mut().spawn(Name::new("Eve")).id();
 
         // Replace Alicia with Eve
-        entity_vec.write().set(0, entity_e);
+        entity_vec.write_old().set(0, entity_e);
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4857,7 +5180,7 @@ mod tests {
         );
 
         // Test 8: Source SignalVec Move. Move Charlie to front
-        entity_vec.write().move_item(2, 0);
+        entity_vec.write_old().move_item(2, 0);
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4886,7 +5209,7 @@ mod tests {
         );
 
         // Test 9: Source SignalVec Pop. Removes David
-        entity_vec.write().pop();
+        entity_vec.write_old().pop();
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
@@ -4894,13 +5217,13 @@ mod tests {
         assert_eq!(diffs[0], VecDiff::Pop, "Pop diff is incorrect");
 
         // Test 10: Source SignalVec Clear.
-        entity_vec.write().clear();
+        entity_vec.write_old().clear();
         entity_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<Name>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Clear should produce one diff");
         assert_eq!(diffs[0], VecDiff::Clear, "Clear diff is incorrect");
-        assert!(entity_vec.read().is_empty());
+        assert!(entity_vec.read_old().is_empty());
         handle.cleanup(app.world_mut());
     }
 
@@ -4914,13 +5237,13 @@ mod tests {
         app.init_resource::<SignalVecOutput<i32>>();
 
         // The source vector contains a mix of values to be filtered.
-        let source_vec = MutableVec::from(vec![1, 2, 3, 4]);
+        let source_vec = MutableVecOld::from(vec![1, 2, 3, 4]);
 
         // The filter predicate: only allow even numbers.
         let is_even = |In(x): In<i32>| x % 2 == 0;
 
         // The signal chain under test.
-        let filtered_signal = source_vec.signal_vec().filter(is_even);
+        let filtered_signal = source_vec.signal_vec_old().filter(is_even);
 
         let handle = filtered_signal
             .for_each(capture_signal_vec_output)
@@ -4943,7 +5266,7 @@ mod tests {
 
         // --- 3. Test `Push` ---
         // Push a value that passes the filter (6).
-        source_vec.write().push(6);
+        source_vec.write_old().push(6);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -4953,7 +5276,7 @@ mod tests {
         assert_eq!(current_state, vec![2, 4, 6]);
 
         // Push a value that fails the filter (7).
-        source_vec.write().push(7);
+        source_vec.write_old().push(7);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -4964,7 +5287,7 @@ mod tests {
         // Update an item from filtered-out to included (3 -> 8).
         // Source is [1, 2, 3, 4, 6, 7]. Update index 2.
         // It should be inserted into the output at index 1 (after 2).
-        source_vec.write().set(2, 8);
+        source_vec.write_old().set(2, 8);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -4980,7 +5303,7 @@ mod tests {
         // Update an item from included to filtered-out (4 -> 9).
         // Source is now [1, 2, 8, 4, 6, 7]. Update index 3.
         // It should be removed from the output at index 2 (where 4 was).
-        source_vec.write().set(3, 9);
+        source_vec.write_old().set(3, 9);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -4995,7 +5318,7 @@ mod tests {
 
         // --- 5. Test `RemoveAt` ---
         // Remove an included item (2) from the source at index 1.
-        source_vec.write().remove(1);
+        source_vec.write_old().remove(1);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -5009,7 +5332,7 @@ mod tests {
         // Move 8 (source index 1) to after 6 (source index 3).
         // Source becomes [1, 9, 6, 8, 7].
         // This should move index 0 (value 8) to index 1 in the output.
-        source_vec.write().move_item(1, 3);
+        source_vec.write_old().move_item(1, 3);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -5025,7 +5348,7 @@ mod tests {
         assert_eq!(current_state, vec![6, 8]);
 
         // --- 7. Test `Clear` ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -5048,14 +5371,14 @@ mod tests {
         app.init_resource::<SignalVecOutput<u32>>();
 
         // The source vector contains strings, some of which are parsable as numbers.
-        let source_vec = MutableVec::from(vec!["10", "foo", "20", "bar"]);
+        let source_vec = MutableVecOld::from(vec!["10", "foo", "20", "bar"]);
 
         // The filter_map predicate: parse strings to u32, returning Some on success
         // and None on failure.
         let parse_u32 = |In(s): In<&'static str>| s.parse::<u32>().ok();
 
         // The signal chain under test.
-        let filtered_mapped_signal = source_vec.signal_vec().filter_map(parse_u32);
+        let filtered_mapped_signal = source_vec.signal_vec_old().filter_map(parse_u32);
 
         let handle = filtered_mapped_signal
             .for_each(capture_signal_vec_output)
@@ -5078,7 +5401,7 @@ mod tests {
 
         // --- 3. Test `Push` ---
         // Push a value that passes the filter_map ("30").
-        source_vec.write().push("30");
+        source_vec.write_old().push("30");
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5088,7 +5411,7 @@ mod tests {
         assert_eq!(current_state, vec![10, 20, 30]);
 
         // Push a value that fails the filter_map ("baz").
-        source_vec.write().push("baz");
+        source_vec.write_old().push("baz");
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5096,7 +5419,7 @@ mod tests {
 
         // --- 4. Test `UpdateAt` Status Changes ---
         // Case 1: None -> Some (Update "foo" at source index 1 to "40").
-        source_vec.write().set(1, "40");
+        source_vec.write_old().set(1, "40");
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5106,7 +5429,7 @@ mod tests {
         assert_eq!(current_state, vec![10, 40, 20, 30]);
 
         // Case 2: Some -> None (Update "20" at source index 2 to "qux").
-        source_vec.write().set(2, "qux");
+        source_vec.write_old().set(2, "qux");
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5116,7 +5439,7 @@ mod tests {
         assert_eq!(current_state, vec![10, 40, 30]);
 
         // Case 3: Some -> Some (Update "10" at source index 0 to "50").
-        source_vec.write().set(0, "50");
+        source_vec.write_old().set(0, "50");
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5129,7 +5452,7 @@ mod tests {
         // Source is now: ["50", "40", "qux", "bar", "30", "baz"]
         // Filtered is: [50, 40, 30]
         // Remove "40" from source at index 1. This is at output index 1.
-        source_vec.write().remove(1);
+        source_vec.write_old().remove(1);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5143,7 +5466,7 @@ mod tests {
         // Filtered is: [50, 30]
         // Move "30" (source index 3) to the front (source index 0).
         // This moves output index 1 to output index 0.
-        source_vec.write().move_item(3, 0);
+        source_vec.write_old().move_item(3, 0);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5159,7 +5482,7 @@ mod tests {
         assert_eq!(current_state, vec![30, 50]);
 
         // --- 7. Test `Clear` ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -5197,8 +5520,8 @@ mod tests {
 
         // --- Setup --- Initially, filter for even numbers.
         app.insert_resource(FilterMode(true));
-        let source_vec = MutableVec::from(vec![1, 2, 3, 4]);
-        let filtered_signal = source_vec.signal_vec().filter_signal(|In(val): In<i32>| {
+        let source_vec = MutableVecOld::from(vec![1, 2, 3, 4]);
+        let filtered_signal = source_vec.signal_vec_old().filter_signal(|In(val): In<i32>| {
             SignalBuilder::from_resource::<FilterMode>().map(move |In(mode): In<FilterMode>| {
                 // even or odd
                 if mode.0 { val % 2 == 0 } else { val % 2 != 0 }
@@ -5222,7 +5545,7 @@ mod tests {
 
         // --- 3. Source Vec Push (respecting Odd filter) --- Push an odd number, should
         // appear.
-        source_vec.write().push(5);
+        source_vec.write_old().push(5);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
@@ -5233,7 +5556,7 @@ mod tests {
         );
 
         // Push an even number, should be filtered out.
-        source_vec.write().push(6);
+        source_vec.write_old().push(6);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -5260,7 +5583,7 @@ mod tests {
         );
 
         // --- 5. Source Vec RemoveAt --- Remove `4` (even) from source vec (at index 3).
-        source_vec.write().remove(3);
+        source_vec.write_old().remove(3);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
@@ -5268,7 +5591,7 @@ mod tests {
 
         // --- 6. Source Vec UpdateAt --- Update `3` (odd, at index 2) to `8` (even). This
         // should insert `8` into the filtered list.
-        source_vec.write().set(2, 8);
+        source_vec.write_old().set(2, 8);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
@@ -5282,7 +5605,7 @@ mod tests {
 
         // Update `6` (even, at index 4) to `7` (odd). This should remove `6` from the
         // filtered list.
-        source_vec.write().set(4, 7);
+        source_vec.write_old().set(4, 7);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
@@ -5291,7 +5614,7 @@ mod tests {
         assert_eq!(current_state, vec![2, 8], "State after updating 6 to 7 is incorrect.");
 
         // --- 7. Source Vec Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -5332,11 +5655,11 @@ mod tests {
         app.insert_resource(IsEven(true));
 
         // The source vector
-        let source_vec = MutableVec::from(vec![-2, -1, 0, 1, 2]);
+        let source_vec = MutableVecOld::from(vec![-2, -1, 0, 1, 2]);
 
         // --- The Signal Chain ---
         let final_signal = source_vec
-            .signal_vec()
+            .signal_vec_old()
             // Filter 1: controlled by IsPositive resource.
             .filter_signal(|In(val): In<i32>| {
                 SignalBuilder::from_resource::<IsPositive>()
@@ -5397,7 +5720,7 @@ mod tests {
         // --- 5. Test source vec modification --- Add an item that should pass both
         // current filters: IsPositive(false) and IsEven(false) -> Add -3. It should be
         // pushed to the end of the filtered list.
-        source_vec.write().push(-3);
+        source_vec.write_old().push(-3);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
@@ -5415,10 +5738,10 @@ mod tests {
         // --- 1. Setup ---
         let mut app = create_test_app();
         app.init_resource::<FinalSignalOutput<Vec<String>>>();
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
+        let source_vec = MutableVecOld::from(vec!["a".to_string(), "b".to_string()]);
 
         // The signal chain under test.
-        let state_signal = source_vec.signal_vec().to_signal();
+        let state_signal = source_vec.signal_vec_old().to_signal();
         let handle = state_signal
             .map(capture_final_output::<Vec<String>>)
             .register(app.world_mut());
@@ -5433,7 +5756,7 @@ mod tests {
 
         // --- 3. Test Individual Diffs ---
         // Test Push
-        source_vec.write().push("c".to_string());
+        source_vec.write_old().push("c".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5443,7 +5766,7 @@ mod tests {
         );
 
         // Test RemoveAt
-        source_vec.write().remove(1); // removes "b"
+        source_vec.write_old().remove(1); // removes "b"
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5453,7 +5776,7 @@ mod tests {
         );
 
         // Test InsertAt
-        source_vec.write().insert(0, "x".to_string());
+        source_vec.write_old().insert(0, "x".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5463,7 +5786,7 @@ mod tests {
         );
 
         // Test UpdateAt
-        source_vec.write().set(2, "C".to_string());
+        source_vec.write_old().set(2, "C".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5473,7 +5796,7 @@ mod tests {
         );
 
         // Test Move
-        source_vec.write().move_item(2, 0); // moves "C" to the front
+        source_vec.write_old().move_item(2, 0); // moves "C" to the front
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5483,7 +5806,7 @@ mod tests {
         );
 
         // Test Pop
-        source_vec.write().pop(); // removes "a"
+        source_vec.write_old().pop(); // removes "a"
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5503,7 +5826,7 @@ mod tests {
 
         // --- 5. Test Batched Mutations ---
         {
-            let mut writer = source_vec.write();
+            let mut writer = source_vec.write_old();
             writer.push("y".to_string()); // State: ["C", "x", "y"]
             writer.remove(0); // State: ["x", "y"]
         }
@@ -5516,7 +5839,7 @@ mod tests {
         );
 
         // --- 6. Test Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5538,9 +5861,9 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<FinalSignalOutput<bool>>();
         // Start with a non-empty vec to test the `false` state first.
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
+        let source_vec = MutableVecOld::from(vec!["a".to_string(), "b".to_string()]);
 
-        let is_empty_signal = source_vec.signal_vec().is_empty();
+        let is_empty_signal = source_vec.signal_vec_old().is_empty();
         let handle = is_empty_signal
             .map(capture_final_output::<bool>)
             .register(app.world_mut());
@@ -5558,7 +5881,7 @@ mod tests {
         // the emptiness state did not.
 
         // Push: size 2 -> 3. Still not empty.
-        source_vec.write().push("c".to_string());
+        source_vec.write_old().push("c".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5568,7 +5891,7 @@ mod tests {
         );
 
         // UpdateAt: size 3 -> 3. Still not empty.
-        source_vec.write().set(0, "A".to_string());
+        source_vec.write_old().set(0, "A".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5578,7 +5901,7 @@ mod tests {
         );
 
         // Move: size 3 -> 3. Still not empty.
-        source_vec.write().move_item(0, 2);
+        source_vec.write_old().move_item(0, 2);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5589,7 +5912,7 @@ mod tests {
 
         // --- 4. Test Transition to Empty ---
         // Current size is 3. We pop three times.
-        source_vec.write().pop(); // size 3 -> 2
+        source_vec.write_old().pop(); // size 3 -> 2
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5598,7 +5921,7 @@ mod tests {
             "Popping to size 2 should re-emit `false`."
         );
 
-        source_vec.write().pop(); // size 2 -> 1
+        source_vec.write_old().pop(); // size 2 -> 1
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5608,7 +5931,7 @@ mod tests {
         );
 
         // This is the pop that makes it empty. The state changes from false to true.
-        source_vec.write().pop(); // size 1 -> 0
+        source_vec.write_old().pop(); // size 1 -> 0
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5628,7 +5951,7 @@ mod tests {
 
         // --- 6. Test Transition to Non-Empty ---
         // The state changes from true to false.
-        source_vec.write().push("z".to_string());
+        source_vec.write_old().push("z".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5639,7 +5962,7 @@ mod tests {
 
         // --- 7. Test Clear Operation ---
         // The state changes from false to true.
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5661,9 +5984,9 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<FinalSignalOutput<usize>>();
         // Start with a non-empty vec.
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
+        let source_vec = MutableVecOld::from(vec!["a".to_string(), "b".to_string()]);
 
-        let len_signal = source_vec.signal_vec().len();
+        let len_signal = source_vec.signal_vec_old().len();
         let handle = len_signal.map(capture_final_output::<usize>).register(app.world_mut());
 
         // --- 2. Test Initial State ---
@@ -5676,7 +5999,7 @@ mod tests {
 
         // --- 3. Test Length-Changing Operations ---
         // Push: size 2 -> 3
-        source_vec.write().push("c".to_string());
+        source_vec.write_old().push("c".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5686,7 +6009,7 @@ mod tests {
         );
 
         // InsertAt: size 3 -> 4
-        source_vec.write().insert(1, "x".to_string());
+        source_vec.write_old().insert(1, "x".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5696,7 +6019,7 @@ mod tests {
         );
 
         // RemoveAt: size 4 -> 3
-        source_vec.write().remove(2); // removes "b"
+        source_vec.write_old().remove(2); // removes "b"
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5706,7 +6029,7 @@ mod tests {
         );
 
         // Pop: size 3 -> 2
-        source_vec.write().pop(); // removes "c"
+        source_vec.write_old().pop(); // removes "c"
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5719,7 +6042,7 @@ mod tests {
         // These should still re-emit the current length because the underlying vec changed.
 
         // UpdateAt: size 2 -> 2
-        source_vec.write().set(0, "A".to_string());
+        source_vec.write_old().set(0, "A".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5729,7 +6052,7 @@ mod tests {
         );
 
         // Move: size 2 -> 2
-        source_vec.write().move_item(0, 1);
+        source_vec.write_old().move_item(0, 1);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5749,7 +6072,7 @@ mod tests {
 
         // --- 6. Test Batched Mutations (Net Zero Length Change) ---
         {
-            let mut writer = source_vec.write();
+            let mut writer = source_vec.write_old();
             writer.push("y".to_string()); // len -> 3
             writer.remove(0); // len -> 2
         }
@@ -5763,7 +6086,7 @@ mod tests {
 
         // --- 7. Test Clear Operation ---
         // State changes from 2 to 0.
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5773,7 +6096,7 @@ mod tests {
         );
 
         // --- 8. Test Transition from Empty ---
-        source_vec.write().push("z".to_string());
+        source_vec.write_old().push("z".to_string());
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5794,9 +6117,9 @@ mod tests {
         // --- 1. Setup ---
         let mut app = create_test_app();
         app.init_resource::<FinalSignalOutput<i32>>();
-        let source_vec = MutableVec::from(vec![10, 20]);
+        let source_vec = MutableVecOld::from(vec![10, 20]);
 
-        let sum_signal = source_vec.signal_vec().sum();
+        let sum_signal = source_vec.signal_vec_old().sum();
         let handle = sum_signal.map(capture_final_output::<i32>).register(app.world_mut());
 
         // --- 2. Test Initial State ---
@@ -5809,7 +6132,7 @@ mod tests {
 
         // --- 3. Test Value-Changing Operations ---
         // Push: 30 -> 35
-        source_vec.write().push(5);
+        source_vec.write_old().push(5);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5819,7 +6142,7 @@ mod tests {
         );
 
         // UpdateAt: 35 -> 45 (updates 10 to 20)
-        source_vec.write().set(0, 20);
+        source_vec.write_old().set(0, 20);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5829,7 +6152,7 @@ mod tests {
         );
 
         // RemoveAt: 45 -> 25 (removes 20 at index 1)
-        source_vec.write().remove(1);
+        source_vec.write_old().remove(1);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5839,9 +6162,9 @@ mod tests {
         );
 
         // Pop: 25 -> 5 (removes 20 at the end)
-        source_vec.write().pop(); // vec is now [20]
-        source_vec.write().pop(); // vec is now []
-        source_vec.write().push(5); // vec is now [5]
+        source_vec.write_old().pop(); // vec is now [20]
+        source_vec.write_old().pop(); // vec is now []
+        source_vec.write_old().push(5); // vec is now [5]
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5852,7 +6175,7 @@ mod tests {
 
         // --- 4. Test Sum-Preserving Operation (`Move`) ---
         // Add another element to make move meaningful
-        source_vec.write().push(15); // vec is now [5, 15], sum is 20
+        source_vec.write_old().push(15); // vec is now [5, 15], sum is 20
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5862,7 +6185,7 @@ mod tests {
         );
 
         // Move does not change the sum, but should still re-emit the value.
-        source_vec.write().move_item(0, 1); // vec is now [15, 5], sum is still 20
+        source_vec.write_old().move_item(0, 1); // vec is now [15, 5], sum is still 20
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5881,7 +6204,7 @@ mod tests {
 
         // --- 6. Test Clear Operation ---
         // State changes from 20 to 0.
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5891,7 +6214,7 @@ mod tests {
         );
 
         // --- 7. Test Transition from Empty ---
-        source_vec.write().push(-10);
+        source_vec.write_old().push(-10);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         assert_eq!(
@@ -5914,10 +6237,10 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<String>>();
 
-        let left_vec = MutableVec::from(vec!["L1".to_string(), "L2".to_string()]);
-        let right_vec = MutableVec::from(vec!["R1".to_string(), "R2".to_string()]);
+        let left_vec = MutableVecOld::from(vec!["L1".to_string(), "L2".to_string()]);
+        let right_vec = MutableVecOld::from(vec!["R1".to_string(), "R2".to_string()]);
 
-        let chained_signal = left_vec.signal_vec().chain(right_vec.signal_vec());
+        let chained_signal = left_vec.signal_vec_old().chain(right_vec.signal_vec_old());
         let handle = chained_signal
             .for_each(capture_signal_vec_output)
             .register(app.world_mut());
@@ -5936,12 +6259,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             "Initial state was not correctly concatenated."
         );
-        let left_len = || left_vec.read().len();
+        let left_len = || left_vec.read_old().len();
 
         // --- 3. Left-Side Mutations ---
 
         // Push
-        left_vec.write().push("L3".to_string());
+        left_vec.write_old().push("L3".to_string());
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -5962,7 +6285,7 @@ mod tests {
         );
 
         // UpdateAt
-        left_vec.write().set(0, "L1-new".to_string());
+        left_vec.write_old().set(0, "L1-new".to_string());
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -5983,7 +6306,7 @@ mod tests {
         );
 
         // Move
-        left_vec.write().move_item(2, 0); // "L3" to front
+        left_vec.write_old().move_item(2, 0); // "L3" to front
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6004,7 +6327,7 @@ mod tests {
         );
 
         // Pop
-        left_vec.write().pop(); // removes "L2"
+        left_vec.write_old().pop(); // removes "L2"
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6021,7 +6344,7 @@ mod tests {
         // --- 4. Right-Side Mutations --- (left_len() is now 2)
 
         // InsertAt
-        right_vec.write().insert(1, "R-insert".to_string());
+        right_vec.write_old().insert(1, "R-insert".to_string());
         right_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6042,7 +6365,7 @@ mod tests {
         );
 
         // Move
-        right_vec.write().move_item(0, 2); // "R1" to end
+        right_vec.write_old().move_item(0, 2); // "R1" to end
         right_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6065,7 +6388,7 @@ mod tests {
         // --- 5. `Replace` and `Clear` ---
 
         // Replace Left
-        left_vec.write().replace(vec!["LX".to_string()]);
+        left_vec.write_old().replace(vec!["LX".to_string()]);
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6080,7 +6403,7 @@ mod tests {
         );
 
         // Replace Right
-        right_vec.write().replace(vec!["RY".to_string(), "RZ".to_string()]);
+        right_vec.write_old().replace(vec!["RY".to_string(), "RZ".to_string()]);
         right_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6092,7 +6415,7 @@ mod tests {
         );
 
         // Clear Left
-        left_vec.write().clear();
+        left_vec.write_old().clear();
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6105,7 +6428,7 @@ mod tests {
         assert_eq!(left_len(), 0);
 
         // Push to Left when it's empty
-        left_vec.write().push("L-again".to_string());
+        left_vec.write_old().push("L-again".to_string());
         left_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6126,7 +6449,7 @@ mod tests {
         );
 
         // Clear Right
-        right_vec.write().clear();
+        right_vec.write_old().clear();
         right_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6136,10 +6459,10 @@ mod tests {
             ["L-again"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             "State after clearing right is incorrect"
         );
-        assert_eq!(right_vec.read().len(), 0);
+        assert_eq!(right_vec.read_old().len(), 0);
 
         // Push to Right when it's empty
-        right_vec.write().push("R-again".to_string());
+        right_vec.write_old().push("R-again".to_string());
         right_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<String>(app.world_mut());
@@ -6156,8 +6479,8 @@ mod tests {
         );
 
         // --- 6. Batched Diffs ---
-        left_vec.write().pop(); // L-again is gone
-        right_vec.write().push("R-batch".to_string());
+        left_vec.write_old().pop(); // L-again is gone
+        right_vec.write_old().push("R-batch".to_string());
         left_vec.flush_into_world(app.world_mut());
         right_vec.flush_into_world(app.world_mut());
         app.update();
@@ -6182,7 +6505,7 @@ mod tests {
         app.init_resource::<SignalVecOutput<String>>();
 
         let separator = "sep".to_string();
-        let source_vec = MutableVec::new(); // Start empty for initial tests
+        let source_vec = MutableVecOld::new(); // Start empty for initial tests
 
         let interspersed_signal = source_vec.signal_vec().intersperse(separator.clone());
         let handle = interspersed_signal
@@ -6482,7 +6805,7 @@ mod tests {
         // Use `insert_resource` with an explicit value, as `ItemOrSep` doesn't have a Default.
         app.insert_resource(SignalVecOutput::<ItemOrSep>(Vec::new()));
 
-        let source_vec = MutableVec::from(vec![10u32, 20, 30]);
+        let source_vec = MutableVecOld::from(vec![10u32, 20, 30]);
 
         // CORRECTION: The closure's input parameter must be the concrete type
         // `signal::Source<Option<usize>>`, not a generic `impl Signal`. This satisfies
@@ -6491,7 +6814,7 @@ mod tests {
             |In(index_signal): In<crate::signal::Source<Option<usize>>>| ItemOrSep::Sep(index_signal);
 
         let interspersed_signal = source_vec
-            .signal_vec()
+            .signal_vec_old()
             .map_in(ItemOrSep::Item) // Map source items into our test enum
             .intersperse_with(separator_factory);
 
@@ -6540,7 +6863,7 @@ mod tests {
         handles_to_clean.push(h2);
 
         // --- 3. Test Push ---
-        source_vec.write().push(40);
+        source_vec.write_old().push(40);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
@@ -6561,7 +6884,7 @@ mod tests {
         }
 
         // --- 4. Test RemoveAt (from middle) and Index Reactivity ---
-        source_vec.write().remove(1); // Removes 20
+        source_vec.write_old().remove(1); // Removes 20
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
@@ -6604,7 +6927,7 @@ mod tests {
         handles_to_clean.push(h_rem_2);
 
         // --- 5. Test Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
@@ -6623,9 +6946,9 @@ mod tests {
         // --- 1. Setup ---
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<(u32, char)>>();
-        let source_vec = MutableVec::from(vec![(3, 'c'), (1, 'a'), (4, 'd')]);
+        let source_vec = MutableVecOld::from(vec![(3, 'c'), (1, 'a'), (4, 'd')]);
         let compare_system = |In((left, right)): In<((u32, char), (u32, char))>| left.0.cmp(&right.0);
-        let sorted_signal = source_vec.signal_vec().sort_by(compare_system);
+        let sorted_signal = source_vec.signal_vec_old().sort_by(compare_system);
         let handle = sorted_signal
             .for_each(capture_signal_vec_output)
             .register(app.world_mut());
@@ -6643,7 +6966,7 @@ mod tests {
         );
 
         // --- 3. Test Push ---
-        source_vec.write().push((2, 'b'));
+        source_vec.write_old().push((2, 'b'));
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6658,7 +6981,7 @@ mod tests {
         assert_eq!(current_state, vec![(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]);
 
         // --- 4. Test RemoveAt ---
-        source_vec.write().remove(1); // Removes (1, 'a')
+        source_vec.write_old().remove(1); // Removes (1, 'a')
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6668,7 +6991,7 @@ mod tests {
 
         // --- 5. Test UpdateAt ---
         // Case A: Update without changing sort order.
-        source_vec.write().set(0, (3, 'C')); // Was (3, 'c')
+        source_vec.write_old().set(0, (3, 'C')); // Was (3, 'c')
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6687,7 +7010,7 @@ mod tests {
         // Source is now [(3, 'C'), (4, 'd'), (2, 'b')]. Sorted is [(2, 'b'), (3, 'C'), (4, 'd')]
         // Update (4, 'd') at source index 1 to (0, 'z').
         // The old item was at sorted index 2. The new item should be at sorted index 0.
-        source_vec.write().set(1, (0, 'z'));
+        source_vec.write_old().set(1, (0, 'z'));
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6713,7 +7036,7 @@ mod tests {
         // --- 6. Test Move (in source) ---
         // Source: [(3, 'C'), (0, 'z'), (2, 'b')] -> move 0 to 2 -> [(0, 'z'), (2, 'b'), (3, 'C')]
         // Sorted output should not change at all.
-        source_vec.write().move_item(0, 2);
+        source_vec.write_old().move_item(0, 2);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6721,7 +7044,7 @@ mod tests {
         assert_eq!(current_state, vec![(0, 'z'), (2, 'b'), (3, 'C')]);
 
         // --- 7. Test Stability (Duplicate Keys) ---
-        source_vec.write().push((3, 'c'));
+        source_vec.write_old().push((3, 'c'));
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(
@@ -6735,7 +7058,7 @@ mod tests {
         );
 
         // --- 8. Test Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
@@ -6754,10 +7077,10 @@ mod tests {
         app.init_resource::<SignalVecOutput<i32>>();
 
         // The source vector, intentionally unsorted.
-        let source_vec = MutableVec::from(vec![5, 1, 4, -2, 3]);
+        let source_vec = MutableVecOld::from(vec![5, 1, 4, -2, 3]);
 
         // The signal chain under test, using the convenience method.
-        let sorted_signal = source_vec.signal_vec().sort_by_cmp();
+        let sorted_signal = source_vec.signal_vec_old().sort_by_cmp();
 
         let handle = sorted_signal
             .for_each(capture_signal_vec_output)
@@ -6778,7 +7101,7 @@ mod tests {
 
         // --- 3. Test Push ---
         // Push an item that should be inserted in the middle.
-        source_vec.write().push(2);
+        source_vec.write_old().push(2);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -6797,7 +7120,7 @@ mod tests {
         // Source becomes: `[5, 1, -2, 3, 2]`
         // Sorted output before was: `[-2, 1, 2, 3, 4, 5]`
         // The item '4' is at sorted index 4.
-        source_vec.write().remove(2);
+        source_vec.write_old().remove(2);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -6815,7 +7138,7 @@ mod tests {
         );
 
         // --- 5. Test Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<i32>(app.world_mut());
@@ -6840,14 +7163,14 @@ mod tests {
 
         app.init_resource::<SignalVecOutput<DataItem>>();
 
-        let source_vec = MutableVec::from(vec![
+        let source_vec = MutableVecOld::from(vec![
             DataItem { id: 3, name: "C" },
             DataItem { id: 1, name: "A" },
             DataItem { id: 4, name: "D" },
         ]);
 
         let key_system = |In(item): In<DataItem>| item.id;
-        let sorted_signal = source_vec.signal_vec().sort_by_key(key_system);
+        let sorted_signal = source_vec.signal_vec_old().sort_by_key(key_system);
         let handle = sorted_signal
             .for_each(capture_signal_vec_output)
             .register(app.world_mut());
@@ -6870,7 +7193,7 @@ mod tests {
         );
 
         // --- 3. Test Push ---
-        source_vec.write().push(DataItem { id: 2, name: "B" });
+        source_vec.write_old().push(DataItem { id: 2, name: "B" });
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
@@ -6885,7 +7208,7 @@ mod tests {
         apply_diffs(&mut current_state, &diffs);
 
         // --- 4. Test RemoveAt ---
-        source_vec.write().remove(1); // Removes (1, 'A')
+        source_vec.write_old().remove(1); // Removes (1, 'A')
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
@@ -6895,7 +7218,7 @@ mod tests {
 
         // --- 5. Test UpdateAt ---
         // Case A: Update without changing the key.
-        source_vec.write().set(0, DataItem { id: 3, name: "C-new" });
+        source_vec.write_old().set(0, DataItem { id: 3, name: "C-new" });
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
@@ -6910,7 +7233,7 @@ mod tests {
         apply_diffs(&mut current_state, &diffs);
 
         // Case B: Update that changes the key and sort order.
-        source_vec.write().set(1, DataItem { id: 0, name: "Z" }); // was (4, 'D')
+        source_vec.write_old().set(1, DataItem { id: 0, name: "Z" }); // was (4, 'D')
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
@@ -6929,14 +7252,14 @@ mod tests {
         apply_diffs(&mut current_state, &diffs);
 
         // --- 6. Test Move (in source) ---
-        source_vec.write().move_item(0, 2);
+        source_vec.write_old().move_item(0, 2);
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
         assert!(diffs.is_empty(), "Moving in source should not affect sorted output.");
 
         // --- 7. Test Stability (Duplicate Keys) ---
-        source_vec.write().push(DataItem { id: 3, name: "c-dup" });
+        source_vec.write_old().push(DataItem { id: 3, name: "c-dup" });
         source_vec.flush_into_world(app.world_mut());
         app.update();
         apply_diffs(&mut current_state, &get_and_clear_output::<DataItem>(app.world_mut()));
@@ -6952,7 +7275,7 @@ mod tests {
         );
 
         // --- 8. Test Clear ---
-        source_vec.write().clear();
+        source_vec.write_old().clear();
         source_vec.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<DataItem>(app.world_mut());
@@ -7110,7 +7433,7 @@ mod tests {
     fn test_mutable_vec_push_and_flush() {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<u32>>();
-        let mutable_vec = MutableVec::new();
+        let mutable_vec = MutableVecOld::new();
         let signal_handle = mutable_vec
             .signal_vec()
             .for_each(capture_signal_vec_output)

@@ -27,7 +27,8 @@ fn main() {
     // We initialize it with two random colors.
     // It's wrapped in an `Arc<RwLock<...>>` internally, so cloning it is cheap
     // and allows multiple systems to access and modify the same data.
-    let colors = MutableVec::from([random_color(), random_color()]);
+    let colors = MutableVec::from(app.world_mut());
+    colors.write(app.world_mut()).replace([random_color(), random_color()]);
 
     app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---
@@ -121,16 +122,14 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
             // button entity to listen for a `Click` event.
             world.entity_mut(entity).observe(
                 // This closure is the event handler that runs when the button is clicked.
-                move |_: Trigger<Pointer<Click>>, colors: Res<Colors>, mut commands: Commands| {
+                move |_: Trigger<Pointer<Click>>,
+                      colors: Res<Colors>,
+                      mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     // Try to get the `Index` component from the clicked entity.
                     // We found the index! Now we can mutate the central data source.
                     // `colors.0.write()` gets a write lock on the `MutableVec`.
-                    let mut guard = colors.0.write();
+                    let mut guard = colors.0.write(&mut mutable_vec_datas);
                     guard.insert(guard.len(), random_color());
-                    // IMPORTANT: After mutating a `MutableVec`, you must call `flush()`
-                    // to broadcast the changes to all listening signals.
-                    // We queue the flush command to be run at the end of the frame.
-                    commands.queue(colors.0.flush());
                 },
             );
         })
@@ -263,16 +262,12 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
                 move |_: Trigger<Pointer<Click>>,
                       indices: Query<&Index>,
                       colors: Res<Colors>,
-                      mut commands: Commands| {
+                      mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     // Try to get the `Index` component from the clicked entity.
                     if let Ok(&Index(index)) = indices.get(entity) {
                         // We found the index! Now we can mutate the central data source.
                         // `colors.0.write()` gets a write lock on the `MutableVec`.
-                        colors.0.write().remove(index);
-                        // IMPORTANT: After mutating a `MutableVec`, you must call `flush()`
-                        // to broadcast the changes to all listening signals.
-                        // We queue the flush command to be run at the end of the frame.
-                        commands.queue(colors.0.flush());
+                        colors.0.write(&mut mutable_vec_datas).remove(index);
                     }
                 },
             );

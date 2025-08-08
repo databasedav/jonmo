@@ -51,7 +51,7 @@ pub mod prelude {
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
-        signal_vec::{IntoSignalVecEither, MutableVec, SignalVec, SignalVecEither, SignalVecExt},
+        signal_vec::{IntoSignalVecEither, MutableVecOld, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
         utils::{LazyEntity, clone},
     };
     #[doc(no_inline)]

@@ -9,8 +9,8 @@ use rand::{Rng, prelude::IndexedRandom};
 
 fn main() {
     let mut app = App::new();
-    let datas = MutableVec::from((0..12).map(|_| random_data()).collect::<Vec<_>>());
-    let rows = MutableVec::from((0..5).map(|_| ()).collect::<Vec<_>>());
+    let datas = MutableVecOld::from((0..12).map(|_| random_data()).collect::<Vec<_>>());
+    let rows = MutableVecOld::from((0..5).map(|_| ()).collect::<Vec<_>>());
     app.add_plugins(examples_plugin)
         .insert_resource(Datas(datas.clone()))
         .insert_resource(Rows(rows.clone()))
@@ -63,10 +63,10 @@ struct Data {
 }
 
 #[derive(Resource)]
-struct Datas(MutableVec<Data>);
+struct Datas(MutableVecOld<Data>);
 
 #[derive(Resource)]
-struct Rows(MutableVec<()>);
+struct Rows(MutableVecOld<()>);
 
 #[derive(Component, Clone, PartialEq, Debug)]
 struct NumberFilters(HashSet<Parity>);
@@ -82,7 +82,7 @@ struct Sorted;
 
 const GAP: f32 = 5.;
 
-fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
+fn ui(items: MutableVecOld<Data>, rows: MutableVecOld<()>) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.),
         width: Val::Percent(100.),
@@ -113,7 +113,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
             )))
             .child(button("+", -2.).apply(on_click(
                 |_: Trigger<Pointer<Click>>, datas: Res<Datas>, mut commands: Commands| {
-                    datas.0.write().insert(0, random_data());
+                    datas.0.write_old().insert(0, random_data());
                     commands.queue(datas.0.flush());
                 },
             )))
@@ -126,14 +126,14 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 })
                 .children_signal_vec(
                     items
-                        .signal_vec()
+                        .signal_vec_old()
                         .enumerate()
                         .map_in(|(index, data)| item(index.dedupe(), data)),
                 ),
             ),
         )
         .children_signal_vec(
-            rows.signal_vec()
+            rows.signal_vec_old()
                 .enumerate()
                 .map_in(clone!((items) move |(index, _)| row(index.dedupe(), items.clone()))),
         )
@@ -149,7 +149,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
             ))
             .child(button("+", -2.).apply(on_click(
                 |_: Trigger<Pointer<Click>>, rows: Res<Rows>, mut commands: Commands| {
-                    rows.0.write().push(());
+                    rows.0.write_old().push(());
                     commands.queue(rows.0.flush());
                 },
             ))),
@@ -382,7 +382,7 @@ fn button(text: &'static str, offset: f32) -> JonmoBuilder {
 #[derive(Component, Clone)]
 struct Index(usize);
 
-fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> JonmoBuilder {
+fn row(index: impl Signal<Item = Option<usize>>, items: MutableVecOld<Data>) -> JonmoBuilder {
     let row_parent = LazyEntity::new();
     JonmoBuilder::from((
         Node {
@@ -403,7 +403,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
             .apply(on_click(
                 |click: Trigger<Pointer<Click>>, rows: Res<Rows>, indices: Query<&Index>, mut commands: Commands| {
                     if let Ok(&Index(index)) = indices.get(click.target()) {
-                        rows.0.write().remove(index);
+                        rows.0.write_old().remove(index);
                         commands.queue(rows.0.flush());
                     }
                 },
@@ -434,7 +434,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                 .has_component::<Sorted>()
                 .dedupe()
                 .switch_signal_vec(move |In(sorted)| {
-                    let base = items.signal_vec().enumerate();
+                    let base = items.signal_vec_old().enumerate();
                     if sorted {
                         base.sort_by_key(|In((_, Data { number, .. }))| number).left_either()
                     } else {
@@ -503,7 +503,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
     .apply(on_click(
         |click: Trigger<Pointer<Click>>, datas: Res<Datas>, indices: Query<&Index>, mut commands: Commands| {
             if let Ok(&Index(index)) = indices.get(click.target()) {
-                datas.0.write().remove(index);
+                datas.0.write_old().remove(index);
                 commands.queue(datas.0.flush());
             }
         },
