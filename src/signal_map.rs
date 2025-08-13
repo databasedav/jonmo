@@ -907,7 +907,7 @@ impl<K, V> MutableBTreeMap<K, V> {
             // This is the system for the one-and-only broadcaster. It just drains diffs that
             // `flush` has put into its component.
             let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
-                if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<K, V>>(self_entity.get()) {
+                if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<K, V>>(*self_entity) {
                     if diffs.0.is_empty() {
                         None
                     } else {
@@ -955,7 +955,7 @@ impl<K, V> MutableBTreeMap<K, V> {
                             *has_run = true;
                             let initial_diffs =
                                 world
-                                    .get_entity_mut(self_entity.get())
+                                    .get_entity_mut(*self_entity)
                                     .ok()
                                     .and_then(|mut entity| entity.take::<QueuedMapDiffs<K, V>>())
                                     .map(|queued| queued.0)

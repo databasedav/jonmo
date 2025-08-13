@@ -628,7 +628,7 @@ impl SignalBuilder {
 
     /// Creates a [`Source`] signal from a [`LazyEntity`].
     pub fn from_lazy_entity(entity: LazyEntity) -> Source<Entity> {
-        Self::from_system(move |_: In<()>| entity.get())
+        Self::from_system(move |_: In<()>| *entity)
     }
 
     /// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
@@ -675,7 +675,7 @@ impl SignalBuilder {
     where
         C: Component + Clone,
     {
-        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(entity.get()).ok().cloned())
+        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(*entity).ok().cloned())
     }
 
     /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], always outputting an
@@ -693,7 +693,7 @@ impl SignalBuilder {
     where
         C: Component + Clone,
     {
-        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity.get()).ok().cloned()))
+        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(*entity).ok().cloned()))
     }
 
     /// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
@@ -1406,7 +1406,7 @@ pub trait SignalExt: Signal {
             let output_system_entity = LazyEntity::new();
             let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
                 clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
-                    if let Ok(mut queue) = q.get_mut(output_system_entity.get()) {
+                    if let Ok(mut queue) = q.get_mut(*output_system_entity) {
                         if queue.0.is_empty() {
                             None
                         } else {
@@ -1971,7 +1971,7 @@ mod tests {
     use crate::{
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
-        prelude::{MutableVecOld, SignalVecExt, clone},
+        prelude::{MutableVec, SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
         signal_vec::VecDiff,
         utils::{LazyEntity, SSs},
@@ -2535,8 +2535,8 @@ mod tests {
         app.init_resource::<SignalVecOutput<i32>>();
 
         // Two different data sources to switch between.
-        let list_a = MutableVecOld::from(vec![10, 20]);
-        let list_b = MutableVecOld::from(vec![100, 200, 300]);
+        let list_a = MutableVec::from((app.world_mut(), [10, 20]));
+        let list_b = MutableVec::from((app.world_mut(), [100, 200, 300]));
 
         // A resource to control which list is active.
         #[derive(Resource, Clone, Copy, PartialEq, Debug)]
@@ -2553,8 +2553,8 @@ mod tests {
         // The signal chain under test.
         let switched_signal = control_signal.dedupe().switch_signal_vec(
             clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                ListSelector:: A => list_a.signal_vec_old().map_in(identity).boxed_clone(),
-                ListSelector:: B => list_b.signal_vec_old().boxed_clone(),
+                ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                ListSelector:: B => list_b.signal_vec().boxed_clone(),
             }),
         );
 
@@ -2574,8 +2574,7 @@ mod tests {
 
         // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
         // should be forwarded.
-        list_a.write_old().push(30);
-        list_a.flush_into_world(app.world_mut());
+        list_a.write(app.world_mut()).push(30);
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
@@ -2601,16 +2600,14 @@ mod tests {
 
         // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
         // List A should be ignored. This should not be seen
-        list_a.write_old().push(99);
-        list_a.flush_into_world(app.world_mut());
+        list_a.write(app.world_mut()).push(99);
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
         assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
 
         // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
         // should now be forwarded. remove 100
-        list_b.write_old().remove(0);
-        list_b.flush_into_world(app.world_mut());
+        list_b.write(app.world_mut()).remove(0);
         app.update();
         let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
         assert_eq!(diffs.len(), 1, "RemoveAt from new active list should produce one diff.");

@@ -21,14 +21,13 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-
+    let world = app.world_mut();
     // 1. --- DATA SOURCE SETUP ---
     // `MutableVec` is the core reactive data source for lists in `jonmo`.
     // We initialize it with two random colors.
     // It's wrapped in an `Arc<RwLock<...>>` internally, so cloning it is cheap
     // and allows multiple systems to access and modify the same data.
-    let colors = MutableVec::from(app.world_mut());
-    colors.write(app.world_mut()).replace([random_color(), random_color()]);
+    let colors = MutableVec::from((world, [random_color(), random_color()]));
 
     app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---

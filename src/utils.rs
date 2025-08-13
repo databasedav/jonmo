@@ -1,3 +1,5 @@
+use core::ops::Deref;
+
 use bevy_ecs::prelude::*;
 use bevy_platform::sync::{Arc, OnceLock};
 #[doc(no_inline)]
@@ -8,6 +10,8 @@ pub use enclose::enclose as clone;
 /// bodies of systems.
 #[derive(Default, Clone)]
 pub struct LazyEntity(Arc<OnceLock<Entity>>);
+
+const LAZY_ENTITY_GET_ERROR: &str = "EntityHolder does not contain an Entity";
 
 impl LazyEntity {
     #[allow(missing_docs)]
@@ -22,7 +26,15 @@ impl LazyEntity {
 
     /// Get the [`Entity`], panicking if it was not set.
     pub fn get(&self) -> Entity {
-        self.0.get().copied().expect("EntityHolder does not contain an Entity")
+        self.0.get().copied().expect(LAZY_ENTITY_GET_ERROR)
+    }
+}
+
+impl Deref for LazyEntity {
+    type Target = Entity;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.get().expect(LAZY_ENTITY_GET_ERROR)
     }
 }
 

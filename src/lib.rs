@@ -24,20 +24,24 @@ pub mod utils;
 #[derive(Default)]
 pub struct JonmoPlugin;
 
+/// [`SystemSet`] that can be used to schedule systems around signal processing.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignalProcessing;
+
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Last,
             (
-                signal_vec::flush_mutable_vecs,
                 (
                     signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
                     signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
                 ),
                 graph::process_signal_graph,
-                graph::flush_cleanup_signals,
+                (graph::flush_cleanup_signals, signal_vec::despawn_stale_mutable_vecs),
             )
-                .chain(),
+                .chain()
+                .in_set(SignalProcessing),
         );
     }
 }
@@ -51,7 +55,7 @@ pub mod prelude {
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
-        signal_vec::{IntoSignalVecEither, MutableVecOld, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
+        signal_vec::{IntoSignalVecEither, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
         utils::{LazyEntity, clone},
     };
     #[doc(no_inline)]

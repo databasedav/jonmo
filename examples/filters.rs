@@ -9,8 +9,9 @@ use rand::{Rng, prelude::IndexedRandom};
 
 fn main() {
     let mut app = App::new();
-    let datas = MutableVecOld::from((0..12).map(|_| random_data()).collect::<Vec<_>>());
-    let rows = MutableVecOld::from((0..5).map(|_| ()).collect::<Vec<_>>());
+    let world = app.world_mut();
+    let datas = MutableVec::from((&mut *world, (0..12).map(|_| random_data()).collect::<Vec<_>>()));
+    let rows = MutableVec::from((world, (0..5).map(|_| ()).collect::<Vec<_>>()));
     app.add_plugins(examples_plugin)
         .insert_resource(Datas(datas.clone()))
         .insert_resource(Rows(rows.clone()))
@@ -63,10 +64,10 @@ struct Data {
 }
 
 #[derive(Resource)]
-struct Datas(MutableVecOld<Data>);
+struct Datas(MutableVec<Data>);
 
 #[derive(Resource)]
-struct Rows(MutableVecOld<()>);
+struct Rows(MutableVec<()>);
 
 #[derive(Component, Clone, PartialEq, Debug)]
 struct NumberFilters(HashSet<Parity>);
@@ -82,7 +83,7 @@ struct Sorted;
 
 const GAP: f32 = 5.;
 
-fn ui(items: MutableVecOld<Data>, rows: MutableVecOld<()>) -> JonmoBuilder {
+fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
     JonmoBuilder::from(Node {
         height: Val::Percent(100.),
         width: Val::Percent(100.),
@@ -112,9 +113,10 @@ fn ui(items: MutableVecOld<Data>, rows: MutableVecOld<()>) -> JonmoBuilder {
                 TextLayout::new_with_justify(JustifyText::Center),
             )))
             .child(button("+", -2.).apply(on_click(
-                |_: Trigger<Pointer<Click>>, datas: Res<Datas>, mut commands: Commands| {
-                    datas.0.write_old().insert(0, random_data());
-                    commands.queue(datas.0.flush());
+                |_: Trigger<Pointer<Click>>,
+                 datas: Res<Datas>,
+                 mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                    datas.0.write(&mut mutable_vec_datas).insert(0, random_data());
                 },
             )))
             .child(
@@ -126,14 +128,14 @@ fn ui(items: MutableVecOld<Data>, rows: MutableVecOld<()>) -> JonmoBuilder {
                 })
                 .children_signal_vec(
                     items
-                        .signal_vec_old()
+                        .signal_vec()
                         .enumerate()
                         .map_in(|(index, data)| item(index.dedupe(), data)),
                 ),
             ),
         )
         .children_signal_vec(
-            rows.signal_vec_old()
+            rows.signal_vec()
                 .enumerate()
                 .map_in(clone!((items) move |(index, _)| row(index.dedupe(), items.clone()))),
         )
@@ -148,9 +150,8 @@ fn ui(items: MutableVecOld<Data>, rows: MutableVecOld<()>) -> JonmoBuilder {
                 // BackgroundColor(Color::WHITE),
             ))
             .child(button("+", -2.).apply(on_click(
-                |_: Trigger<Pointer<Click>>, rows: Res<Rows>, mut commands: Commands| {
-                    rows.0.write_old().push(());
-                    commands.queue(rows.0.flush());
+                |_: Trigger<Pointer<Click>>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                    rows.0.write(&mut mutable_vec_datas).push(());
                 },
             ))),
         ),
@@ -382,7 +383,7 @@ fn button(text: &'static str, offset: f32) -> JonmoBuilder {
 #[derive(Component, Clone)]
 struct Index(usize);
 
-fn row(index: impl Signal<Item = Option<usize>>, items: MutableVecOld<Data>) -> JonmoBuilder {
+fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> JonmoBuilder {
     let row_parent = LazyEntity::new();
     JonmoBuilder::from((
         Node {
@@ -401,10 +402,12 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVecOld<Data>) -> 
         button("-", -3.)
             .component_signal(index.map_in(|index| index.map(Index)))
             .apply(on_click(
-                |click: Trigger<Pointer<Click>>, rows: Res<Rows>, indices: Query<&Index>, mut commands: Commands| {
+                |click: Trigger<Pointer<Click>>,
+                 rows: Res<Rows>,
+                 indices: Query<&Index>,
+                 mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     if let Ok(&Index(index)) = indices.get(click.target()) {
-                        rows.0.write_old().remove(index);
-                        commands.queue(rows.0.flush());
+                        rows.0.write(&mut mutable_vec_datas).remove(index);
                     }
                 },
             )),
@@ -434,7 +437,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVecOld<Data>) -> 
                 .has_component::<Sorted>()
                 .dedupe()
                 .switch_signal_vec(move |In(sorted)| {
-                    let base = items.signal_vec_old().enumerate();
+                    let base = items.signal_vec().enumerate();
                     if sorted {
                         base.sort_by_key(|In((_, Data { number, .. }))| number).left_either()
                     } else {
@@ -501,19 +504,21 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
     ))
     .component_signal(index.map_in(|index| index.map(Index)))
     .apply(on_click(
-        |click: Trigger<Pointer<Click>>, datas: Res<Datas>, indices: Query<&Index>, mut commands: Commands| {
+        |click: Trigger<Pointer<Click>>,
+         datas: Res<Datas>,
+         indices: Query<&Index>,
+         mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
             if let Ok(&Index(index)) = indices.get(click.target()) {
-                datas.0.write_old().remove(index);
-                commands.queue(datas.0.flush());
+                datas.0.write(&mut mutable_vec_datas).remove(index);
             }
         },
     ))
-    .child(JonmoBuilder::from((
+    .child((
         Node::default(),
         Text::new(number.to_string()),
         TextColor(Color::BLACK),
         TextLayout::new_with_justify(JustifyText::Center),
-    )))
+    ))
 }
 
 fn camera(mut commands: Commands) {

@@ -5,7 +5,11 @@ use super::{
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
     utils::{LazyEntity, SSs, ancestor_map},
 };
-use bevy_ecs::{component::Mutable, prelude::*};
+use bevy_ecs::{
+    component::Mutable,
+    prelude::*,
+    system::{IntoObserverSystem, RunSystemOnce},
+};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
@@ -60,6 +64,19 @@ impl JonmoBuilder {
         self
     }
 
+    /// Run a [`System`] which takes [`In`] this builder's [`Entity`].
+    pub fn on_spawn_with_system<T, M>(self, system: T) -> Self
+    where
+        T: IntoSystem<In<Entity>, (), M> + SSs,
+    {
+        self.on_spawn(|world, entity| {
+            if let Err(error) = world.run_system_once_with(system, entity) {
+                #[cfg(feature = "tracing")]
+                bevy_log::error!("failed to run system on spawn: {}", error);
+            }
+        })
+    }
+
     /// Run a function with this builder's [`EntityWorldMut`].
     pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
         self.on_spawn(move |world, entity| {
@@ -86,6 +103,15 @@ impl JonmoBuilder {
         })
     }
 
+    /// Attach an [`Observer`] to this builder.
+    pub fn observe<E: Event, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
+        self.on_spawn(|world, entity| {
+            if let Ok(mut entity) = world.get_entity_mut(entity) {
+                entity.observe(observer);
+            }
+        })
+    }
+
     /// Set the [`LazyEntity`] to this builder's [`Entity`].
     pub fn entity_sync(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
@@ -107,6 +133,23 @@ impl JonmoBuilder {
             add_handle(world, entity, handle);
         };
         self.on_spawn(on_spawn)
+    }
+
+    /// Reactively run a function with this builder's [`EntityWorldMut`] and the output of a
+    /// [`Signal`].
+    ///
+    /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn on_signal_with_entity<I, S, F>(self, signal: S, mut f: F) -> Self
+    where
+        I: Clone + 'static,
+        S: Signal<Item = I> + SSs,
+        F: FnMut(EntityWorldMut, I) + SSs,
+    {
+        self.on_signal(signal, move |In((entity, value)), world: &mut World| {
+            if let Ok(entity) = world.get_entity_mut(entity) {
+                f(entity, value)
+            }
+        })
     }
 
     /// Reactively run a function with mutable access (via [`Mut`]) to this builder's [`Entity`]'s
@@ -638,7 +681,7 @@ mod tests {
     use super::*;
     use crate::{
         JonmoPlugin,
-        prelude::MutableVecOld,
+        prelude::MutableVec,
         signal::{SignalBuilder, SignalExt},
     };
     use bevy::prelude::*;
@@ -2942,13 +2985,13 @@ mod tests {
     fn test_children_signal_vec() {
         // --- 1. SETUP ---
         let mut app = create_test_app();
-        let source_vec = MutableVecOld::from(vec![10u32, 20u32]);
+        let source_vec = MutableVec::from((app.world_mut(), [10u32, 20u32]));
 
         // A factory function to create a simple JonmoBuilder for a reactive child.
         let child_builder_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
 
         // The SignalVec that will drive the children.
-        let children_signal = source_vec.signal_vec_old().map_in(child_builder_factory);
+        let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
 
         // The parent builder, with static children sandwiching the reactive ones to test ordering.
         let parent_builder = JonmoBuilder::new()
@@ -2969,8 +3012,7 @@ mod tests {
         );
 
         // --- 3. TEST `PUSH` ---
-        source_vec.write_old().push(30);
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).push(30);
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -2985,8 +3027,7 @@ mod tests {
         );
 
         // --- 4. TEST `INSERT_AT` ---
-        source_vec.write_old().insert(1, 15); // Insert 15 between 10 and 20
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).insert(1, 15); // Insert 15 between 10 and 20
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3004,8 +3045,7 @@ mod tests {
         // --- 5. TEST `UPDATE_AT` ---
         let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
         let entity_to_be_replaced = old_child_entities[3]; // The "Reactive(20)" entity
-        source_vec.write_old().set(2, 25); // Update 20 to 25
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).set(2, 25); // Update 20 to 25
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3027,8 +3067,7 @@ mod tests {
         // --- 6. TEST `REMOVE_AT` ---
         let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
         let entity_to_be_removed = old_child_entities[2]; // The "Reactive(15)" entity
-        source_vec.write_old().remove(1); // Remove 15
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).remove(1); // Remove 15
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3047,8 +3086,7 @@ mod tests {
         );
 
         // --- 7. TEST `MOVE` ---
-        source_vec.write_old().move_item(2, 0); // Move 30 (now at index 2) to the front
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).move_item(2, 0); // Move 30 (now at index 2) to the front
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3065,8 +3103,7 @@ mod tests {
         // --- 8. TEST `POP` ---
         let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
         let entity_to_be_popped = old_child_entities[3]; // The "Reactive(25)" entity
-        source_vec.write_old().pop(); // Removes 25
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).pop(); // Removes 25
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3083,8 +3120,7 @@ mod tests {
             .into_iter()
             .filter(|e| app.world().get::<ReactiveChild>(*e).is_some())
             .collect::<Vec<_>>();
-        source_vec.write_old().clear();
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).clear();
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3099,8 +3135,7 @@ mod tests {
         }
 
         // --- 10. TEST `REPLACE` (after Clear) ---
-        source_vec.write_old().replace(vec![100, 200]);
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).replace(vec![100, 200]);
         app.update();
         assert_eq!(
             get_all_child_types(app.world_mut(), parent_entity),
@@ -3125,8 +3160,7 @@ mod tests {
         }
 
         // Verify signal cleanup by flushing one more change. This should not panic.
-        source_vec.write_old().push(999);
-        source_vec.flush_into_world(app.world_mut());
+        source_vec.write(app.world_mut()).push(999);
         app.update();
         // The test passes if the above update doesn't panic.
     }
