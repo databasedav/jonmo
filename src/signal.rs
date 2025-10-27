@@ -950,8 +950,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state / 2
+    ///         *state += 1;
+    ///         *state / 2
     ///     }
     /// })
     /// .dedupe(); // outputs `0`, `1`, `2`, `3`, ...
@@ -993,8 +993,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state / 2
+    ///         *state += 1;
+    ///         *state / 2
     ///     }
     /// })
     /// .first(); // outputs `0` then terminates forever
@@ -1091,8 +1091,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state % 2
+    ///         *state += 1;
+    ///         *state % 2
     ///     }
     /// })
     /// .filter(|In(i): In<usize>| i % 2 == 0); // outputs `2`, `4`, `6`, `8`, ...
@@ -1195,7 +1195,7 @@ pub trait SignalExt: Signal {
     ///             SignalBuilder::from_system(|_: In<()>| 1)
     ///         } else {
     ///             SignalBuilder::from_system(|_: In<()>| 2)
-    ///        }
+    ///         }
     ///     })
     ///     .flatten();
     ///
@@ -1331,16 +1331,16 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
-    /// let signal = SignalBuilder::from_resource::<Toggle>()
-    ///     .dedupe()
-    ///     .switch(move |In(toggle): In<Toggle>| {
-    ///         if toggle.0 {
-    ///             SignalBuilder::from_system(|_: In<()>| 1)
-    ///         } else {
-    ///             SignalBuilder::from_system(|_: In<()>| 2)
-    ///         }
-    ///     }
-    /// );
+    /// let signal =
+    ///     SignalBuilder::from_resource::<Toggle>()
+    ///         .dedupe()
+    ///         .switch(move |In(toggle): In<Toggle>| {
+    ///             if toggle.0 {
+    ///                 SignalBuilder::from_system(|_: In<()>| 1)
+    ///             } else {
+    ///                 SignalBuilder::from_system(|_: In<()>| 2)
+    ///             }
+    ///         });
     /// // `signal` outputs `2`
     /// world.resource_mut::<Toggle>().0 = true;
     /// // `signal` outputs `1`
@@ -1381,8 +1381,7 @@ pub trait SignalExt: Signal {
     ///         } else {
     ///             MutableVecBuilder::from([10, 20]).spawn(world).signal_vec()
     ///         }
-    ///     }
-    /// );
+    ///     });
     /// // `signal` outputs `SignalVec -> [10, 20]`
     /// world.resource_mut::<Toggle>().0 = true;
     /// // `signal` outputs `SignalVec -> [1, 2, 3]`
@@ -1551,14 +1550,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_bool(
-    ///     |_: In<()>| 1,
-    ///     |_: In<()>| 0,
-    /// ); // outputs `1`, `0`, `1`, `0`, ...
+    /// .map_bool(|_: In<()>| 1, |_: In<()>| 0); // outputs `1`, `0`, `1`, `0`, ...
     /// ```
     fn map_bool<O, IOO, TF, FF, TM, FM>(self, true_system: TF, false_system: FF) -> MapBool<Self, O>
     where
@@ -1605,13 +1601,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_true(
-    ///     |_: In<()>| 1,
-    /// ); // outputs `1`, terminates, outputs `1`, terminates, ...
+    /// .map_true(|_: In<()>| 1); // outputs `1`, terminates, outputs `1`, terminates, ...
     /// ```
     fn map_true<O, F, M>(self, system: F) -> MapTrue<Self, O>
     where
@@ -1653,13 +1647,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_false(
-    ///     |_: In<()>| 1,
-    /// ); // terminates, outputs `1`, terminates, outputs `1`, ...
+    /// .map_false(|_: In<()>| 1); // terminates, outputs `1`, terminates, outputs `1`, ...
     /// ```
     fn map_false<O, F, M>(self, system: F) -> MapFalse<Self, O>
     where
@@ -1799,13 +1791,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
-    ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        *state
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
     ///     }
     /// })
-    /// .map_none(
-    ///     |_: In<()>| false
-    /// ); // terminates, outputs `false`, terminates, outputs `false`, ...
+    /// .map_none(|_: In<()>| false); // terminates, outputs `false`, terminates, outputs `false`, ...
     /// ```
     fn map_none<I, O, F, M>(self, none_system: F) -> MapNone<Self, O>
     where
@@ -1851,9 +1841,12 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Vec<usize>>| {
-    ///        let new = state.get(state.len().saturating_sub(1)).map(|last| last + 1).unwrap_or_default();
-    ///        state.push(new);
-    ///        state.clone()
+    ///         let new = state
+    ///             .get(state.len().saturating_sub(1))
+    ///             .map(|last| last + 1)
+    ///             .unwrap_or_default();
+    ///         state.push(new);
+    ///         state.clone()
     ///     }
     /// })
     /// .to_signal_vec(); // outputs a `SignalVec` of `[0]`, `[0, 1]`, `[0, 1, 2]`, `[0, 1, 2, 3]`, ...
@@ -1940,9 +1933,13 @@ pub trait SignalExt: Signal {
     ///
     /// let condition = true;
     /// if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed_clone() // this is a `Map<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1)
+    ///         .map_in(|x: i32| x * 2)
+    ///         .boxed_clone() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed_clone() // this is a `Dedupe<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1)
+    ///         .dedupe()
+    ///         .boxed_clone() // this is a `Dedupe<Source<i32>>`
     /// }; // without the `.boxed_clone()`, the compiler would not allow this
     /// ```
     fn boxed_clone(self) -> Box<dyn SignalDynClone<Item = Self::Item>>
@@ -2646,205 +2643,85 @@ mod tests {
     fn test_throttle() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-        let counter = Arc::new(Mutex::new(0));
-        let emit_count = Arc::new(Mutex::new(0));
 
-        // Throttle duration
-        let throttle_duration = Duration::from_millis(100);
-        let signal = SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
-            let mut c = counter.lock().unwrap();
-            *c += 1;
+        // A simple counter to generate a new value (1, 2, 3...) for each update.
+        let source_signal = SignalBuilder::from_system(|_: In<()>, mut counter: Local<i32>| {
+            *counter += 1;
+            *counter
+        });
 
-            // Emit 1, 2, 3, 4, 5... rapidly
-            Some(*c)
-        }))
-        .throttle(throttle_duration)
-        .map(clone!((emit_count) move |In(val): In<i32>| {
-            let mut count = emit_count.lock().unwrap();
-            *count += 1;
+        let handle = source_signal
+            .throttle(Duration::from_millis(100))
+            .map(capture_output)
+            .register(app.world_mut());
 
-            // Pass the value through
-            val
-        }))
-        .map(capture_output)
-        .register(app.world_mut());
-
-        // --- Test Execution with Manual Time Control (Revised Assertions) ---
-        //
-        // 1. Initial update: Emit 1, create timer.
-        app.update();
-
-        // Changed assertion description
-        assert_eq!(get_output::<i32>(app.world()), Some(1), "Initial emit (1)");
-        assert_eq!(*emit_count.lock().unwrap(), 1, "Emit count after initial");
-        assert_eq!(*counter.lock().unwrap(), 1, "Source counter after initial");
-
-        // 2. Advance time > duration (110ms).
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(110.)));
-
-        // 3. Update again: Source emits 2. Time elapsed >= duration. Throttle emits 2.
+        // 1. Initial emission: The first value should always pass through.
         app.update();
         assert_eq!(
-            get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 110ms advance, 1st update (emit 2)"
+            get_output(&app.world()),
+            Some(1),
+            "First value (1) should pass immediately."
         );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            // EXPECT 2
-            "Emit count after 110ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            2,
-            "Source counter after 110ms advance, 1st update"
-        );
+        // Clear the output to prepare for the next check.
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+
+        // 2. Blocked emission: Advance time by less than the duration. The next value (2) should be
+        //    blocked.
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(50)));
-
-        // 6. Update again: Source emits 4. Time elapsed < duration since last emit. Throttle blocks. Output
-        //    remains 2.
         app.update();
         assert_eq!(
-            get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 110ms advance, 2nd update (block 3)"
+            get_output::<i32>(&app.world()),
+            None,
+            "Value (2) emitted after 50ms should be blocked."
         );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            // EXPECT 2
-            "Emit count after 110ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            3,
-            "Source counter after 110ms advance, 2nd update"
-        );
+
+        // 3. Another blocked emission: Update again with no time elapsed. The next value (3) should also be
+        //    blocked.
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-
-        // 7. Update again: Source emits 5. Time elapsed < duration since last emit. Throttle blocks. Output
-        //    remains 2.
         app.update();
         assert_eq!(
-            get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 50ms advance, 1st update (block 4)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            "Emit count after 50ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            4,
-            "Source counter after 50ms advance, 1st update"
+            get_output::<i32>(&app.world()),
+            None,
+            "Value (3) emitted immediately after should also be blocked."
         );
 
-        // 8. Advance time > duration again (total 50 + 60 = 110ms since last emit at step 3).
+        // 4. Allowed emission: Advance time past the threshold (50ms from step 2 + 60ms now = 110ms total).
         app.world_mut()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(60)));
-
-        // 9. Update again: Source emits 5. Total time elapsed >= duration. Throttle emits 5.
         app.update();
+        // The source signal has been called 4 times now. The value should be 4.
         assert_eq!(
-            get_output::<i32>(app.world()),
-            // Reverted: Expect 5 based on logic and actual output
-            Some(5),
-            // Corrected message to reflect expected value
-            "After 60ms advance, 1st update (emit 5)"
+            get_output(&app.world()),
+            Some(4),
+            "Value (4) should pass after total duration > 100ms."
         );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count becomes 3
-            3,
-            "Emit count after 60ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 5
-            5,
-            "Source counter after 60ms advance, 1st update"
-        );
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+
+        // 5. Blocked again: Immediately after an emission, the timer resets, so the next value (5) is
+        //    blocked.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-
-        // 10. Update again: Source emits 6. Time elapsed < duration since last emit. Throttle
-        //    blocks. Output remains 5.
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(10)));
         app.update();
         assert_eq!(
-            get_output::<i32>(app.world()),
-            // Output remains 5
-            Some(5),
-            // EXPECT 5
-            "After 60ms advance, 2nd update (block 6)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            3,
-            "Emit count after 60ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            6,
-            "Source counter after 60ms advance, 2nd update"
+            get_output::<i32>(&app.world()),
+            None,
+            "Value (5) immediately after a pass should be blocked again."
         );
 
-        // Add one more step to ensure timer reset correctly
+        // 6. Pass again: Advance time to pass the threshold again.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(110)));
-
-        // 11. Update: Source emits 7. Time >= 100ms. Throttle emits 7.
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(100)));
         app.update();
+        // The source signal has now been called 6 times. The value should be 6.
         assert_eq!(
-            get_output::<i32>(app.world()),
-            // Expect 7
-            Some(7),
-            "After 110ms advance, 1st update (emit 7)"
+            get_output(&app.world()),
+            Some(6),
+            "Value (6) should pass again after another full duration."
         );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count becomes 4
-            4,
-            "Emit count after 110ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 7
-            7,
-            "Source counter after 110ms advance, 1st update"
-        );
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
 
-        // 12. Update: Source emits 8. Time < 100ms. Throttle blocks. Output remains 7.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            // Output remains 7
-            Some(7),
-            "After 110ms advance, 2nd update (block 8)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count remains 4
-            4,
-            "Emit count after 110ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 8
-            8,
-            "Source counter after 110ms advance, 2nd update"
-        );
-        signal.cleanup(app.world_mut());
+        handle.cleanup(app.world_mut());
     }
 
     #[test]
