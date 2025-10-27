@@ -70,6 +70,7 @@ impl JonmoBuilder {
         T: IntoSystem<In<Entity>, (), M> + SSs,
     {
         self.on_spawn(|world, entity| {
+            #[allow(unused_variables)]
             if let Err(error) = world.run_system_once_with(system, entity) {
                 #[cfg(feature = "tracing")]
                 bevy_log::error!("failed to run system on spawn: {}", error);
@@ -681,7 +682,7 @@ mod tests {
     use super::*;
     use crate::{
         JonmoPlugin,
-        graph::CLEANUP_SIGNALS,
+        graph::STALE_SIGNALS,
         signal::{SignalBuilder, SignalExt},
         signal_vec::MutableVecBuilder,
     };
@@ -696,8 +697,8 @@ mod tests {
     }
 
     fn cleanup() {
-        CLEANUP_SIGNALS.lock().unwrap().clear();
-        crate::signal_vec::tests::cleanup();
+        STALE_SIGNALS.lock().unwrap().clear();
+        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -1366,8 +1367,7 @@ mod tests {
         app.update(); // Process despawn commands
 
         // Modify the parent's component again
-        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent Updated Again"
-            .to_string();
+        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent Updated Again".to_string();
         app.update();
 
         let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
@@ -1488,7 +1488,7 @@ mod tests {
             );
         }
 
-        CLEANUP_SIGNALS.lock().unwrap().clear();
+        STALE_SIGNALS.lock().unwrap().clear();
     }
 
     #[test]
@@ -2028,8 +2028,7 @@ mod tests {
 
         // Mutate the parent's component again. If the signal was not cleaned up,
         // this could panic when trying to access the despawned child.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn Update"
-            .to_string();
+        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn Update".to_string();
         app.update();
 
         // The test passes if the previous update didn't panic.
@@ -3014,7 +3013,7 @@ mod tests {
         {
             // --- 1. SETUP ---
             let mut app = create_test_app();
-            let source_vec = MutableVecBuilder::from([10u32, 20u32]).build(app.world_mut());
+            let source_vec = MutableVecBuilder::from([10u32, 20u32]).spawn(app.world_mut());
 
             // A factory function to create a simple JonmoBuilder for a reactive child.
             let child_builder_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));

@@ -38,7 +38,11 @@ impl Plugin for JonmoPlugin {
                     signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
                 ),
                 graph::process_signal_graph,
-                (graph::flush_cleanup_signals, signal_vec::despawn_stale_mutable_vecs),
+                (
+                    graph::despawn_stale_signals,
+                    signal_vec::despawn_stale_mutable_vecs,
+                    signal_map::despawn_stale_mutable_btree_maps,
+                ),
             )
                 .chain()
                 .in_set(SignalProcessing),
@@ -54,7 +58,7 @@ pub mod prelude {
         JonmoPlugin,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
-        signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
+        signal_map::{MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap, SignalMapExt},
         signal_vec::{
             IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
             SignalVecExt,

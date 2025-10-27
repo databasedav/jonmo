@@ -27,7 +27,7 @@ fn main() {
     // We initialize it with two random colors.
     // It's wrapped in an `Arc<RwLock<...>>` internally, so cloning it is cheap
     // and allows multiple systems to access and modify the same data.
-    let colors = MutableVecBuilder::from([random_color(), random_color()]).build(world);
+    let colors = MutableVecBuilder::from([random_color(), random_color()]).spawn(world);
 
     app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---

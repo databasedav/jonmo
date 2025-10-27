@@ -1370,18 +1370,16 @@ pub trait SignalExt: Signal {
     /// #[derive(Resource, Clone, PartialEq)]
     /// struct Toggle(bool);
     ///
-    /// let list_a = MutableVec::from([1, 2, 3]);
-    /// let list_b = MutableVec::from([10, 20]);
-    ///
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
+    ///
     /// let signal = SignalBuilder::from_resource::<Toggle>()
     ///     .dedupe()
-    ///     .switch_signal_vec(move |In(toggle): In<Toggle>| {
+    ///     .switch_signal_vec(move |In(toggle): In<Toggle>, world: &mut World| {
     ///         if toggle.0 {
-    ///             list_a.signal_vec()
+    ///             MutableVecBuilder::from([1, 2, 3]).spawn(world).signal_vec()
     ///         } else {
-    ///             list_b.signal_vec()
+    ///             MutableVecBuilder::from([10, 20]).spawn(world).signal_vec()
     ///         }
     ///     }
     /// );
@@ -1973,7 +1971,7 @@ mod tests {
         graph::{LazySignalHolder, SignalRegistrationCount},
         prelude::{SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
-        signal_vec::{VecDiff, MutableVecBuilder},
+        signal_vec::{MutableVecBuilder, VecDiff},
         utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
@@ -2535,8 +2533,8 @@ mod tests {
         app.init_resource::<SignalVecOutput<i32>>();
 
         // Two different data sources to switch between.
-        let list_a = MutableVecBuilder::from([10, 20]).build(app.world_mut());
-        let list_b = MutableVecBuilder::from([100, 200, 300]).build(app.world_mut());
+        let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
+        let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
 
         // A resource to control which list is active.
         #[derive(Resource, Clone, Copy, PartialEq, Debug)]

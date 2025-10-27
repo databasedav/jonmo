@@ -402,7 +402,7 @@ impl Drop for LazySignal {
         if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2
             && let LazySystem::Registered(signal) = *self.inner.system.read().unwrap()
         {
-            CLEANUP_SIGNALS.lock().unwrap().push(signal);
+            STALE_SIGNALS.lock().unwrap().push(signal);
         }
     }
 }
@@ -410,10 +410,10 @@ impl Drop for LazySignal {
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
 
-pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+pub(crate) static STALE_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
-pub(crate) fn flush_cleanup_signals(world: &mut World) {
-    let signals = CLEANUP_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();
+pub(crate) fn despawn_stale_signals(world: &mut World) {
+    let signals = STALE_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();
     for signal in signals {
         if let Ok(entity) = world.get_entity_mut(*signal)
             && let Some(registration_count) = entity.get::<SignalRegistrationCount>()

@@ -10,8 +10,8 @@ use rand::{Rng, prelude::IndexedRandom};
 fn main() {
     let mut app = App::new();
     let world = app.world_mut();
-    let datas = MutableVecBuilder::from((0..12).map(|_| random_data()).collect::<Vec<_>>()).build(world);
-    let rows = MutableVecBuilder::from((0..5).map(|_| ()).collect::<Vec<_>>()).build(world);
+    let datas = MutableVecBuilder::from((0..12).map(|_| random_data()).collect::<Vec<_>>()).spawn(world);
+    let rows = MutableVecBuilder::from((0..5).map(|_| ()).collect::<Vec<_>>()).spawn(world);
     app.add_plugins(examples_plugin)
         .insert_resource(Datas(datas.clone()))
         .insert_resource(Rows(rows.clone()))
