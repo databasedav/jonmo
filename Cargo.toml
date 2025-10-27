@@ -63,7 +63,7 @@ web = [
 deployed_wasm_example = []
 
 [dev-dependencies]
-bevy = "0.16"
+bevy = { version = "0.16", features = ["track_location"] }
 rand = "0.9"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 

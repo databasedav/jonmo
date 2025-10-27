@@ -1971,9 +1971,9 @@ mod tests {
     use crate::{
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
-        prelude::{MutableVec, SignalVecExt, clone},
+        prelude::{SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
-        signal_vec::VecDiff,
+        signal_vec::{VecDiff, MutableVecBuilder},
         utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
@@ -2535,8 +2535,8 @@ mod tests {
         app.init_resource::<SignalVecOutput<i32>>();
 
         // Two different data sources to switch between.
-        let list_a = MutableVec::from((app.world_mut(), [10, 20]));
-        let list_b = MutableVec::from((app.world_mut(), [100, 200, 300]));
+        let list_a = MutableVecBuilder::from([10, 20]).build(app.world_mut());
+        let list_b = MutableVecBuilder::from([100, 200, 300]).build(app.world_mut());
 
         // A resource to control which list is active.
         #[derive(Resource, Clone, Copy, PartialEq, Debug)]

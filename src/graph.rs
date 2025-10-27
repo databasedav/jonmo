@@ -410,7 +410,7 @@ impl Drop for LazySignal {
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
 
-static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+pub(crate) static CLEANUP_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn flush_cleanup_signals(world: &mut World) {
     let signals = CLEANUP_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();

@@ -1675,7 +1675,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn apply_diffs_to_vec<T: Clone>(vec: &mut Vec<T>, diffs: &[VecDiff<T>]) {
+    fn apply_diffs_to_vec<T: Clone>(vec: &mut Vec<T>, diffs: Vec<VecDiff<T>>) {
         for diff in diffs {
             diff.apply_to_vec(vec);
         }
@@ -1708,7 +1708,7 @@ mod tests {
             VecDiff::Replace { values: vec![1, 3, 4] },
             "Initial state should be a Replace with sorted keys."
         );
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert_eq!(current_keys, vec![1, 3, 4]);
 
         // --- 3. Test Insert ---
@@ -1719,7 +1719,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::InsertAt { index: 1, value: 2 });
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert_eq!(current_keys, vec![1, 2, 3, 4]);
 
         // Insert a key at the beginning.
@@ -1729,7 +1729,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::InsertAt { index: 0, value: 0 });
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert_eq!(current_keys, vec![0, 1, 2, 3, 4]);
 
         // --- 4. Test Update (No Key Change) ---
@@ -1749,7 +1749,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::RemoveAt { index: 3 }); // '3' was at index 3
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert_eq!(current_keys, vec![0, 1, 2, 4]);
 
         // --- 6. Test Batched Diffs ---
@@ -1766,7 +1766,7 @@ mod tests {
             vec![VecDiff::RemoveAt { index: 1 }, VecDiff::InsertAt { index: 3, value: 5 }],
             "Batched diffs were not processed correctly."
         );
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert_eq!(
             current_keys,
             vec![0, 2, 4, 5],
@@ -1780,7 +1780,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<u32>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs_to_vec(&mut current_keys, &diffs);
+        apply_diffs_to_vec(&mut current_keys, diffs);
         assert!(current_keys.is_empty());
 
         // --- 8. Cleanup ---
@@ -1815,7 +1815,7 @@ mod tests {
             },
             "Initial state should be a Replace with sorted entries."
         );
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert_eq!(current_entries, vec![(1, 'a'), (3, 'c'), (4, 'd')]);
 
         // --- 3. Test Insert ---
@@ -1832,7 +1832,7 @@ mod tests {
                 value: (2, 'b')
             }
         );
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert_eq!(current_entries, vec![(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]);
 
         // --- 4. Test Update ---
@@ -1849,7 +1849,7 @@ mod tests {
                 value: (3, 'C')
             }
         );
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert_eq!(current_entries, vec![(1, 'a'), (2, 'b'), (3, 'C'), (4, 'd')]);
 
         // --- 5. Test Remove ---
@@ -1860,7 +1860,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 }); // '1' was at index 0
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert_eq!(current_entries, vec![(2, 'b'), (3, 'C'), (4, 'd')]);
 
         // --- 6. Test Batched Diffs ---
@@ -1883,7 +1883,7 @@ mod tests {
             ],
             "Batched diffs were not processed correctly."
         );
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert_eq!(
             current_entries,
             vec![(0, 'z'), (2, 'b'), (3, 'C')],
@@ -1897,7 +1897,7 @@ mod tests {
         let diffs = get_and_clear_vec_output::<(u32, char)>(app.world_mut());
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs_to_vec(&mut current_entries, &diffs);
+        apply_diffs_to_vec(&mut current_entries, diffs);
         assert!(current_entries.is_empty());
 
         // --- 8. Cleanup ---

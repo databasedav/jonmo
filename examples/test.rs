@@ -8,7 +8,7 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let numbers = MutableVec::from((app.world_mut(), [1, 2, 3, 4, 5]));
+    let numbers = MutableVecBuilder::from([1, 2, 3, 4, 5]).build(app.world_mut());
     app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
@@ -33,8 +33,8 @@ struct Lifetime(f32);
 
 #[rustfmt::skip]
 fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
-    let list_a = MutableVec::from((&mut *world, [1, 2, 3, 4, 5])).signal_vec();
-    let list_b = MutableVec::from((world, [3, 4, 5])).signal_vec();
+    let list_a = MutableVecBuilder::from([1, 2, 3, 4, 5]).build(world).signal_vec();
+    let list_b = MutableVecBuilder::from([3, 4, 5]).build(world).signal_vec();
     let map = MutableBTreeMap::from([(1, 2), (2, 3)]);
     // map.signal_map().
     JonmoBuilder::from(Node {
