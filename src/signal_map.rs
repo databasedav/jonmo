@@ -948,7 +948,7 @@ impl<K, V> MutableBTreeMap<K, V> {
                 clone!(
                     (self_entity) move | In(upstream_diffs): In<Vec<MapDiff<K, V>>>,
                     world: & mut World,
-                    mut has_run: Local < bool >| {
+                    mut has_run: Local <bool>| {
                         if !*has_run {
                             // First run: This is triggered manually by the `MapReplayTrigger`.
                             // It processes the initial state queued on its own entity and ignores upstream.

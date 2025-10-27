@@ -4,7 +4,7 @@
     feature = "document-features",
     doc = document_features::document_features!()
 )]
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 

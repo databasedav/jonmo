@@ -399,7 +399,7 @@ impl Clone for LazySignal {
 impl Drop for LazySignal {
     fn drop(&mut self) {
         // <= 2 because we also wna queue if only the holder remains
-        if self.inner.references.fetch_sub(1, Ordering::SeqCst) == 1
+        if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2
             && let LazySystem::Registered(signal) = *self.inner.system.read().unwrap()
         {
             CLEANUP_SIGNALS.lock().unwrap().push(signal);
@@ -510,52 +510,54 @@ where
 }
 
 fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
-    // Stage 1: Decrement the count and check if this node needs full cleanup.
+    // Stage 1: Decrement the count and check if this node needs full cleanup. We do
+    // this in a short-lived block to release the borrow.
     let mut needs_full_cleanup = false;
     if let Ok(mut entity) = world.get_entity_mut(*signal)
-        && let Some(mut count) = entity.get_mut::<SignalRegistrationCount>() {
-            count.decrement();
-            if **count == 0 {
-                needs_full_cleanup = true;
-            }
+        && let Some(mut count) = entity.get_mut::<SignalRegistrationCount>()
+    {
+        count.decrement();
+        if **count == 0 {
+            needs_full_cleanup = true;
         }
+    }
 
+    // If the count is not zero, we're done with this branch of the graph.
     if !needs_full_cleanup {
         return;
     }
 
-    // Stage 2: The count is zero. Get upstreams before we potentially despawn the entity.
+    // Stage 2: The count is zero. Perform the full cleanup. First, get the list of
+    // parents.
     let upstreams = world.get::<Upstream>(*signal).cloned();
 
-    // Stage 3: Despawn the current node if it's no longer needed.
+    // Now, we can despawn the current node if it's no longer needed. The check for
+    // LazySignalHolder is crucial.
     if let Ok(entity) = world.get_entity_mut(*signal) {
-        let should_despawn = if let Some(lazy_holder) = entity.get::<LazySignalHolder>() {
-            // This signal is held by a LazySignal. It can only be despawned if the
-            // only remaining reference is the one inside this holder component.
-            lazy_holder.0.inner.references.load(Ordering::SeqCst) == 1
+        if let Some(lazy_holder) = entity.get::<LazySignalHolder>() {
+            if lazy_holder.0.inner.references.load(Ordering::SeqCst) == 1 {
+                entity.despawn();
+            }
         } else {
-            // This is a dynamically created signal without an external holder.
-            // It can be despawned now that its graph registrations are gone.
-            true
-        };
-
-        if should_despawn {
+            // This is a dynamically created signal without a holder, it can be despawned once
+            // its registrations are gone.
             entity.despawn();
         }
     }
 
-    // Stage 4: Recurse on parents. This happens _after_ the current node has
+    // Stage 3: Notify parents and recurse. This happens _after_ the current node has
     // been processed and potentially despawned.
     if let Some(upstreams) = upstreams {
         for &upstream_system in upstreams.iter() {
             // Notify the parent to remove this signal from its downstream list.
             if let Ok(mut upstream_entity) = world.get_entity_mut(*upstream_system)
-                && let Some(mut downstream) = upstream_entity.get_mut::<Downstream>() {
-                    downstream.0.remove(&signal);
-                    if downstream.0.is_empty() {
-                        upstream_entity.remove::<Downstream>();
-                    }
+                && let Some(mut downstream) = upstream_entity.get_mut::<Downstream>()
+            {
+                downstream.0.remove(&signal);
+                if downstream.0.is_empty() {
+                    upstream_entity.remove::<Downstream>();
                 }
+            }
 
             // Now, recurse on the parent.
             cleanup_recursive(world, upstream_system);

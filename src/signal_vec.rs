@@ -157,13 +157,13 @@ impl<O: 'static> SignalVec for Box<dyn SignalVec<Item = O> + Send + Sync> {
 /// Relevant in contexts where some function may require a [`Clone`] [`SignalVec`], but the concrete
 /// type can't be known at compile-time, e.g. in a
 /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
-pub trait SignalVecClone: SignalVec + DynClone {}
+pub trait SignalVecDynClone: SignalVec + DynClone {}
 
-clone_trait_object!(< T > SignalVecClone < Item = T >);
+clone_trait_object!(<T> SignalVecDynClone <Item = T>);
 
-impl<T: SignalVec + Clone + 'static> SignalVecClone for T {}
+impl<T: SignalVec + Clone + 'static> SignalVecDynClone for T {}
 
-impl<O: 'static> SignalVec for Box<dyn SignalVecClone<Item = O> + Send + Sync> {
+impl<O: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = O> + Send + Sync> {
     type Item = O;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
@@ -3480,7 +3480,7 @@ pub trait SignalVecExt: SignalVec {
     ///     } // without the `.boxed_clone()`, the compiler would not allow this
     /// });
     /// ```
-    fn boxed_clone(self) -> Box<dyn SignalVecClone<Item = Self::Item> + Send + Sync>
+    fn boxed_clone(self) -> Box<dyn SignalVecDynClone<Item = Self::Item> + Send + Sync>
     where
         Self: Sized + Clone,
     {
@@ -3659,9 +3659,19 @@ impl<T> Clone for MutableVec<T> {
 
 impl<T> Drop for MutableVec<T> {
     fn drop(&mut self) {
+        bevy_log::info!("cur: {}", self.references.load(core::sync::atomic::Ordering::SeqCst));
         if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
             STALE_MUTABLE_VECS.lock().unwrap().push(self.entity);
         }
+    }
+}
+
+#[derive(Component)]
+struct MutableVecHandle<T>(MutableVec<T>);
+
+impl<T> Clone for MutableVecHandle<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -3721,7 +3731,17 @@ impl<T> MutableVec<T> {
             } else {
                 vec![]
             };
-            world.entity_mut(*replay_signal).insert((QueuedVecDiffs(initial_diffs), VecReplayTrigger(trigger)));
+
+            let mut replay_entity = world.entity_mut(*replay_signal);
+            replay_entity.insert((QueuedVecDiffs(initial_diffs), VecReplayTrigger(trigger)));
+
+            // --- FIX STARTS HERE ---
+            // By inserting a cloned handle onto the signal's entity, we tie the lifetime
+            // of the MutableVecData to the lifetime of the signal itself. When this
+            // signal is cleaned up and its entity is despawned, this component will be
+            // dropped, decrementing the reference count and allowing for proper cleanup.
+            replay_entity.insert(MutableVecHandle(self_.clone()));
+            // --- FIX ENDS HERE ---
 
             pipe_signal(world, broadcaster_system, replay_signal);
             replay_signal
@@ -3927,6 +3947,7 @@ mod tests {
     use crate::JonmoPlugin;
     use bevy::prelude::*;
     use bevy_platform::sync::RwLock;
+    use test_log;
 
     #[derive(Resource, Default, Debug)]
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
@@ -4978,7 +4999,7 @@ mod tests {
         handle.cleanup(app.world_mut());
     }
 
-    #[test]
+    #[test_log::test]
     fn test_filter_map() {
         // A comprehensive test for `SignalVecExt::filter_map`, covering all `VecDiff`
         // types and the three status-change scenarios for `UpdateAt`.
@@ -5019,6 +5040,7 @@ mod tests {
         // --- 3. Test `Push` ---
         // Push a value that passes the filter_map ("30").
         source_vec.write(app.world_mut()).push("30");
+        drop(source_vec)
         // app.update();
         // let diffs = get_and_clear_output::<u32>(app.world_mut());
         // assert_eq!(diffs.len(), 1);

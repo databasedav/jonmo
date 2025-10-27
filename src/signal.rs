@@ -58,13 +58,13 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
 ///
 /// Relevant in contexts where some function may require a [`Clone`] [`Signal`], but the concrete
 /// type can't be known at compile-time.
-pub trait SignalClone: Signal + DynClone {}
+pub trait SignalDynClone: Signal + DynClone {}
 
-clone_trait_object!(< T > SignalClone < Item = T >);
+clone_trait_object!(<T> SignalDynClone <Item = T>);
 
-impl<T: Signal + Clone + 'static> SignalClone for T {}
+impl<T: Signal + Clone + 'static> SignalDynClone for T {}
 
-impl<O: 'static> Signal for Box<dyn SignalClone<Item = O> + Send + Sync> {
+impl<O: 'static> Signal for Box<dyn SignalDynClone<Item = O> + Send + Sync> {
     type Item = O;
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
@@ -1947,7 +1947,7 @@ pub trait SignalExt: Signal {
     ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed_clone() // this is a `Dedupe<Source<i32>>`
     /// }; // without the `.boxed_clone()`, the compiler would not allow this
     /// ```
-    fn boxed_clone(self) -> Box<dyn SignalClone<Item = Self::Item>>
+    fn boxed_clone(self) -> Box<dyn SignalDynClone<Item = Self::Item>>
     where
         Self: Sized + Clone,
     {

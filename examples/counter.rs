@@ -91,7 +91,7 @@ fn ui_root() -> JonmoBuilder {
                         // `.dedupe()` ensures the rest of the chain only runs when the counter's value *actually
                         // changes*, preventing redundant updates every frame.
                         .dedupe()
-                        // `Text` expects a `String`
+                        // `Text` expects a `String` and `.to_string` expects a reference
                         .map_in_ref(ToString::to_string)
                         .map_in(Text)
                         // `component_signal` expects an `Option<Component>`. If the signal produces `None`, the

@@ -65,6 +65,7 @@ deployed_wasm_example = []
 [dev-dependencies]
 bevy = "0.16"
 rand = "0.9"
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies.getrandom]
 version = "0.3"
