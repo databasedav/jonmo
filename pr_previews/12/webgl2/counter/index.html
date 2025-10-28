@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; background-color: #2b2c2f;">
+
+<head>
+    <meta charset="utf-8" />
+    <title>jonmo counter example</title>
+    
+    
+<script type="module">
+import init, * as bindings from './jonmo-f856ece5ffc378f7.js';
+const wasm = await init({ module_or_path: './jonmo-f856ece5ffc378f7_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="./jonmo-f856ece5ffc378f7.js" crossorigin="anonymous" integrity="sha384-W+q/TCzn/Sqd2qxODeMACV4xvQXi6nC2ikHY/IqyaiwCC/JrrVd7b5Q0eiWwPD5T"><link rel="preload" href="./jonmo-f856ece5ffc378f7_bg.wasm" crossorigin="anonymous" integrity="sha384-tKsjL4Xk4dEevQqgDJOKFY5guL54UlS34gXucVfWvBBI7PyR9qG9OptU116Efa+H" as="fetch" type="application/wasm"></head>
+
+<body style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0;">
+    <div id="game" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; display: flex;">
+        <canvas id="bevy">
+            js and canvas support is required
+        </canvas>
+    </div>
+</body>
+
+</html>
