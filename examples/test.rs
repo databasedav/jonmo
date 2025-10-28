@@ -121,7 +121,7 @@ fn item(number: i32) -> JonmoBuilder {
         },
         Text(number.to_string()),
         TextColor(Color::BLACK),
-        TextLayout::new_with_justify(JustifyText::Center),
+        TextLayout::new_with_justify(Justify::Center),
         Lifetime::default(),
     )))
 }

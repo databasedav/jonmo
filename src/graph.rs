@@ -2,7 +2,7 @@
 use super::utils::SSs;
 use bevy_derive::Deref;
 use bevy_ecs::{
-    component::HookContext,
+    lifecycle::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
     system::{SystemId, SystemState},
@@ -437,7 +437,7 @@ where
 #[allow(dead_code)]
 pub(crate) struct UpstreamIter<'w, 's, D: QueryData, F: QueryFilter>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Upstream>,
 {
     upstreams_query: &'w Query<'w, 's, D, F>,
     upstreams: Vec<SignalSystem>,
@@ -446,7 +446,7 @@ where
 #[allow(dead_code)]
 impl<'w, 's, D: QueryData, F: QueryFilter> UpstreamIter<'w, 's, D, F>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Upstream>,
 {
     /// Returns a new [`DescendantIter`].
     pub fn new(upstreams_query: &'w Query<'w, 's, D, F>, signal: SignalSystem) -> Self {
@@ -459,7 +459,7 @@ where
 
 impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for UpstreamIter<'w, 's, D, F>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Upstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Upstream>,
 {
     type Item = SignalSystem;
 
@@ -475,7 +475,7 @@ where
 #[allow(dead_code)]
 pub(crate) struct DownstreamIter<'w, 's, D: QueryData, F: QueryFilter>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Downstream>,
 {
     downstreams_query: &'w Query<'w, 's, D, F>,
     downstreams: Vec<SignalSystem>,
@@ -483,7 +483,7 @@ where
 
 impl<'w, 's, D: QueryData, F: QueryFilter> DownstreamIter<'w, 's, D, F>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Downstream>,
 {
     #[allow(dead_code)]
     pub fn new(downstreams_query: &'w Query<'w, 's, D, F>, signal: SignalSystem) -> Self {
@@ -496,7 +496,7 @@ where
 
 impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for DownstreamIter<'w, 's, D, F>
 where
-    D::ReadOnly: QueryData<Item<'w> = &'w Downstream>,
+    D::ReadOnly: QueryData<Item<'w, 's> = &'w Downstream>,
 {
     type Item = SignalSystem;
 
