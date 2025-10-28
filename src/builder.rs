@@ -5,7 +5,11 @@ use super::{
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
     utils::{LazyEntity, SSs, ancestor_map},
 };
-use bevy_ecs::{component::Mutable, prelude::*};
+use bevy_ecs::{
+    component::Mutable,
+    prelude::*,
+    system::{IntoObserverSystem, RunSystemOnce},
+};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
@@ -60,6 +64,20 @@ impl JonmoBuilder {
         self
     }
 
+    /// Run a [`System`] which takes [`In`] this builder's [`Entity`].
+    pub fn on_spawn_with_system<T, M>(self, system: T) -> Self
+    where
+        T: IntoSystem<In<Entity>, (), M> + SSs,
+    {
+        self.on_spawn(|world, entity| {
+            #[allow(unused_variables)]
+            if let Err(error) = world.run_system_once_with(system, entity) {
+                #[cfg(feature = "tracing")]
+                bevy_log::error!("failed to run system on spawn: {}", error);
+            }
+        })
+    }
+
     /// Run a function with this builder's [`EntityWorldMut`].
     pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
         self.on_spawn(move |world, entity| {
@@ -86,6 +104,15 @@ impl JonmoBuilder {
         })
     }
 
+    /// Attach an [`Observer`] to this builder.
+    pub fn observe<E: Event, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
+        self.on_spawn(|world, entity| {
+            if let Ok(mut entity) = world.get_entity_mut(entity) {
+                entity.observe(observer);
+            }
+        })
+    }
+
     /// Set the [`LazyEntity`] to this builder's [`Entity`].
     pub fn entity_sync(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
@@ -107,6 +134,23 @@ impl JonmoBuilder {
             add_handle(world, entity, handle);
         };
         self.on_spawn(on_spawn)
+    }
+
+    /// Reactively run a function with this builder's [`EntityWorldMut`] and the output of a
+    /// [`Signal`].
+    ///
+    /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
+    pub fn on_signal_with_entity<I, S, F>(self, signal: S, mut f: F) -> Self
+    where
+        I: Clone + 'static,
+        S: Signal<Item = I> + SSs,
+        F: FnMut(EntityWorldMut, I) + SSs,
+    {
+        self.on_signal(signal, move |In((entity, value)), world: &mut World| {
+            if let Ok(entity) = world.get_entity_mut(entity) {
+                f(entity, value)
+            }
+        })
     }
 
     /// Reactively run a function with mutable access (via [`Mut`]) to this builder's [`Entity`]'s
@@ -638,8 +682,9 @@ mod tests {
     use super::*;
     use crate::{
         JonmoPlugin,
-        prelude::MutableVec,
+        graph::STALE_SIGNALS,
         signal::{SignalBuilder, SignalExt},
+        signal_vec::MutableVecBuilder,
     };
     use bevy::prelude::*;
     use bevy_platform::collections::HashSet;
@@ -649,6 +694,11 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app
+    }
+
+    fn cleanup() {
+        STALE_SIGNALS.lock().unwrap().clear();
+        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -902,8 +952,7 @@ mod tests {
             // The user takes the entity signal...
             entity_signal
                 // ...maps it to get a component from that entity...
-                .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned())
-                // ...extracts the inner string...
+                .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned()) // ...extracts the inner string...
                 .map_in(|component: TestComponent| component.0)
                 // ...and finally pipes it to our capturing system.
                 .map(capturing_system)
@@ -1329,110 +1378,115 @@ mod tests {
 
     #[test]
     fn test_signal_from_parent() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
 
-        // A resource to capture the final output of the signal chains.
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-        app.init_resource::<TestOutput>();
+            // A resource to capture the final output of the signal chains.
+            #[derive(Resource, Default, Clone)]
+            struct TestOutput(Arc<Mutex<Vec<String>>>);
+            app.init_resource::<TestOutput>();
 
-        // The component that the signal chain will read from the parent.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TestComponent(String);
+            // The component that the signal chain will read from the parent.
+            #[derive(Component, Clone, Debug, PartialEq)]
+            struct TestComponent(String);
 
-        // A system to capture the final output of the signal chain.
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
+            // A system to capture the final output of the signal chain.
+            fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
+                output.0.lock().unwrap().push(value);
+            }
+
+            // The factory closure that will be passed to `signal_from_parent`.
+            // This represents the user's logic. It gets a signal for the parent entity,
+            // reads its TestComponent, extracts the string, and sends it to be captured.
+            let signal_chain_factory =
+                |parent_entity_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
+                    parent_entity_signal
+                        // Map the parent entity to its component. This will terminate if the
+                        // parent doesn't have the component.
+                        .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned())
+                        .map_in(|component: TestComponent| component.0) // Extract the string
+                        .dedupe() // Add dedupe for robust reactivity testing
+                        .map(capturing_system)
+                };
+
+            // --- 2. Test Case: Basic Functionality & Reactivity ---
+            let parent = app.world_mut().spawn(TestComponent("Parent A".to_string())).id();
+            let child = app.world_mut().spawn_empty().id();
+            app.world_mut().entity_mut(parent).add_child(child);
+
+            let builder_with_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
+            builder_with_parent.spawn_on_entity(app.world_mut(), child);
+
+            // Initial run
+            app.update();
+            let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
+            assert_eq!(output_guard.len(), 1, "Signal should run on initialization.");
+            assert_eq!(output_guard[0], "Parent A");
+            output_guard.clear();
+            drop(output_guard);
+
+            // Reactivity test
+            app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent B".to_string();
+            app.update();
+            let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
+            assert_eq!(
+                output_guard.len(),
+                1,
+                "Signal should re-run on parent component change."
+            );
+            assert_eq!(output_guard[0], "Parent B");
+            output_guard.clear();
+            drop(output_guard);
+
+            // --- 3. Test Case: No Parent ---
+            // A top-level entity with this signal should not run the chain.
+            let _top_level_entity = JonmoBuilder::new()
+                .signal_from_parent(signal_chain_factory)
+                .spawn(app.world_mut());
+            app.update();
+            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
+            assert!(
+                output_guard.is_empty(),
+                "Signal should not run for an entity with no parent."
+            );
+            drop(output_guard);
+
+            // --- 4. Test Case: Parent Without Component ---
+            // The signal chain should terminate gracefully if the parent is missing the component.
+            let parent_no_comp = app.world_mut().spawn_empty().id();
+            let child_of_plain_parent = app.world_mut().spawn_empty().id();
+            app.world_mut()
+                .entity_mut(parent_no_comp)
+                .add_child(child_of_plain_parent);
+
+            let builder_plain_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
+            builder_plain_parent.spawn_on_entity(app.world_mut(), child_of_plain_parent);
+            app.update();
+            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
+            assert!(
+                output_guard.is_empty(),
+                "Signal should not run if parent is missing the target component."
+            );
+            drop(output_guard);
+
+            // --- 5. Test Case: Automatic Cleanup ---
+            // Despawn the child entity that holds the signal.
+            app.world_mut().entity_mut(child).despawn();
+            app.update(); // Process despawn commands.
+
+            // Modify the parent's component again. The signal should no longer be active.
+            app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent C".to_string();
+            app.update();
+
+            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
+            assert!(
+                output_guard.is_empty(),
+                "Signal should not run after its entity is despawned."
+            );
         }
 
-        // The factory closure that will be passed to `signal_from_parent`.
-        // This represents the user's logic. It gets a signal for the parent entity,
-        // reads its TestComponent, extracts the string, and sends it to be captured.
-        let signal_chain_factory = |parent_entity_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
-            parent_entity_signal
-                // Map the parent entity to its component. This will terminate if the
-                // parent doesn't have the component.
-                .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned())
-                .map_in(|component: TestComponent| component.0) // Extract the string
-                .dedupe() // Add dedupe for robust reactivity testing
-                .map(capturing_system)
-        };
-
-        // --- 2. Test Case: Basic Functionality & Reactivity ---
-        let parent = app.world_mut().spawn(TestComponent("Parent A".to_string())).id();
-        let child = app.world_mut().spawn_empty().id();
-        app.world_mut().entity_mut(parent).add_child(child);
-
-        let builder_with_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
-        builder_with_parent.spawn_on_entity(app.world_mut(), child);
-
-        // Initial run
-        app.update();
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Signal should run on initialization.");
-        assert_eq!(output_guard[0], "Parent A");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Reactivity test
-        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent B".to_string();
-        app.update();
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Signal should re-run on parent component change."
-        );
-        assert_eq!(output_guard[0], "Parent B");
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 3. Test Case: No Parent ---
-        // A top-level entity with this signal should not run the chain.
-        let _top_level_entity = JonmoBuilder::new()
-            .signal_from_parent(signal_chain_factory)
-            .spawn(app.world_mut());
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run for an entity with no parent."
-        );
-        drop(output_guard);
-
-        // --- 4. Test Case: Parent Without Component ---
-        // The signal chain should terminate gracefully if the parent is missing the component.
-        let parent_no_comp = app.world_mut().spawn_empty().id();
-        let child_of_plain_parent = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .entity_mut(parent_no_comp)
-            .add_child(child_of_plain_parent);
-
-        let builder_plain_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
-        builder_plain_parent.spawn_on_entity(app.world_mut(), child_of_plain_parent);
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run if parent is missing the target component."
-        );
-        drop(output_guard);
-
-        // --- 5. Test Case: Automatic Cleanup ---
-        // Despawn the child entity that holds the signal.
-        app.world_mut().entity_mut(child).despawn();
-        app.update(); // Process despawn commands.
-
-        // Modify the parent's component again. The signal should no longer be active.
-        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent C".to_string();
-        app.update();
-
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run after its entity is despawned."
-        );
+        STALE_SIGNALS.lock().unwrap().clear();
     }
 
     #[test]
@@ -1866,7 +1920,7 @@ mod tests {
                 .map(|In(entity): In<Entity>, query: Query<&SourceComponent>| query.get(entity).ok().cloned())
                 // Map the `Option<SourceComponent>` to `Option<TargetComponent>`.
                 .map_in(|opt_source: Option<SourceComponent>| opt_source.map(|source| TargetComponent(source.0)))
-                // Dedupe to avoid unnecessary updates if the source value doesn't change.
+                // Dedupe to avoid    unnecessary updates if the source value doesn't change.
                 .dedupe()
         };
 
@@ -1989,8 +2043,7 @@ mod tests {
         let signal_factory = |parent_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
             parent_signal
                 // Map the parent entity to its `SourceComponent`.
-                .map(|In(entity): In<Entity>, query: Query<&SourceComponent>| query.get(entity).ok().cloned())
-                // Map the `Option<SourceComponent>` to `Option<TargetComponent>`.
+                .map(|In(entity): In<Entity>, query: Query<&SourceComponent>| query.get(entity).ok().cloned()) // Map the `Option<SourceComponent>` to `Option<TargetComponent>`.
                 .map_in(|opt_source: Option<SourceComponent>| opt_source.map(|source| TargetComponent(source.0)))
                 .dedupe()
         };
@@ -2219,7 +2272,8 @@ mod tests {
         let entity_with_comp = builder_with_comp.spawn(app.world_mut());
         app.update();
 
-        // The factory should have received `Some(SourceComponent)` and produced the corresponding target.
+        // The factory should have received `Some(SourceComponent)` and produced the corresponding
+        // target.
         assert_eq!(
             app.world().get::<TargetComponent>(entity_with_comp),
             Some(&TargetComponent("Source: Data A".to_string())),
@@ -2288,204 +2342,208 @@ mod tests {
 
     #[test]
     fn test_child() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
 
-        // Marker components for identifying entities
-        #[derive(Component, Debug, PartialEq)]
-        struct ParentComp;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompA;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompB;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompC;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompD;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompE;
+            // Marker components for identifying entities
+            #[derive(Component, Debug, PartialEq)]
+            struct ParentComp;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompA;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompB;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompC;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompD;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompE;
 
-        // Components for testing signal interaction
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct SourceComp(i32);
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TargetComp(i32);
+            // Components for testing signal interaction
+            #[derive(Component, Clone, Debug, PartialEq)]
+            struct SourceComp(i32);
+            #[derive(Component, Clone, Debug, PartialEq)]
+            struct TargetComp(i32);
 
-        // --- 2. Test: Simple Parent-Child Relationship ---
-        let child_builder_simple = JonmoBuilder::new().insert((ChildCompA, Name::new("SimpleChild")));
-        let parent_builder_simple = JonmoBuilder::new().insert(ParentComp).child(child_builder_simple);
+            // --- 2. Test: Simple Parent-Child Relationship ---
+            let child_builder_simple = JonmoBuilder::new().insert((ChildCompA, Name::new("SimpleChild")));
+            let parent_builder_simple = JonmoBuilder::new().insert(ParentComp).child(child_builder_simple);
 
-        let parent_entity_simple = parent_builder_simple.spawn(app.world_mut());
-        app.update();
+            let parent_entity_simple = parent_builder_simple.spawn(app.world_mut());
+            app.update();
 
-        let mut children_query = app.world_mut().query::<&Children>();
-        let parent_children = children_query.get(app.world(), parent_entity_simple).unwrap();
-        assert_eq!(parent_children.len(), 1, "Parent should have exactly one child.");
-        let child_entity_simple = parent_children[0];
+            let mut children_query = app.world_mut().query::<&Children>();
+            let parent_children = children_query.get(app.world(), parent_entity_simple).unwrap();
+            assert_eq!(parent_children.len(), 1, "Parent should have exactly one child.");
+            let child_entity_simple = parent_children[0];
 
-        // Verify child's components
-        let child_entity_ref = app.world().entity(child_entity_simple);
-        assert!(child_entity_ref.contains::<ChildCompA>());
-        assert_eq!(child_entity_ref.get::<Name>().unwrap().as_str(), "SimpleChild");
+            // Verify child's components
+            let child_entity_ref = app.world().entity(child_entity_simple);
+            assert!(child_entity_ref.contains::<ChildCompA>());
+            assert_eq!(child_entity_ref.get::<Name>().unwrap().as_str(), "SimpleChild");
 
-        // Verify parent relationship from child's perspective
-        let mut parent_query = app.world_mut().query::<&bevy::prelude::ChildOf>();
-        let childs_parent = parent_query.get(app.world(), child_entity_simple).unwrap();
-        assert_eq!(childs_parent.parent(), parent_entity_simple);
+            // Verify parent relationship from child's perspective
+            let mut parent_query = app.world_mut().query::<&bevy::prelude::ChildOf>();
+            let childs_parent = parent_query.get(app.world(), child_entity_simple).unwrap();
+            assert_eq!(childs_parent.parent(), parent_entity_simple);
 
-        // Cleanup for next test
-        app.world_mut().entity_mut(parent_entity_simple).despawn();
-        app.update();
+            // Cleanup for next test
+            app.world_mut().entity_mut(parent_entity_simple).despawn();
+            app.update();
 
-        // --- 3. Test: Multiple Chained Children & Correct Order ---
-        let parent_builder_chained = JonmoBuilder::new()
-            .insert(ParentComp)
-            .child(JonmoBuilder::new().insert(ChildCompA))
-            .child(JonmoBuilder::new().insert(ChildCompB));
+            // --- 3. Test: Multiple Chained Children & Correct Order ---
+            let parent_builder_chained = JonmoBuilder::new()
+                .insert(ParentComp)
+                .child(JonmoBuilder::new().insert(ChildCompA))
+                .child(JonmoBuilder::new().insert(ChildCompB));
 
-        let parent_entity_chained = parent_builder_chained.spawn(app.world_mut());
-        app.update();
+            let parent_entity_chained = parent_builder_chained.spawn(app.world_mut());
+            app.update();
 
-        let children = app.world().get::<Children>(parent_entity_chained).unwrap();
-        assert_eq!(children.len(), 2, "Parent should have two children.");
+            let children = app.world().get::<Children>(parent_entity_chained).unwrap();
+            assert_eq!(children.len(), 2, "Parent should have two children.");
 
-        let child_a_entity = children[0];
-        let child_b_entity = children[1];
+            let child_a_entity = children[0];
+            let child_b_entity = children[1];
 
-        assert!(
-            app.world().entity(child_a_entity).contains::<ChildCompA>(),
-            "First child should be A"
-        );
-        assert!(
-            app.world().entity(child_b_entity).contains::<ChildCompB>(),
-            "Second child should be B"
-        );
-
-        // Cleanup
-        app.world_mut().entity_mut(parent_entity_chained).despawn();
-        app.update();
-
-        // --- 4. Test: Nested Hierarchy ---
-        let grandchild_builder = JonmoBuilder::new().insert(Name::new("Grandchild"));
-        let child_builder_nested = JonmoBuilder::new().insert(Name::new("Child")).child(grandchild_builder);
-        let grandparent_builder = JonmoBuilder::new()
-            .insert(Name::new("Grandparent"))
-            .child(child_builder_nested);
-
-        let grandparent_entity = grandparent_builder.spawn(app.world_mut());
-        app.update();
-
-        let gp_children = app.world().get::<Children>(grandparent_entity).unwrap();
-        assert_eq!(gp_children.len(), 1);
-        let child_entity_nested = gp_children[0];
-        assert_eq!(app.world().get::<Name>(child_entity_nested).unwrap().as_str(), "Child");
-
-        let child_children = app.world().get::<Children>(child_entity_nested).unwrap();
-        assert_eq!(child_children.len(), 1);
-        let grandchild_entity = child_children[0];
-        assert_eq!(
-            app.world().get::<Name>(grandchild_entity).unwrap().as_str(),
-            "Grandchild"
-        );
-
-        // Cleanup
-        app.world_mut().entity_mut(grandparent_entity).despawn();
-        app.update();
-
-        // --- 5. Test: Mixed Child Types for Correct Ordering ---
-        #[derive(Resource, Default, Deref, DerefMut, Clone)]
-        struct SignalTrigger(bool);
-        app.init_resource::<SignalTrigger>();
-
-        let child_a = JonmoBuilder::new().insert(ChildCompA);
-        let child_b = JonmoBuilder::new().insert(ChildCompB);
-        let child_c = JonmoBuilder::new().insert(ChildCompC);
-        let child_d = JonmoBuilder::new().insert(ChildCompD);
-        let child_e = JonmoBuilder::new().insert(ChildCompE);
-
-        let parent_builder_mixed = JonmoBuilder::new()
-            .insert(ParentComp)
-            .child(child_a) // Block 0, offset 0
-            .children([child_b.clone(), child_c.clone()]) // Block 1, offset 1
-            .child(child_d) // Block 2, offset 3
-            .child_signal(
-                // Block 3, offset 4
-                SignalBuilder::from_resource::<SignalTrigger>().map_in::<Option<JonmoBuilder>, _, _>(
-                    move |trigger: SignalTrigger| if trigger.0 { Some(child_e.clone()) } else { None },
-                ),
+            assert!(
+                app.world().entity(child_a_entity).contains::<ChildCompA>(),
+                "First child should be A"
+            );
+            assert!(
+                app.world().entity(child_b_entity).contains::<ChildCompB>(),
+                "Second child should be B"
             );
 
-        let parent_entity_mixed = parent_builder_mixed.spawn(app.world_mut());
+            // Cleanup
+            app.world_mut().entity_mut(parent_entity_chained).despawn();
+            app.update();
 
-        // Initially, signal is false, so child E should not exist.
-        app.update();
-        let children_mixed = app.world().get::<Children>(parent_entity_mixed).unwrap();
-        assert_eq!(children_mixed.len(), 4, "Should have 4 children initially.");
-        assert!(app.world().entity(children_mixed[0]).contains::<ChildCompA>());
-        assert!(app.world().entity(children_mixed[1]).contains::<ChildCompB>());
-        assert!(app.world().entity(children_mixed[2]).contains::<ChildCompC>());
-        assert!(app.world().entity(children_mixed[3]).contains::<ChildCompD>());
+            // --- 4. Test: Nested Hierarchy ---
+            let grandchild_builder = JonmoBuilder::new().insert(Name::new("Grandchild"));
+            let child_builder_nested = JonmoBuilder::new().insert(Name::new("Child")).child(grandchild_builder);
+            let grandparent_builder = JonmoBuilder::new()
+                .insert(Name::new("Grandparent"))
+                .child(child_builder_nested);
 
-        // Trigger the signal to add child E.
-        app.world_mut().resource_mut::<SignalTrigger>().0 = true;
-        app.update();
+            let grandparent_entity = grandparent_builder.spawn(app.world_mut());
+            app.update();
 
-        let children_mixed_after = app.world().get::<Children>(parent_entity_mixed).unwrap();
-        assert_eq!(
-            children_mixed_after.len(),
-            5,
-            "Should have 5 children after signal trigger."
-        );
-        // Verify the full order
-        assert!(app.world().entity(children_mixed_after[0]).contains::<ChildCompA>());
-        assert!(app.world().entity(children_mixed_after[1]).contains::<ChildCompB>());
-        assert!(app.world().entity(children_mixed_after[2]).contains::<ChildCompC>());
-        assert!(app.world().entity(children_mixed_after[3]).contains::<ChildCompD>());
-        assert!(
-            app.world().entity(children_mixed_after[4]).contains::<ChildCompE>(),
-            "Child E should be last."
-        );
+            let gp_children = app.world().get::<Children>(grandparent_entity).unwrap();
+            assert_eq!(gp_children.len(), 1);
+            let child_entity_nested = gp_children[0];
+            assert_eq!(app.world().get::<Name>(child_entity_nested).unwrap().as_str(), "Child");
 
-        // Cleanup
-        app.world_mut().entity_mut(parent_entity_mixed).despawn();
-        app.update();
+            let child_children = app.world().get::<Children>(child_entity_nested).unwrap();
+            assert_eq!(child_children.len(), 1);
+            let grandchild_entity = child_children[0];
+            assert_eq!(
+                app.world().get::<Name>(grandchild_entity).unwrap().as_str(),
+                "Grandchild"
+            );
 
-        // --- 6. Test: Child's Signals Function Correctly ---
-        let child_builder_with_signal = JonmoBuilder::new().component_signal_from_parent(|parent_signal| {
-            parent_signal
-                .component::<SourceComp>()
-                .map_in(|source: SourceComp| Some(TargetComp(source.0 * 2)))
-        });
+            // Cleanup
+            app.world_mut().entity_mut(grandparent_entity).despawn();
+            app.update();
 
-        let parent_builder_with_signal = JonmoBuilder::new()
-            .insert(SourceComp(10))
-            .child(child_builder_with_signal);
+            // --- 5. Test: Mixed Child Types for Correct Ordering ---
+            #[derive(Resource, Default, Deref, DerefMut, Clone)]
+            struct SignalTrigger(bool);
+            app.init_resource::<SignalTrigger>();
 
-        let parent_entity_signal = parent_builder_with_signal.spawn(app.world_mut());
-        app.update();
+            let child_a = JonmoBuilder::new().insert(ChildCompA);
+            let child_b = JonmoBuilder::new().insert(ChildCompB);
+            let child_c = JonmoBuilder::new().insert(ChildCompC);
+            let child_d = JonmoBuilder::new().insert(ChildCompD);
+            let child_e = JonmoBuilder::new().insert(ChildCompE);
 
-        let child_entity_signal = app.world().get::<Children>(parent_entity_signal).unwrap()[0];
-        let child_target_comp = app.world().get::<TargetComp>(child_entity_signal);
+            let parent_builder_mixed = JonmoBuilder::new()
+                .insert(ParentComp)
+                .child(child_a) // Block 0, offset 0
+                .children([child_b.clone(), child_c.clone()]) // Block 1, offset 1
+                .child(child_d) // Block 2, offset 3
+                .child_signal(
+                    // Block 3, offset 4
+                    SignalBuilder::from_resource::<SignalTrigger>().map_in::<Option<JonmoBuilder>, _, _>(
+                        move |trigger: SignalTrigger| if trigger.0 { Some(child_e.clone()) } else { None },
+                    ),
+                );
 
-        assert_eq!(
-            child_target_comp,
-            Some(&TargetComp(20)),
-            "Child's signal did not correctly read parent component and update itself."
-        );
+            let parent_entity_mixed = parent_builder_mixed.spawn(app.world_mut());
 
-        // Test reactivity: change parent component, check child.
-        app.world_mut().get_mut::<SourceComp>(parent_entity_signal).unwrap().0 = 50;
-        app.update();
-        let child_target_comp_updated = app.world().get::<TargetComp>(child_entity_signal);
-        assert_eq!(
-            child_target_comp_updated,
-            Some(&TargetComp(100)),
-            "Child's signal did not react to parent component change."
-        );
+            // Initially, signal is false, so child E should not exist.
+            app.update();
+            let children_mixed = app.world().get::<Children>(parent_entity_mixed).unwrap();
+            assert_eq!(children_mixed.len(), 4, "Should have 4 children initially.");
+            assert!(app.world().entity(children_mixed[0]).contains::<ChildCompA>());
+            assert!(app.world().entity(children_mixed[1]).contains::<ChildCompB>());
+            assert!(app.world().entity(children_mixed[2]).contains::<ChildCompC>());
+            assert!(app.world().entity(children_mixed[3]).contains::<ChildCompD>());
 
-        // Cleanup
-        app.world_mut().entity_mut(parent_entity_signal).despawn();
-        app.update();
+            // Trigger the signal to add child E.
+            app.world_mut().resource_mut::<SignalTrigger>().0 = true;
+            app.update();
+
+            let children_mixed_after = app.world().get::<Children>(parent_entity_mixed).unwrap();
+            assert_eq!(
+                children_mixed_after.len(),
+                5,
+                "Should have 5 children after signal trigger."
+            );
+            // Verify the full order
+            assert!(app.world().entity(children_mixed_after[0]).contains::<ChildCompA>());
+            assert!(app.world().entity(children_mixed_after[1]).contains::<ChildCompB>());
+            assert!(app.world().entity(children_mixed_after[2]).contains::<ChildCompC>());
+            assert!(app.world().entity(children_mixed_after[3]).contains::<ChildCompD>());
+            assert!(
+                app.world().entity(children_mixed_after[4]).contains::<ChildCompE>(),
+                "Child E should be last."
+            );
+
+            // Cleanup
+            app.world_mut().entity_mut(parent_entity_mixed).despawn();
+            app.update();
+
+            // --- 6. Test: Child's Signals Function Correctly ---
+            let child_builder_with_signal = JonmoBuilder::new().component_signal_from_parent(|parent_signal| {
+                parent_signal
+                    .component::<SourceComp>()
+                    .map_in(|source: SourceComp| Some(TargetComp(source.0 * 2)))
+            });
+
+            let parent_builder_with_signal = JonmoBuilder::new()
+                .insert(SourceComp(10))
+                .child(child_builder_with_signal);
+
+            let parent_entity_signal = parent_builder_with_signal.spawn(app.world_mut());
+            app.update();
+
+            let child_entity_signal = app.world().get::<Children>(parent_entity_signal).unwrap()[0];
+            let child_target_comp = app.world().get::<TargetComp>(child_entity_signal);
+
+            assert_eq!(
+                child_target_comp,
+                Some(&TargetComp(20)),
+                "Child's signal did not correctly read parent component and update itself."
+            );
+
+            // Test reactivity: change parent component, check child.
+            app.world_mut().get_mut::<SourceComp>(parent_entity_signal).unwrap().0 = 50;
+            app.update();
+            let child_target_comp_updated = app.world().get::<TargetComp>(child_entity_signal);
+            assert_eq!(
+                child_target_comp_updated,
+                Some(&TargetComp(100)),
+                "Child's signal did not react to parent component change."
+            );
+
+            // Cleanup
+            app.world_mut().entity_mut(parent_entity_signal).despawn();
+            app.update();
+        }
+
+        cleanup()
     }
 
     // Marker components for easy identification in the child_signal test
@@ -2528,383 +2586,391 @@ mod tests {
 
     #[test]
     fn test_child_signal() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalSource>();
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalSource>();
 
-        // A factory function to create reactive child builders based on a number
-        let reactive_child_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
+            // A factory function to create reactive child builders based on a number
+            let reactive_child_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
 
-        // The signal that maps the resource to an Option<JonmoBuilder>
-        let source_signal = SignalBuilder::from_resource::<SignalSource>()
-            .dedupe()
-            .map_in(move |source: SignalSource| source.0.map(reactive_child_factory));
+            // The signal that maps the resource to an Option<JonmoBuilder>
+            let source_signal = SignalBuilder::from_resource::<SignalSource>()
+                .dedupe()
+                .map_in(move |source: SignalSource| source.0.map(reactive_child_factory));
 
-        // --- 2. Build the Parent Entity ---
-        // This builder has static children sandwiching the reactive one to test ordering.
-        let parent_builder = JonmoBuilder::new()
-            .insert(ParentComp)
-            .child(JonmoBuilder::new().insert(StaticChildBefore)) // Child in block 0
-            .child_signal(source_signal) // Child in block 1
-            .child(JonmoBuilder::new().insert(StaticChildAfter)); // Child in block 2
+            // --- 2. Build the Parent Entity ---
+            // This builder has static children sandwiching the reactive one to test ordering.
+            let parent_builder = JonmoBuilder::new()
+                .insert(ParentComp)
+                .child(JonmoBuilder::new().insert(StaticChildBefore)) // Child in block 0
+                .child_signal(source_signal) // Child in block 1
+                .child(JonmoBuilder::new().insert(StaticChildAfter)); // Child in block 2
 
-        let parent_entity = parent_builder.spawn(app.world_mut());
+            let parent_entity = parent_builder.spawn(app.world_mut());
 
-        // --- 3. Run Test Cases ---
+            // --- 3. Run Test Cases ---
 
-        // Case A: Initial state (Source is None).
-        // Should only have the static children.
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "After"],
-            "Initial state with None should only have static children"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 2);
+            // Case A: Initial state (Source is None).
+            // Should only have the static children.
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "After"],
+                "Initial state with None should only have static children"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 2);
 
-        // Case B: Transition None -> Some(1)
-        app.world_mut().resource_mut::<SignalSource>().0 = Some(1);
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "Reactive(1)", "After"],
-            "Transition None->Some failed to create and order child correctly"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
+            // Case B: Transition None -> Some(1)
+            app.world_mut().resource_mut::<SignalSource>().0 = Some(1);
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "Reactive(1)", "After"],
+                "Transition None->Some failed to create and order child correctly"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
 
-        // Case C: No change (still Some(1)).
-        // Because of .dedupe(), the signal doesn't fire, nothing should change.
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "Reactive(1)", "After"],
-            "No-op update should not change children"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
+            // Case C: No change (still Some(1)).
+            // Because of .dedupe(), the signal doesn't fire, nothing should change.
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "Reactive(1)", "After"],
+                "No-op update should not change children"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
 
-        // Case D: Transition Some(1) -> Some(2)
-        // The old child should be despawned, and the new one spawned in its place.
-        let old_child_entity = app.world().get::<Children>(parent_entity).unwrap()[1];
-        app.world_mut().resource_mut::<SignalSource>().0 = Some(2);
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "Reactive(2)", "After"],
-            "Transition Some->Some failed to replace and order child correctly"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
-        assert!(
-            app.world().get_entity(old_child_entity).is_err(),
-            "Old reactive child was not despawned on replacement"
-        );
+            // Case D: Transition Some(1) -> Some(2)
+            // The old child should be despawned, and the new one spawned in its place.
+            let old_child_entity = app.world().get::<Children>(parent_entity).unwrap()[1];
+            app.world_mut().resource_mut::<SignalSource>().0 = Some(2);
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "Reactive(2)", "After"],
+                "Transition Some->Some failed to replace and order child correctly"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
+            assert!(
+                app.world().get_entity(old_child_entity).is_err(),
+                "Old reactive child was not despawned on replacement"
+            );
 
-        // Case E: Transition Some(2) -> None
-        let old_child_entity = app.world().get::<Children>(parent_entity).unwrap()[1];
-        app.world_mut().resource_mut::<SignalSource>().0 = None;
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "After"],
-            "Transition Some->None failed to remove child"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 2);
-        assert!(
-            app.world().get_entity(old_child_entity).is_err(),
-            "Reactive child was not despawned on transition to None"
-        );
+            // Case E: Transition Some(2) -> None
+            let old_child_entity = app.world().get::<Children>(parent_entity).unwrap()[1];
+            app.world_mut().resource_mut::<SignalSource>().0 = None;
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "After"],
+                "Transition Some->None failed to remove child"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 2);
+            assert!(
+                app.world().get_entity(old_child_entity).is_err(),
+                "Reactive child was not despawned on transition to None"
+            );
 
-        // Case F: Transition back to Some(3)
-        app.world_mut().resource_mut::<SignalSource>().0 = Some(3);
-        app.update();
-        assert_eq!(
-            get_child_types(app.world_mut(), parent_entity),
-            vec!["Before", "Reactive(3)", "After"],
-            "Transition back to Some failed"
-        );
-        assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
+            // Case F: Transition back to Some(3)
+            app.world_mut().resource_mut::<SignalSource>().0 = Some(3);
+            app.update();
+            assert_eq!(
+                get_child_types(app.world_mut(), parent_entity),
+                vec!["Before", "Reactive(3)", "After"],
+                "Transition back to Some failed"
+            );
+            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 3);
 
-        // --- 4. Test Cleanup ---
-        let child_to_despawn = app.world().get::<Children>(parent_entity).unwrap()[1];
-        app.world_mut().entity_mut(parent_entity).despawn();
-        app.update(); // Process despawn command.
+            // --- 4. Test Cleanup ---
+            let child_to_despawn = app.world().get::<Children>(parent_entity).unwrap()[1];
+            app.world_mut().entity_mut(parent_entity).despawn();
+            app.update(); // Process despawn command.
 
-        assert!(
-            app.world().get_entity(parent_entity).is_err(),
-            "Parent should be despawned."
-        );
-        assert!(
-            app.world().get_entity(child_to_despawn).is_err(),
-            "Reactive child should be despawned with parent."
-        );
+            assert!(
+                app.world().get_entity(parent_entity).is_err(),
+                "Parent should be despawned."
+            );
+            assert!(
+                app.world().get_entity(child_to_despawn).is_err(),
+                "Reactive child should be despawned with parent."
+            );
 
-        // Trigger the signal again. This should not panic or create any entities,
-        // as the signal system tied to the parent should have been cleaned up.
-        app.world_mut().resource_mut::<SignalSource>().0 = Some(4);
-        app.update();
+            // Trigger the signal again. This should not panic or create any entities,
+            // as the signal system tied to the parent should have been cleaned up.
+            app.world_mut().resource_mut::<SignalSource>().0 = Some(4);
+            app.update();
 
-        let mut reactive_children_query = app.world_mut().query::<&ReactiveChild>();
-        assert_eq!(
-            reactive_children_query.iter(app.world()).count(),
-            0,
-            "No reactive children should exist after parent is despawned."
-        );
+            let mut reactive_children_query = app.world_mut().query::<&ReactiveChild>();
+            assert_eq!(
+                reactive_children_query.iter(app.world()).count(),
+                0,
+                "No reactive children should exist after parent is despawned."
+            );
+        }
+
+        cleanup()
     }
 
     #[test]
     fn test_children() {
-        // --- 1. SETUP ---
-        // This comprehensive test validates multiple aspects of the `children` method.
-        let mut app = create_test_app();
-
-        // Marker components for identifying entities in assertions.
-        #[derive(Component, Debug, PartialEq)]
-        struct ParentComp;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompA;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompB;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompC;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompD;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompE;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompF;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompG;
-        #[derive(Component, Debug, PartialEq)]
-        struct ChildCompH;
-        #[derive(Component, Debug, PartialEq)]
-        struct GrandchildComp;
-
-        // Components for testing signal interaction within children.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct SourceComp(i32);
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TargetComp(i32);
-
-        // --- 2. TEST CASE: Basic Functionality & Correct Order ---
-        // Verifies that a simple list of builders is spawned correctly as children and in the
-        // specified order.
         {
-            let child_builders = vec![
-                JonmoBuilder::new().insert(ChildCompA),
-                JonmoBuilder::new().insert(ChildCompB),
-                JonmoBuilder::new().insert(ChildCompC),
-            ];
-            let parent_builder = JonmoBuilder::new().insert(ParentComp).children(child_builders);
+            // --- 1. SETUP ---
+            // This comprehensive test validates multiple aspects of the `children` method.
+            let mut app = create_test_app();
 
-            let parent_entity = parent_builder.spawn(app.world_mut());
-            app.update();
+            // Marker components for identifying entities in assertions.
+            #[derive(Component, Debug, PartialEq)]
+            struct ParentComp;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompA;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompB;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompC;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompD;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompE;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompF;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompG;
+            #[derive(Component, Debug, PartialEq)]
+            struct ChildCompH;
+            #[derive(Component, Debug, PartialEq)]
+            struct GrandchildComp;
 
-            let children = app
-                .world()
-                .get::<Children>(parent_entity)
-                .expect("Parent should have Children component.")
-                .iter()
-                .collect::<Vec<_>>();
-            assert_eq!(children.len(), 3, "Parent should have exactly 3 children.");
+            // Components for testing signal interaction within children.
+            #[derive(Component, Clone, Debug, PartialEq)]
+            struct SourceComp(i32);
+            #[derive(Component, Clone, Debug, PartialEq)]
+            struct TargetComp(i32);
 
-            // Verify order and components
-            assert!(
-                app.world().entity(children[0]).contains::<ChildCompA>(),
-                "Child 0 should be A"
-            );
-            assert!(
-                app.world().entity(children[1]).contains::<ChildCompB>(),
-                "Child 1 should be B"
-            );
-            assert!(
-                app.world().entity(children[2]).contains::<ChildCompC>(),
-                "Child 2 should be C"
-            );
+            // --- 2. TEST CASE: Basic Functionality & Correct Order ---
+            // Verifies that a simple list of builders is spawned correctly as children and in the
+            // specified order.
+            {
+                let child_builders = vec![
+                    JonmoBuilder::new().insert(ChildCompA),
+                    JonmoBuilder::new().insert(ChildCompB),
+                    JonmoBuilder::new().insert(ChildCompC),
+                ];
+                let parent_builder = JonmoBuilder::new().insert(ParentComp).children(child_builders);
 
-            // Verify parent relationship from each child's perspective
-            let mut parent_rel_query = app.world_mut().query::<&bevy::prelude::ChildOf>();
-            for child_entity in children.into_iter() {
+                let parent_entity = parent_builder.spawn(app.world_mut());
+                app.update();
+
+                let children = app
+                    .world()
+                    .get::<Children>(parent_entity)
+                    .expect("Parent should have Children component.")
+                    .iter()
+                    .collect::<Vec<_>>();
+                assert_eq!(children.len(), 3, "Parent should have exactly 3 children.");
+
+                // Verify order and components
+                assert!(
+                    app.world().entity(children[0]).contains::<ChildCompA>(),
+                    "Child 0 should be A"
+                );
+                assert!(
+                    app.world().entity(children[1]).contains::<ChildCompB>(),
+                    "Child 1 should be B"
+                );
+                assert!(
+                    app.world().entity(children[2]).contains::<ChildCompC>(),
+                    "Child 2 should be C"
+                );
+
+                // Verify parent relationship from each child's perspective
+                let mut parent_rel_query = app.world_mut().query::<&bevy::prelude::ChildOf>();
+                for child_entity in children.into_iter() {
+                    assert_eq!(
+                        parent_rel_query.get(app.world(), child_entity).unwrap().parent(),
+                        parent_entity
+                    );
+                }
+
+                app.world_mut().entity_mut(parent_entity).despawn();
+                app.update();
+            }
+
+            // --- 3. TEST CASE: Empty Iterator ---
+            // Verifies that providing an empty iterator results in no children being added.
+            {
+                // The type hint is needed for an empty vec.
+                let parent_builder_empty = JonmoBuilder::new()
+                    .insert(ParentComp)
+                    .children(vec![] as Vec<JonmoBuilder>);
+                let parent_entity_empty = parent_builder_empty.spawn(app.world_mut());
+                app.update();
+                assert!(
+                    app.world().get::<Children>(parent_entity_empty).is_none(),
+                    "Parent with empty children iterator should not have a Children component."
+                );
+
+                app.world_mut().entity_mut(parent_entity_empty).despawn();
+                app.update();
+            }
+
+            // --- 4. TEST CASE: Complex Children and Cleanup ---
+            // Verifies that children can have their own complex logic (signals, hierarchy) and that
+            // they are properly cleaned up when the parent is despawned.
+            {
+                let complex_child_builder = JonmoBuilder::new()
+                    .insert(ChildCompD)
+                    .child(JonmoBuilder::new().insert(GrandchildComp)) // Nested child
+                    .component_signal_from_parent(|parent_signal| {
+                        // Signal reading from parent
+                        parent_signal
+                            .component::<SourceComp>()
+                            .map_in(|source: SourceComp| Some(TargetComp(source.0 * 10)))
+                    });
+
+                let parent_builder_complex = JonmoBuilder::new()
+                    .insert((ParentComp, SourceComp(5)))
+                    .children(vec![complex_child_builder]);
+
+                let parent_entity_complex = parent_builder_complex.spawn(app.world_mut());
+                app.update();
+
+                let complex_children = app.world().get::<Children>(parent_entity_complex).unwrap();
+                let complex_child_entity = complex_children[0];
+
+                // Verify signal ran correctly
                 assert_eq!(
-                    parent_rel_query.get(app.world(), child_entity).unwrap().parent(),
-                    parent_entity
+                    app.world().get::<TargetComp>(complex_child_entity),
+                    Some(&TargetComp(50))
+                );
+
+                // Verify nested hierarchy
+                let grandchild_entity = app.world().get::<Children>(complex_child_entity).unwrap()[0];
+                assert!(app.world().entity(grandchild_entity).contains::<GrandchildComp>());
+
+                // Test reactivity
+                app.world_mut().get_mut::<SourceComp>(parent_entity_complex).unwrap().0 = 7;
+                app.update();
+                assert_eq!(
+                    app.world().get::<TargetComp>(complex_child_entity),
+                    Some(&TargetComp(70)),
+                    "Signal did not react to parent's component change."
+                );
+
+                // Test cleanup
+                app.world_mut().entity_mut(parent_entity_complex).despawn();
+                app.update();
+
+                assert!(
+                    app.world().get_entity(complex_child_entity).is_err(),
+                    "Complex child should be despawned with parent."
+                );
+                assert!(
+                    app.world().get_entity(grandchild_entity).is_err(),
+                    "Grandchild should be despawned with parent."
                 );
             }
 
-            app.world_mut().entity_mut(parent_entity).despawn();
-            app.update();
-        }
+            // --- 5. TEST CASE: Mixed Ordering with Other Child Methods ---
+            // This is a critical test to ensure the internal offset calculation is correct when
+            // `children` is mixed with `child`, `child_signal`, etc.
+            {
+                // Helper to verify the exact order of children by their components.
+                fn get_ordered_child_markers(world: &World, parent: Entity) -> Vec<&'static str> {
+                    let Some(children) = world.get::<Children>(parent) else {
+                        return vec![];
+                    };
+                    children
+                        .iter()
+                        .map(|child_entity| {
+                            let e = world.entity(child_entity);
+                            if e.contains::<ChildCompA>() {
+                                "A"
+                            } else if e.contains::<ChildCompB>() {
+                                "B"
+                            } else if e.contains::<ChildCompC>() {
+                                "C"
+                            } else if e.contains::<ChildCompD>() {
+                                "D"
+                            } else if e.contains::<ChildCompE>() {
+                                "E"
+                            } else if e.contains::<ChildCompF>() {
+                                "F"
+                            } else if e.contains::<ChildCompG>() {
+                                "G"
+                            } else if e.contains::<ChildCompH>() {
+                                "H"
+                            } else {
+                                "Unknown"
+                            }
+                        })
+                        .collect()
+                }
 
-        // --- 3. TEST CASE: Empty Iterator ---
-        // Verifies that providing an empty iterator results in no children being added.
-        {
-            // The type hint is needed for an empty vec.
-            let parent_builder_empty = JonmoBuilder::new()
-                .insert(ParentComp)
-                .children(vec![] as Vec<JonmoBuilder>);
-            let parent_entity_empty = parent_builder_empty.spawn(app.world_mut());
-            app.update();
-            assert!(
-                app.world().get::<Children>(parent_entity_empty).is_none(),
-                "Parent with empty children iterator should not have a Children component."
-            );
+                #[derive(Resource, Default, Deref, DerefMut, Clone)]
+                struct SignalTrigger(bool);
+                app.init_resource::<SignalTrigger>();
 
-            app.world_mut().entity_mut(parent_entity_empty).despawn();
-            app.update();
-        }
+                let parent_builder = JonmoBuilder::new()
+                    .insert(ParentComp)
+                    .child(JonmoBuilder::new().insert(ChildCompA)) // Block 0, size 1
+                    .children([
+                        // Block 1, size 2
+                        JonmoBuilder::new().insert(ChildCompB),
+                        JonmoBuilder::new().insert(ChildCompC),
+                    ])
+                    .child_signal(
+                        // Block 2, size 0 -> 1
+                        SignalBuilder::from_resource::<SignalTrigger>().map_in(|trigger: SignalTrigger| {
+                            if trigger.0 {
+                                Some(JonmoBuilder::new().insert(ChildCompD))
+                            } else {
+                                None
+                            }
+                        }),
+                    )
+                    .children(vec![
+                        // Block 3, size 3
+                        JonmoBuilder::new().insert(ChildCompE),
+                        JonmoBuilder::new().insert(ChildCompF),
+                        JonmoBuilder::new().insert(ChildCompG),
+                    ])
+                    .child(JonmoBuilder::new().insert(ChildCompH)); // Block 4, size 1
 
-        // --- 4. TEST CASE: Complex Children and Cleanup ---
-        // Verifies that children can have their own complex logic (signals, hierarchy) and that
-        // they are properly cleaned up when the parent is despawned.
-        {
-            let complex_child_builder = JonmoBuilder::new()
-                .insert(ChildCompD)
-                .child(JonmoBuilder::new().insert(GrandchildComp)) // Nested child
-                .component_signal_from_parent(|parent_signal| {
-                    // Signal reading from parent
-                    parent_signal
-                        .component::<SourceComp>()
-                        .map_in(|source: SourceComp| Some(TargetComp(source.0 * 10)))
-                });
+                let parent_entity = parent_builder.spawn(app.world_mut());
 
-            let parent_builder_complex = JonmoBuilder::new()
-                .insert((ParentComp, SourceComp(5)))
-                .children(vec![complex_child_builder]);
+                // Test Initial Order (Signal is false)
+                app.update();
+                assert_eq!(
+                    get_ordered_child_markers(app.world(), parent_entity),
+                    vec!["A", "B", "C", "E", "F", "G", "H"],
+                    "Initial mixed child order is incorrect"
+                );
+                assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
 
-            let parent_entity_complex = parent_builder_complex.spawn(app.world_mut());
-            app.update();
+                // Test Order After Signal Trigger
+                app.world_mut().resource_mut::<SignalTrigger>().0 = true;
+                app.update();
+                assert_eq!(
+                    get_ordered_child_markers(app.world(), parent_entity),
+                    vec!["A", "B", "C", "D", "E", "F", "G", "H"],
+                    "Mixed child order after signal trigger is incorrect"
+                );
+                assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 8);
 
-            let complex_children = app.world().get::<Children>(parent_entity_complex).unwrap();
-            let complex_child_entity = complex_children[0];
-
-            // Verify signal ran correctly
-            assert_eq!(
-                app.world().get::<TargetComp>(complex_child_entity),
-                Some(&TargetComp(50))
-            );
-
-            // Verify nested hierarchy
-            let grandchild_entity = app.world().get::<Children>(complex_child_entity).unwrap()[0];
-            assert!(app.world().entity(grandchild_entity).contains::<GrandchildComp>());
-
-            // Test reactivity
-            app.world_mut().get_mut::<SourceComp>(parent_entity_complex).unwrap().0 = 7;
-            app.update();
-            assert_eq!(
-                app.world().get::<TargetComp>(complex_child_entity),
-                Some(&TargetComp(70)),
-                "Signal did not react to parent's component change."
-            );
-
-            // Test cleanup
-            app.world_mut().entity_mut(parent_entity_complex).despawn();
-            app.update();
-
-            assert!(
-                app.world().get_entity(complex_child_entity).is_err(),
-                "Complex child should be despawned with parent."
-            );
-            assert!(
-                app.world().get_entity(grandchild_entity).is_err(),
-                "Grandchild should be despawned with parent."
-            );
-        }
-
-        // --- 5. TEST CASE: Mixed Ordering with Other Child Methods ---
-        // This is a critical test to ensure the internal offset calculation is correct when
-        // `children` is mixed with `child`, `child_signal`, etc.
-        {
-            // Helper to verify the exact order of children by their components.
-            fn get_ordered_child_markers(world: &World, parent: Entity) -> Vec<&'static str> {
-                let Some(children) = world.get::<Children>(parent) else {
-                    return vec![];
-                };
-                children
-                    .iter()
-                    .map(|child_entity| {
-                        let e = world.entity(child_entity);
-                        if e.contains::<ChildCompA>() {
-                            "A"
-                        } else if e.contains::<ChildCompB>() {
-                            "B"
-                        } else if e.contains::<ChildCompC>() {
-                            "C"
-                        } else if e.contains::<ChildCompD>() {
-                            "D"
-                        } else if e.contains::<ChildCompE>() {
-                            "E"
-                        } else if e.contains::<ChildCompF>() {
-                            "F"
-                        } else if e.contains::<ChildCompG>() {
-                            "G"
-                        } else if e.contains::<ChildCompH>() {
-                            "H"
-                        } else {
-                            "Unknown"
-                        }
-                    })
-                    .collect()
+                // Test Order After Signal Un-triggers
+                app.world_mut().resource_mut::<SignalTrigger>().0 = false;
+                app.update();
+                assert_eq!(
+                    get_ordered_child_markers(app.world(), parent_entity),
+                    vec!["A", "B", "C", "E", "F", "G", "H"],
+                    "Mixed child order after signal un-triggers is incorrect"
+                );
+                assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
             }
-
-            #[derive(Resource, Default, Deref, DerefMut, Clone)]
-            struct SignalTrigger(bool);
-            app.init_resource::<SignalTrigger>();
-
-            let parent_builder = JonmoBuilder::new()
-                .insert(ParentComp)
-                .child(JonmoBuilder::new().insert(ChildCompA)) // Block 0, size 1
-                .children([
-                    // Block 1, size 2
-                    JonmoBuilder::new().insert(ChildCompB),
-                    JonmoBuilder::new().insert(ChildCompC),
-                ])
-                .child_signal(
-                    // Block 2, size 0 -> 1
-                    SignalBuilder::from_resource::<SignalTrigger>().map_in(|trigger: SignalTrigger| {
-                        if trigger.0 {
-                            Some(JonmoBuilder::new().insert(ChildCompD))
-                        } else {
-                            None
-                        }
-                    }),
-                )
-                .children(vec![
-                    // Block 3, size 3
-                    JonmoBuilder::new().insert(ChildCompE),
-                    JonmoBuilder::new().insert(ChildCompF),
-                    JonmoBuilder::new().insert(ChildCompG),
-                ])
-                .child(JonmoBuilder::new().insert(ChildCompH)); // Block 4, size 1
-
-            let parent_entity = parent_builder.spawn(app.world_mut());
-
-            // Test Initial Order (Signal is false)
-            app.update();
-            assert_eq!(
-                get_ordered_child_markers(app.world(), parent_entity),
-                vec!["A", "B", "C", "E", "F", "G", "H"],
-                "Initial mixed child order is incorrect"
-            );
-            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
-
-            // Test Order After Signal Trigger
-            app.world_mut().resource_mut::<SignalTrigger>().0 = true;
-            app.update();
-            assert_eq!(
-                get_ordered_child_markers(app.world(), parent_entity),
-                vec!["A", "B", "C", "D", "E", "F", "G", "H"],
-                "Mixed child order after signal trigger is incorrect"
-            );
-            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 8);
-
-            // Test Order After Signal Un-triggers
-            app.world_mut().resource_mut::<SignalTrigger>().0 = false;
-            app.update();
-            assert_eq!(
-                get_ordered_child_markers(app.world(), parent_entity),
-                vec!["A", "B", "C", "E", "F", "G", "H"],
-                "Mixed child order after signal un-triggers is incorrect"
-            );
-            assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
         }
+
+        cleanup()
     }
 
     /// Helper to get a Vec of all children's entity IDs.
@@ -2940,194 +3006,189 @@ mod tests {
 
     #[test]
     fn test_children_signal_vec() {
-        // --- 1. SETUP ---
-        let mut app = create_test_app();
-        let source_vec = MutableVec::from(vec![10u32, 20u32]);
+        {
+            // --- 1. SETUP ---
+            let mut app = create_test_app();
+            let source_vec = MutableVecBuilder::from([10u32, 20u32]).spawn(app.world_mut());
 
-        // A factory function to create a simple JonmoBuilder for a reactive child.
-        let child_builder_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
+            // A factory function to create a simple JonmoBuilder for a reactive child.
+            let child_builder_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
 
-        // The SignalVec that will drive the children.
-        let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
+            // The SignalVec that will drive the children.
+            let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
 
-        // The parent builder, with static children sandwiching the reactive ones to test ordering.
-        let parent_builder = JonmoBuilder::new()
-            .insert(ParentComp)
-            .child(JonmoBuilder::new().insert(StaticChildBefore))
-            .children_signal_vec(children_signal)
-            .child(JonmoBuilder::new().insert(StaticChildAfter));
+            // The parent builder, with static children sandwiching the reactive ones to test ordering.
+            let parent_builder = JonmoBuilder::new()
+                .insert(ParentComp)
+                .child(JonmoBuilder::new().insert(StaticChildBefore))
+                .children_signal_vec(children_signal)
+                .child(JonmoBuilder::new().insert(StaticChildAfter));
 
-        let parent_entity = parent_builder.spawn(app.world_mut());
+            let parent_entity = parent_builder.spawn(app.world_mut());
 
-        // --- 2. INITIAL STATE ---
-        // The first update runs the on_spawn closures and processes the initial `Replace` diff.
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec!["StaticBefore", "Reactive(10)", "Reactive(20)", "StaticAfter"],
-            "Initial child order and content is incorrect."
-        );
-
-        // --- 3. TEST `PUSH` ---
-        source_vec.write().push(30);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec![
-                "StaticBefore",
-                "Reactive(10)",
-                "Reactive(20)",
-                "Reactive(30)",
-                "StaticAfter"
-            ],
-            "State after Push is incorrect."
-        );
-
-        // --- 4. TEST `INSERT_AT` ---
-        source_vec.write().insert(1, 15); // Insert 15 between 10 and 20
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec![
-                "StaticBefore",
-                "Reactive(10)",
-                "Reactive(15)",
-                "Reactive(20)",
-                "Reactive(30)",
-                "StaticAfter"
-            ],
-            "State after InsertAt is incorrect."
-        );
-
-        // --- 5. TEST `UPDATE_AT` ---
-        let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
-        let entity_to_be_replaced = old_child_entities[3]; // The "Reactive(20)" entity
-        source_vec.write().set(2, 25); // Update 20 to 25
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec![
-                "StaticBefore",
-                "Reactive(10)",
-                "Reactive(15)",
-                "Reactive(25)",
-                "Reactive(30)",
-                "StaticAfter"
-            ],
-            "State after UpdateAt is incorrect."
-        );
-        assert!(
-            app.world().get_entity(entity_to_be_replaced).is_err(),
-            "Old child entity should be despawned after UpdateAt."
-        );
-
-        // --- 6. TEST `REMOVE_AT` ---
-        let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
-        let entity_to_be_removed = old_child_entities[2]; // The "Reactive(15)" entity
-        source_vec.write().remove(1); // Remove 15
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec![
-                "StaticBefore",
-                "Reactive(10)",
-                "Reactive(25)",
-                "Reactive(30)",
-                "StaticAfter"
-            ],
-            "State after RemoveAt is incorrect."
-        );
-        assert!(
-            app.world().get_entity(entity_to_be_removed).is_err(),
-            "Child entity should be despawned after RemoveAt."
-        );
-
-        // --- 7. TEST `MOVE` ---
-        source_vec.write().move_item(2, 0); // Move 30 (now at index 2) to the front
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec![
-                "StaticBefore",
-                "Reactive(30)",
-                "Reactive(10)",
-                "Reactive(25)",
-                "StaticAfter"
-            ],
-            "State after Move is incorrect."
-        );
-
-        // --- 8. TEST `POP` ---
-        let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
-        let entity_to_be_popped = old_child_entities[3]; // The "Reactive(25)" entity
-        source_vec.write().pop(); // Removes 25
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec!["StaticBefore", "Reactive(30)", "Reactive(10)", "StaticAfter"],
-            "State after Pop is incorrect."
-        );
-        assert!(
-            app.world().get_entity(entity_to_be_popped).is_err(),
-            "Child entity should be despawned after Pop."
-        );
-
-        // --- 9. TEST `CLEAR` ---
-        let reactive_children_before_clear = get_children_entities(app.world_mut(), parent_entity)
-            .into_iter()
-            .filter(|e| app.world().get::<ReactiveChild>(*e).is_some())
-            .collect::<Vec<_>>();
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec!["StaticBefore", "StaticAfter"],
-            "State after Clear is incorrect."
-        );
-        for child in reactive_children_before_clear {
-            assert!(
-                app.world().get_entity(child).is_err(),
-                "All reactive children should be despawned after Clear."
+            // --- 2. INITIAL STATE ---
+            // The first update runs the on_spawn closures and processes the initial `Replace` diff.
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec!["StaticBefore", "Reactive(10)", "Reactive(20)", "StaticAfter"],
+                "Initial child order and content is incorrect."
             );
+
+            // --- 3. TEST `PUSH` ---
+            source_vec.write(app.world_mut()).push(30);
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec![
+                    "StaticBefore",
+                    "Reactive(10)",
+                    "Reactive(20)",
+                    "Reactive(30)",
+                    "StaticAfter"
+                ],
+                "State after Push is incorrect."
+            );
+
+            // --- 4. TEST `INSERT_AT` ---
+            source_vec.write(app.world_mut()).insert(1, 15); // Insert 15 between 10 and 20
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec![
+                    "StaticBefore",
+                    "Reactive(10)",
+                    "Reactive(15)",
+                    "Reactive(20)",
+                    "Reactive(30)",
+                    "StaticAfter"
+                ],
+                "State after InsertAt is incorrect."
+            );
+
+            // --- 5. TEST `UPDATE_AT` ---
+            let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
+            let entity_to_be_replaced = old_child_entities[3]; // The "Reactive(20)" entity
+            source_vec.write(app.world_mut()).set(2, 25); // Update 20 to 25
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec![
+                    "StaticBefore",
+                    "Reactive(10)",
+                    "Reactive(15)",
+                    "Reactive(25)",
+                    "Reactive(30)",
+                    "StaticAfter"
+                ],
+                "State after UpdateAt is incorrect."
+            );
+            assert!(
+                app.world().get_entity(entity_to_be_replaced).is_err(),
+                "Old child entity should be despawned after UpdateAt."
+            );
+
+            // --- 6. TEST `REMOVE_AT` ---
+            let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
+            let entity_to_be_removed = old_child_entities[2]; // The "Reactive(15)" entity
+            source_vec.write(app.world_mut()).remove(1); // Remove 15
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec![
+                    "StaticBefore",
+                    "Reactive(10)",
+                    "Reactive(25)",
+                    "Reactive(30)",
+                    "StaticAfter"
+                ],
+                "State after RemoveAt is incorrect."
+            );
+            assert!(
+                app.world().get_entity(entity_to_be_removed).is_err(),
+                "Child entity should be despawned after RemoveAt."
+            );
+
+            // --- 7. TEST `MOVE` ---
+            source_vec.write(app.world_mut()).move_item(2, 0); // Move 30 (now at index 2) to the front
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec![
+                    "StaticBefore",
+                    "Reactive(30)",
+                    "Reactive(10)",
+                    "Reactive(25)",
+                    "StaticAfter"
+                ],
+                "State after Move is incorrect."
+            );
+
+            // --- 8. TEST `POP` ---
+            let old_child_entities = get_children_entities(app.world_mut(), parent_entity);
+            let entity_to_be_popped = old_child_entities[3]; // The "Reactive(25)" entity
+            source_vec.write(app.world_mut()).pop(); // Removes 25
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec!["StaticBefore", "Reactive(30)", "Reactive(10)", "StaticAfter"],
+                "State after Pop is incorrect."
+            );
+            assert!(
+                app.world().get_entity(entity_to_be_popped).is_err(),
+                "Child entity should be despawned after Pop."
+            );
+
+            // --- 9. TEST `CLEAR` ---
+            let reactive_children_before_clear = get_children_entities(app.world_mut(), parent_entity)
+                .into_iter()
+                .filter(|e| app.world().get::<ReactiveChild>(*e).is_some())
+                .collect::<Vec<_>>();
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec!["StaticBefore", "StaticAfter"],
+                "State after Clear is incorrect."
+            );
+            for child in reactive_children_before_clear {
+                assert!(
+                    app.world().get_entity(child).is_err(),
+                    "All reactive children should be despawned after Clear."
+                );
+            }
+
+            // --- 10. TEST `REPLACE` (after Clear) ---
+            source_vec.write(app.world_mut()).replace(vec![100, 200]);
+            app.update();
+            assert_eq!(
+                get_all_child_types(app.world_mut(), parent_entity),
+                vec!["StaticBefore", "Reactive(100)", "Reactive(200)", "StaticAfter"],
+                "State after Replace is incorrect."
+            );
+
+            // --- 11. TEST PARENT DESPAWN ---
+            let all_children_before_despawn = get_children_entities(app.world_mut(), parent_entity);
+            app.world_mut().entity_mut(parent_entity).despawn();
+            app.update(); // Process despawn commands
+
+            assert!(
+                app.world().get_entity(parent_entity).is_err(),
+                "Parent entity should be despawned."
+            );
+            for child in all_children_before_despawn {
+                assert!(
+                    app.world().get_entity(child).is_err(),
+                    "All children (static and reactive) should be despawned with parent."
+                );
+            }
+
+            // Verify signal cleanup by flushing one more change. This should not panic.
+            source_vec.write(app.world_mut()).push(999);
+            app.update();
+            // The test passes if the above update doesn't panic.
         }
 
-        // --- 10. TEST `REPLACE` (after Clear) ---
-        source_vec.write().replace(vec![100, 200]);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_all_child_types(app.world_mut(), parent_entity),
-            vec!["StaticBefore", "Reactive(100)", "Reactive(200)", "StaticAfter"],
-            "State after Replace is incorrect."
-        );
-
-        // --- 11. TEST PARENT DESPAWN ---
-        let all_children_before_despawn = get_children_entities(app.world_mut(), parent_entity);
-        app.world_mut().entity_mut(parent_entity).despawn();
-        app.update(); // Process despawn commands
-
-        assert!(
-            app.world().get_entity(parent_entity).is_err(),
-            "Parent entity should be despawned."
-        );
-        for child in all_children_before_despawn {
-            assert!(
-                app.world().get_entity(child).is_err(),
-                "All children (static and reactive) should be despawned with parent."
-            );
-        }
-
-        // Verify signal cleanup by flushing one more change. This should not panic.
-        source_vec.write().push(999);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        // The test passes if the above update doesn't panic.
+        cleanup()
     }
 }

@@ -58,13 +58,13 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
 ///
 /// Relevant in contexts where some function may require a [`Clone`] [`Signal`], but the concrete
 /// type can't be known at compile-time.
-pub trait SignalClone: Signal + DynClone {}
+pub trait SignalDynClone: Signal + DynClone {}
 
-clone_trait_object!(< T > SignalClone < Item = T >);
+clone_trait_object!(<T> SignalDynClone<Item = T>);
 
-impl<T: Signal + Clone + 'static> SignalClone for T {}
+impl<T: Signal + Clone + 'static> SignalDynClone for T {}
 
-impl<O: 'static> Signal for Box<dyn SignalClone<Item = O> + Send + Sync> {
+impl<O: 'static> Signal for Box<dyn SignalDynClone<Item = O> + Send + Sync> {
     type Item = O;
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
@@ -628,7 +628,7 @@ impl SignalBuilder {
 
     /// Creates a [`Source`] signal from a [`LazyEntity`].
     pub fn from_lazy_entity(entity: LazyEntity) -> Source<Entity> {
-        Self::from_system(move |_: In<()>| entity.get())
+        Self::from_system(move |_: In<()>| *entity)
     }
 
     /// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
@@ -675,7 +675,7 @@ impl SignalBuilder {
     where
         C: Component + Clone,
     {
-        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(entity.get()).ok().cloned())
+        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(*entity).ok().cloned())
     }
 
     /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], always outputting an
@@ -693,7 +693,7 @@ impl SignalBuilder {
     where
         C: Component + Clone,
     {
-        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity.get()).ok().cloned()))
+        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(*entity).ok().cloned()))
     }
 
     /// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
@@ -950,8 +950,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state / 2
+    ///         *state += 1;
+    ///         *state / 2
     ///     }
     /// })
     /// .dedupe(); // outputs `0`, `1`, `2`, `3`, ...
@@ -993,8 +993,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state / 2
+    ///         *state += 1;
+    ///         *state / 2
     ///     }
     /// })
     /// .first(); // outputs `0` then terminates forever
@@ -1091,8 +1091,8 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
-    ///        *state += 1;
-    ///        *state % 2
+    ///         *state += 1;
+    ///         *state % 2
     ///     }
     /// })
     /// .filter(|In(i): In<usize>| i % 2 == 0); // outputs `2`, `4`, `6`, `8`, ...
@@ -1195,7 +1195,7 @@ pub trait SignalExt: Signal {
     ///             SignalBuilder::from_system(|_: In<()>| 1)
     ///         } else {
     ///             SignalBuilder::from_system(|_: In<()>| 2)
-    ///        }
+    ///         }
     ///     })
     ///     .flatten();
     ///
@@ -1331,16 +1331,16 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
-    /// let signal = SignalBuilder::from_resource::<Toggle>()
-    ///     .dedupe()
-    ///     .switch(move |In(toggle): In<Toggle>| {
-    ///         if toggle.0 {
-    ///             SignalBuilder::from_system(|_: In<()>| 1)
-    ///         } else {
-    ///             SignalBuilder::from_system(|_: In<()>| 2)
-    ///         }
-    ///     }
-    /// );
+    /// let signal =
+    ///     SignalBuilder::from_resource::<Toggle>()
+    ///         .dedupe()
+    ///         .switch(move |In(toggle): In<Toggle>| {
+    ///             if toggle.0 {
+    ///                 SignalBuilder::from_system(|_: In<()>| 1)
+    ///             } else {
+    ///                 SignalBuilder::from_system(|_: In<()>| 2)
+    ///             }
+    ///         });
     /// // `signal` outputs `2`
     /// world.resource_mut::<Toggle>().0 = true;
     /// // `signal` outputs `1`
@@ -1370,21 +1370,18 @@ pub trait SignalExt: Signal {
     /// #[derive(Resource, Clone, PartialEq)]
     /// struct Toggle(bool);
     ///
-    /// let list_a = MutableVec::from([1, 2, 3]);
-    /// let list_b = MutableVec::from([10, 20]);
-    ///
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
+    ///
     /// let signal = SignalBuilder::from_resource::<Toggle>()
     ///     .dedupe()
-    ///     .switch_signal_vec(move |In(toggle): In<Toggle>| {
+    ///     .switch_signal_vec(move |In(toggle): In<Toggle>, world: &mut World| {
     ///         if toggle.0 {
-    ///             list_a.signal_vec()
+    ///             MutableVecBuilder::from([1, 2, 3]).spawn(world).signal_vec()
     ///         } else {
-    ///             list_b.signal_vec()
+    ///             MutableVecBuilder::from([10, 20]).spawn(world).signal_vec()
     ///         }
-    ///     }
-    /// );
+    ///     });
     /// // `signal` outputs `SignalVec -> [10, 20]`
     /// world.resource_mut::<Toggle>().0 = true;
     /// // `signal` outputs `SignalVec -> [1, 2, 3]`
@@ -1406,7 +1403,7 @@ pub trait SignalExt: Signal {
             let output_system_entity = LazyEntity::new();
             let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
                 clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
-                    if let Ok(mut queue) = q.get_mut(output_system_entity.get()) {
+                    if let Ok(mut queue) = q.get_mut(*output_system_entity) {
                         if queue.0.is_empty() {
                             None
                         } else {
@@ -1553,14 +1550,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_bool(
-    ///     |_: In<()>| 1,
-    ///     |_: In<()>| 0,
-    /// ); // outputs `1`, `0`, `1`, `0`, ...
+    /// .map_bool(|_: In<()>| 1, |_: In<()>| 0); // outputs `1`, `0`, `1`, `0`, ...
     /// ```
     fn map_bool<O, IOO, TF, FF, TM, FM>(self, true_system: TF, false_system: FF) -> MapBool<Self, O>
     where
@@ -1607,13 +1601,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_true(
-    ///     |_: In<()>| 1,
-    /// ); // outputs `1`, terminates, outputs `1`, terminates, ...
+    /// .map_true(|_: In<()>| 1); // outputs `1`, terminates, outputs `1`, terminates, ...
     /// ```
     fn map_true<O, F, M>(self, system: F) -> MapTrue<Self, O>
     where
@@ -1655,13 +1647,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
-    ///        *state = !*state;
-    ///        *state
+    ///         *state = !*state;
+    ///         *state
     ///     }
     /// })
-    /// .map_false(
-    ///     |_: In<()>| 1,
-    /// ); // terminates, outputs `1`, terminates, outputs `1`, ...
+    /// .map_false(|_: In<()>| 1); // terminates, outputs `1`, terminates, outputs `1`, ...
     /// ```
     fn map_false<O, F, M>(self, system: F) -> MapFalse<Self, O>
     where
@@ -1801,13 +1791,11 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
-    ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        *state
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
     ///     }
     /// })
-    /// .map_none(
-    ///     |_: In<()>| false
-    /// ); // terminates, outputs `false`, terminates, outputs `false`, ...
+    /// .map_none(|_: In<()>| false); // terminates, outputs `false`, terminates, outputs `false`, ...
     /// ```
     fn map_none<I, O, F, M>(self, none_system: F) -> MapNone<Self, O>
     where
@@ -1853,9 +1841,12 @@ pub trait SignalExt: Signal {
     ///
     /// SignalBuilder::from_system({
     ///     move |_: In<()>, mut state: Local<Vec<usize>>| {
-    ///        let new = state.get(state.len().saturating_sub(1)).map(|last| last + 1).unwrap_or_default();
-    ///        state.push(new);
-    ///        state.clone()
+    ///         let new = state
+    ///             .get(state.len().saturating_sub(1))
+    ///             .map(|last| last + 1)
+    ///             .unwrap_or_default();
+    ///         state.push(new);
+    ///         state.clone()
     ///     }
     /// })
     /// .to_signal_vec(); // outputs a `SignalVec` of `[0]`, `[0, 1]`, `[0, 1, 2]`, `[0, 1, 2, 3]`, ...
@@ -1942,12 +1933,16 @@ pub trait SignalExt: Signal {
     ///
     /// let condition = true;
     /// if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed_clone() // this is a `Map<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1)
+    ///         .map_in(|x: i32| x * 2)
+    ///         .boxed_clone() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed_clone() // this is a `Dedupe<Source<i32>>`
+    ///     SignalBuilder::from_system(|_: In<()>| 1)
+    ///         .dedupe()
+    ///         .boxed_clone() // this is a `Dedupe<Source<i32>>`
     /// }; // without the `.boxed_clone()`, the compiler would not allow this
     /// ```
-    fn boxed_clone(self) -> Box<dyn SignalClone<Item = Self::Item>>
+    fn boxed_clone(self) -> Box<dyn SignalDynClone<Item = Self::Item>>
     where
         Self: Sized + Clone,
     {
@@ -1971,9 +1966,9 @@ mod tests {
     use crate::{
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
-        prelude::{MutableVec, SignalVecExt, clone},
+        prelude::{SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
-        signal_vec::VecDiff,
+        signal_vec::{MutableVecBuilder, VecDiff},
         utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
@@ -1981,10 +1976,11 @@ mod tests {
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
     use bevy_platform::sync::*;
-    use bevy_time::TimeUpdateStrategy;
+    use bevy_time::TimePlugin;
 
     // Add Duration
     use core::time::Duration;
+    use test_log::test;
 
     // Helper component and resource for testing Add Default
     #[derive(Component, Clone, Debug, PartialEq, Reflect, Default, Resource)]
@@ -2530,326 +2526,213 @@ mod tests {
 
     #[test]
     fn test_switch_signal_vec() {
-        // --- Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+        {
+            // --- Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // Two different data sources to switch between.
-        let list_a = MutableVec::from(vec![10, 20]);
-        let list_b = MutableVec::from(vec![100, 200, 300]);
+            // Two different data sources to switch between.
+            let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
+            let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
 
-        // A resource to control which list is active.
-        #[derive(Resource, Clone, Copy, PartialEq, Debug)]
-        enum ListSelector {
-            A,
-            B,
+            // A resource to control which list is active.
+            #[derive(Resource, Clone, Copy, PartialEq, Debug)]
+            enum ListSelector {
+                A,
+                B,
+            }
+
+            app.insert_resource(ListSelector::A);
+
+            // The control signal reads the resource.
+            let control_signal =
+                SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
+
+            // The signal chain under test.
+            let switched_signal = control_signal.dedupe().switch_signal_vec(
+                clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
+                    ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                    ListSelector:: B => list_b.signal_vec().boxed_clone(),
+                }),
+            );
+
+            // Register the final signal to a capture system.
+            let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
+
+            // --- Test 1: Initial State --- The first update should select List A and emit
+            // its initial state.
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![10, 20] },
+                "Initial state should be a Replace with List A's contents."
+            );
+
+            // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
+            // should be forwarded.
+            list_a.write(app.world_mut()).push(30);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push { value: 30 },
+                "Should forward Push diff from List A."
+            );
+
+            // --- Test 3: The Switch to List B --- Change the selector and update. This
+            // should trigger a switch.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching lists should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![100, 200, 300]
+                },
+                "Switch should emit a Replace with List B's contents."
+            );
+
+            // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
+            // List A should be ignored. This should not be seen
+            list_a.write(app.world_mut()).push(99);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
+
+            // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
+            // should now be forwarded. remove 100
+            list_b.write(app.world_mut()).remove(0);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt from new active list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::RemoveAt { index: 0 },
+                "Should forward RemoveAt diff from List B."
+            );
+
+            // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
+            // list should produce no diffs.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Re-selecting the same list should produce no diffs due to memoization."
+            );
+
+            // --- Test 7: Switch Back to List A --- Switching back should give us the current
+            // state of List A.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![10, 20, 30, 99],
+                    // Note: includes the `push(30)` from earlier
+                },
+                "Switching back should Replace with the current state of List A."
+            );
+            handle.cleanup(app.world_mut());
         }
 
-        app.insert_resource(ListSelector::A);
-
-        // The control signal reads the resource.
-        let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
-
-        // The signal chain under test.
-        let switched_signal = control_signal.dedupe().switch_signal_vec(
-            clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
-                ListSelector:: B => list_b.signal_vec().boxed_clone(),
-            }),
-        );
-
-        // Register the final signal to a capture system.
-        let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
-
-        // --- Test 1: Initial State --- The first update should select List A and emit
-        // its initial state.
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace { values: vec![10, 20] },
-            "Initial state should be a Replace with List A's contents."
-        );
-
-        // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
-        // should be forwarded.
-        list_a.write().push(30);
-        list_a.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push { value: 30 },
-            "Should forward Push diff from List A."
-        );
-
-        // --- Test 3: The Switch to List B --- Change the selector and update. This
-        // should trigger a switch.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Switching lists should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec![100, 200, 300]
-            },
-            "Switch should emit a Replace with List B's contents."
-        );
-
-        // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
-        // List A should be ignored. This should not be seen
-        list_a.write().push(99);
-        list_a.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
-
-        // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
-        // should now be forwarded. remove 100
-        list_b.write().remove(0);
-        list_b.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "RemoveAt from new active list should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::RemoveAt { index: 0 },
-            "Should forward RemoveAt diff from List B."
-        );
-
-        // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
-        // list should produce no diffs.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert!(
-            diffs.is_empty(),
-            "Re-selecting the same list should produce no diffs due to memoization."
-        );
-
-        // --- Test 7: Switch Back to List A --- Switching back should give us the current
-        // state of List A.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec![10, 20, 30, 99],
-                // Note: includes the `push(30)` from earlier
-            },
-            "Switching back should Replace with the current state of List A."
-        );
-        handle.cleanup(app.world_mut());
+        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
     fn test_throttle() {
-        let mut app = create_test_app();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins.build().disable::<TimePlugin>(), JonmoPlugin));
+        app.init_resource::<Time>(); // manually managing time for the test
         app.init_resource::<SignalOutput<i32>>();
-        let counter = Arc::new(Mutex::new(0));
-        let emit_count = Arc::new(Mutex::new(0));
 
-        // Throttle duration
-        let throttle_duration = Duration::from_millis(100);
-        let signal = SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
-            let mut c = counter.lock().unwrap();
-            *c += 1;
+        // A simple counter to generate a new value (1, 2, 3...) for each update.
+        let source_signal = SignalBuilder::from_system(|_: In<()>, mut counter: Local<i32>| {
+            *counter += 1;
+            *counter
+        });
 
-            // Emit 1, 2, 3, 4, 5... rapidly
-            Some(*c)
-        }))
-        .throttle(throttle_duration)
-        .map(clone!((emit_count) move |In(val): In<i32>| {
-            let mut count = emit_count.lock().unwrap();
-            *count += 1;
+        let handle = source_signal
+            .throttle(Duration::from_millis(100))
+            .map(capture_output)
+            .register(app.world_mut());
 
-            // Pass the value through
-            val
-        }))
-        .map(capture_output)
-        .register(app.world_mut());
-
-        // --- Test Execution with Manual Time Control (Revised Assertions) ---
-        //
-        // 1. Initial update: Emit 1, create timer.
+        // 1. Initial emission: The first update runs with near-zero delta. The first value should always
+        //    pass.
         app.update();
+        assert_eq!(
+            get_output(app.world()),
+            Some(1),
+            "First value (1) should pass immediately."
+        );
+        // Clear the output to prepare for the next check.
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
 
-        // Changed assertion description
-        assert_eq!(get_output::<i32>(app.world()), Some(1), "Initial emit (1)");
-        assert_eq!(*emit_count.lock().unwrap(), 1, "Emit count after initial");
-        assert_eq!(*counter.lock().unwrap(), 1, "Source counter after initial");
-
-        // 2. Advance time > duration (110ms).
+        // 2. Blocked emission: Manually advance time by 50ms.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(110.)));
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(50));
+        app.update(); // `time.delta()` is now 50ms. The timer ticks but isn't finished.
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            None,
+            "Value (2) emitted after 50ms should be blocked."
+        );
 
-        // 3. Update again: Source emits 2. Time elapsed >= duration. Throttle emits 2.
+        // 3. Another blocked emission: Advance time by another 40ms (total 90ms).
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(40));
+        app.update(); // `time.delta()` is 40ms. Timer ticks to 90ms. Still not finished.
+        assert_eq!(
+            get_output::<i32>(app.world()),
+            None,
+            "Value (3) emitted after 90ms total should be blocked."
+        );
+        app.world_mut().entity(**handle);
+        // 4. Allowed emission: Advance time by another 20ms (total 110ms).
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(20));
+        app.update(); // `time.delta()` is 20ms. Timer ticks to 110ms, which is >= 100ms.
+        // The source signal has been called 4 times now. The value should be 4.
+        assert_eq!(
+            get_output(app.world()),
+            Some(4),
+            "Value (4) should pass after total duration > 100ms."
+        );
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+
+        // 5. Blocked again: The timer was reset on the last pass. A small advance is not enough.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(10));
         app.update();
         assert_eq!(
             get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 110ms advance, 1st update (emit 2)"
+            None,
+            "Value (5) immediately after a pass should be blocked again."
         );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            // EXPECT 2
-            "Emit count after 110ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            2,
-            "Source counter after 110ms advance, 1st update"
-        );
+
+        // 6. Pass again: Advance time to pass the threshold again.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(50)));
-
-        // 6. Update again: Source emits 4. Time elapsed < duration since last emit. Throttle blocks. Output
-        //    remains 2.
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(100));
         app.update();
+        // The source signal has now been called 6 times. The value should be 6.
         assert_eq!(
-            get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 110ms advance, 2nd update (block 3)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            // EXPECT 2
-            "Emit count after 110ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            3,
-            "Source counter after 110ms advance, 2nd update"
-        );
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-
-        // 7. Update again: Source emits 5. Time elapsed < duration since last emit. Throttle blocks. Output
-        //    remains 2.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            Some(2),
-            // EXPECT 2
-            "After 50ms advance, 1st update (block 4)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            2,
-            "Emit count after 50ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            4,
-            "Source counter after 50ms advance, 1st update"
+            get_output(app.world()),
+            Some(6),
+            "Value (6) should pass again after another full duration."
         );
 
-        // 8. Advance time > duration again (total 50 + 60 = 110ms since last emit at step 3).
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(60)));
-
-        // 9. Update again: Source emits 5. Total time elapsed >= duration. Throttle emits 5.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            // Reverted: Expect 5 based on logic and actual output
-            Some(5),
-            // Corrected message to reflect expected value
-            "After 60ms advance, 1st update (emit 5)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count becomes 3
-            3,
-            "Emit count after 60ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 5
-            5,
-            "Source counter after 60ms advance, 1st update"
-        );
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-
-        // 10. Update again: Source emits 6. Time elapsed < duration since last emit. Throttle
-        //    blocks. Output remains 5.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            // Output remains 5
-            Some(5),
-            // EXPECT 5
-            "After 60ms advance, 2nd update (block 6)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            3,
-            "Emit count after 60ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            6,
-            "Source counter after 60ms advance, 2nd update"
-        );
-
-        // Add one more step to ensure timer reset correctly
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(110)));
-
-        // 11. Update: Source emits 7. Time >= 100ms. Throttle emits 7.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            // Expect 7
-            Some(7),
-            "After 110ms advance, 1st update (emit 7)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count becomes 4
-            4,
-            "Emit count after 110ms advance, 1st update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 7
-            7,
-            "Source counter after 110ms advance, 1st update"
-        );
-        app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-
-        // 12. Update: Source emits 8. Time < 100ms. Throttle blocks. Output remains 7.
-        app.update();
-        assert_eq!(
-            get_output::<i32>(app.world()),
-            // Output remains 7
-            Some(7),
-            "After 110ms advance, 2nd update (block 8)"
-        );
-        assert_eq!(
-            *emit_count.lock().unwrap(),
-            // Emit count remains 4
-            4,
-            "Emit count after 110ms advance, 2nd update"
-        );
-        assert_eq!(
-            *counter.lock().unwrap(),
-            // Source counter is 8
-            8,
-            "Source counter after 110ms advance, 2nd update"
-        );
-        signal.cleanup(app.world_mut());
+        handle.cleanup(app.world_mut());
     }
 
     #[test]

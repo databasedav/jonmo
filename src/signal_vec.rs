@@ -2,8 +2,8 @@
 //! [`Vec`] mutations, see [`MutableVec`] and [`SignalVecExt`].
 use super::{
     graph::{
-        LazySignal, LazySystem, SignalHandle, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system,
-        pipe_signal, poll_signal, process_signals, register_signal,
+        LazySignal, SignalHandle, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system, pipe_signal,
+        poll_signal, process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
     utils::{LazyEntity, SSs},
@@ -16,9 +16,9 @@ use bevy_log::debug;
 use bevy_platform::{
     collections::HashMap,
     prelude::*,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, LazyLock, Mutex},
 };
-use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref};
+use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableVec`] that are piped to downstream
@@ -92,29 +92,29 @@ where
     }
 }
 
-impl<T: Clone> VecDiff<T> {
+impl<T> VecDiff<T> {
     #[allow(missing_docs)]
-    pub fn apply_to_vec(&self, vec: &mut Vec<T>) {
+    pub fn apply_to_vec(self, vec: &mut Vec<T>) {
         match self {
-            VecDiff::Replace { values } => *vec = values.clone(),
-            VecDiff::InsertAt { index, value } => vec.insert(*index, value.clone()),
+            VecDiff::Replace { values } => *vec = values,
+            VecDiff::InsertAt { index, value } => vec.insert(index, value),
             VecDiff::UpdateAt { index, value } => {
-                if let Some(elem) = vec.get_mut(*index) {
-                    *elem = value.clone();
+                if let Some(elem) = vec.get_mut(index) {
+                    *elem = value;
                 }
             }
             VecDiff::RemoveAt { index } => {
-                if *index < vec.len() {
-                    vec.remove(*index);
+                if index < vec.len() {
+                    vec.remove(index);
                 }
             }
             VecDiff::Move { old_index, new_index } => {
-                if *old_index < vec.len() {
-                    let val = vec.remove(*old_index);
-                    vec.insert(*new_index, val);
+                if old_index < vec.len() {
+                    let val = vec.remove(old_index);
+                    vec.insert(new_index, val);
                 }
             }
-            VecDiff::Push { value } => vec.push(value.clone()),
+            VecDiff::Push { value } => vec.push(value),
             VecDiff::Pop => {
                 vec.pop();
             }
@@ -157,13 +157,13 @@ impl<O: 'static> SignalVec for Box<dyn SignalVec<Item = O> + Send + Sync> {
 /// Relevant in contexts where some function may require a [`Clone`] [`SignalVec`], but the concrete
 /// type can't be known at compile-time, e.g. in a
 /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
-pub trait SignalVecClone: SignalVec + DynClone {}
+pub trait SignalVecDynClone: SignalVec + DynClone {}
 
-clone_trait_object!(< T > SignalVecClone < Item = T >);
+clone_trait_object!(<T> SignalVecDynClone<Item = T>);
 
-impl<T: SignalVec + Clone + 'static> SignalVecClone for T {}
+impl<T: SignalVec + Clone + 'static> SignalVecDynClone for T {}
 
-impl<O: 'static> SignalVec for Box<dyn SignalVecClone<Item = O> + Send + Sync> {
+impl<O: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = O> + Send + Sync> {
     type Item = O;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
@@ -474,7 +474,7 @@ fn spawn_filter_signal<T: Clone + SSs>(
 ) -> (SignalHandle, bool) {
     let entity = LazyEntity::new();
     let processor_system = clone!((entity) move |In(filter): In<bool>, world: &mut World| {
-        let self_entity = entity.get();
+        let self_entity = *entity;
 
         // The processor might run after its parent has been cleaned up.
         let Ok(signal_index_comp) = world.query::<&FilterSignalIndex>().get(world, self_entity) else {
@@ -1101,7 +1101,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().map(|In(x): In<i32>| x * 2); // outputs `SignalVec -> [2, 4, 6]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .map(|In(x): In<i32>| x * 2); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map<O, F, M>(self, system: F) -> Map<Self, O>
     where
@@ -1180,7 +1184,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2); // outputs `SignalVec -> [2, 4, 6]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .map_in(|x: i32| x * 2); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map_in<O, F>(self, mut function: F) -> Map<Self, O>
     where
@@ -1204,7 +1212,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().map_in_ref(ToString::to_string); // outputs `SignalVec -> ["1", "2", "3"]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .map_in_ref(ToString::to_string); // outputs `SignalVec -> ["1", "2", "3"]`
     /// ```
     fn map_in_ref<O, F>(self, mut function: F) -> Map<Self, O>
     where
@@ -1225,7 +1237,10 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec()
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
     ///     .map_signal(|In(x): In<i32>|
     ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
     ///     ); // outputs `SignalVec -> [2, 4, 6]`
@@ -1527,7 +1542,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3, 4]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0); // outputs `SignalVec -> [2, 4]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3, 4])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .filter(|In(x): In<i32>| x % 2 == 0); // outputs `SignalVec -> [2, 4]`
     /// ```
     fn filter<F, M>(self, predicate: F) -> Filter<Self>
     where
@@ -1572,7 +1591,10 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from(["1", "two", "NaN", "four", "5"]).signal_vec()
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from(["1", "two", "NaN", "four", "5"])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
     ///     .filter_map(|In(s): In<&'static str>| s.parse::<u32>().ok()); // outputs `SignalVec -> [1, 5]`
     /// ```
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, O>
@@ -1614,7 +1636,10 @@ pub trait SignalVecExt: SignalVec {
     /// #[derive(Resource, Clone)]
     /// struct Even(bool);
     ///
-    /// MutableVec::from([1, 2, 3, 4]).signal_vec()
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3, 4])
+    ///      .spawn(&mut world)
+    ///      .signal_vec()
     ///      .filter_signal(|In(x): In<i32>| {
     ///          SignalBuilder::from_resource().map_in(move |even: Even| x % 2 == if even.0 { 0 } else { 1 })
     ///      }); // outputs `SignalVec -> [2, 4]` when `Even(true)` and `SignalVec -> [1, 3]` when `Even(false)`
@@ -1961,11 +1986,10 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVec::from([1, 2, 5]);
+    /// let mut vec = MutableVecBuilder::from([1, 2, 5]).spawn(&mut world);
     /// let signal = vec.signal_vec().enumerate();
     /// // signal outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 2), (Signal -> Some(2), 5)]`
-    /// vec.write().remove(1);
-    /// world.commands().queue(vec.flush());
+    /// vec.write(&mut world).remove(1);
     /// // signal outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 5)]`
     /// ```
     fn enumerate(self) -> Enumerate<Self>
@@ -2133,7 +2157,12 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().to_signal().map_in(|vec: Vec<i32>| vec[1]); // outputs `2`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .to_signal()
+    ///     .map_in(|vec: Vec<i32>| vec[1]); // outputs `2`
     /// ```
     fn to_signal(self) -> ToSignal<Self>
     where
@@ -2185,11 +2214,10 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVec::from([1]);
+    /// let mut vec = MutableVecBuilder::from([1]).spawn(&mut world);
     /// let signal = vec.signal_vec().is_empty();
     /// // `signal` outputs `false`
-    /// vec.write().pop();
-    /// world.commands().queue(vec.flush());
+    /// vec.write(&mut world).pop();
     /// // `signal` outputs `true`
     /// ```
     #[allow(clippy::wrong_self_convention)]
@@ -2212,11 +2240,10 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVec::from([1]);
+    /// let mut vec = MutableVecBuilder::from([1]).spawn(&mut world);
     /// let signal = vec.signal_vec().is_empty();
     /// // `signal` outputs `1`
-    /// vec.write().pop();
-    /// world.commands().queue(vec.flush());
+    /// vec.write(&mut world).pop();
     /// // `signal` outputs `0`
     /// ```
     fn len(self) -> Len<Self>
@@ -2238,11 +2265,10 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVec::from([1, 2, 3]);
+    /// let mut vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
     /// let signal = vec.signal_vec().is_empty();
     /// // `signal` outputs `6`
-    /// vec.write().push(4);
-    /// world.commands().queue(vec.flush());
+    /// vec.write(&mut world).push(4);
     /// // `signal` outputs `10`
     /// ```
     fn sum(self) -> Sum<Self>
@@ -2267,7 +2293,15 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 3]).signal_vec().chain(MutableVec::from([2, 4]).signal_vec()); // outputs `SignalVec -> [1, 3, 2, 4]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .chain(
+    ///         MutableVecBuilder::from([2, 4])
+    ///             .spawn(&mut world)
+    ///             .signal_vec(),
+    ///     ); // outputs `SignalVec -> [1, 3, 2, 4]`
     /// ```
     fn chain<S>(self, other: S) -> Chain<Self, S>
     where
@@ -2426,7 +2460,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse(0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([1, 2, 3])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .intersperse(0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse(self, separator: Self::Item) -> Intersperse<Self>
     where
@@ -2563,7 +2601,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     /// use jonmo::signal::{Dedupe, Source};
     ///
-    /// MutableVec::from([1, 2, 3]).signal_vec().intersperse_with(|_: In<Source<Option<usize>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// let mut world = World::new();
+    /// MutableVec::from([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where
@@ -2863,7 +2902,8 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right)); // outputs `SignalVec -> [1, 2, 3]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([3, 2, 1]).spawn(&mut world).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right)); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
     where
@@ -3045,7 +3085,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by_cmp(); // outputs `SignalVec -> [1, 2, 3]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([3, 2, 1])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .sort_by_cmp(); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by_cmp(self) -> SortBy<Self>
     where
@@ -3065,7 +3109,11 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// MutableVec::from([3, 2, 1]).signal_vec().sort_by_key(|In(x): In<i32>| -x); // outputs `SignalVec -> [1, 2, 3]`
+    /// let mut world = World::new();
+    /// MutableVecBuilder::from([3, 2, 1])
+    ///     .spawn(&mut world)
+    ///     .signal_vec()
+    ///     .sort_by_key(|In(x): In<i32>| -x); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by_key<K, F, M>(self, system: F) -> SortByKey<Self>
     where
@@ -3417,11 +3465,10 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVec::from([1, 2, 3]);
+    /// let mut vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
     /// let signal = vec.signal_vec().debug();
     /// // signal logs `[ Replace { values: [ 1, 2, 3 ] } ]`
-    /// vec.write().push(4);
-    /// world.commands().queue(vec.flush());
+    /// vec.write(&mut world).push(4);
     /// // signal logs `[ Push { value: 4 } ]`
     /// ```
     fn debug(self) -> Debug<Self>
@@ -3447,11 +3494,20 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
+    /// let mut world = World::new();
     /// let condition = true;
     /// let signal = if condition {
-    ///     MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
+    ///     MutableVecBuilder::from([1, 2, 3])
+    ///         .spawn(&mut world)
+    ///         .signal_vec()
+    ///         .map_in(|x: i32| x * 2)
+    ///         .boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     MutableVec::from([1, 2, 3]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0).boxed() // this is a `Filter<Source<i32>>`
+    ///     MutableVecBuilder::from([1, 2, 3])
+    ///         .spawn(&mut world)
+    ///         .signal_vec()
+    ///         .filter(|In(x): In<i32>| x % 2 == 0)
+    ///         .boxed() // this is a `Filter<Source<i32>>`
     /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn SignalVec<Item = Self::Item>>
@@ -3471,16 +3527,25 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| true)
-    /// .switch_signal_vec(|In(condition): In<bool>| {
-    ///     if condition {
-    ///         MutableVec::from([1, 2, 3]).signal_vec().map_in(|x: i32| x * 2).boxed_clone() // this is a `Map<Source<i32>>`
-    ///     } else {
-    ///         MutableVec::from([1, 2, 3]).signal_vec().filter(|In(x): In<i32>| x % 2 == 0).boxed_clone() // this is a `Filter<Source<i32>>`
-    ///     } // without the `.boxed_clone()`, the compiler would not allow this
-    /// });
+    /// SignalBuilder::from_system(|_: In<()>| true).switch_signal_vec(
+    ///     |In(condition): In<bool>, world: &mut World| {
+    ///         if condition {
+    ///             MutableVecBuilder::from([1, 2, 3])
+    ///                 .spawn(world)
+    ///                 .signal_vec()
+    ///                 .map_in(|x: i32| x * 2)
+    ///                 .boxed_clone() // this is a `Map<Source<i32>>`
+    ///         } else {
+    ///             MutableVecBuilder::from([1, 2, 3])
+    ///                 .spawn(world)
+    ///                 .signal_vec()
+    ///                 .filter(|In(x): In<i32>| x % 2 == 0)
+    ///                 .boxed_clone() // this is a `Filter<Source<i32>>`
+    ///         } // without the `.boxed_clone()`, the compiler would not allow this
+    ///     },
+    /// );
     /// ```
-    fn boxed_clone(self) -> Box<dyn SignalVecClone<Item = Self::Item> + Send + Sync>
+    fn boxed_clone(self) -> Box<dyn SignalVecDynClone<Item = Self::Item> + Send + Sync>
     where
         Self: Sized + Clone,
     {
@@ -3500,14 +3565,11 @@ pub trait SignalVecExt: SignalVec {
 impl<T: ?Sized> SignalVecExt for T where T: SignalVec {}
 
 /// Provides immutable access to the underlying [`Vec`].
-pub struct MutableVecReadGuard<'a, T> {
-    guard: RwLockReadGuard<'a, MutableVecState<T>>,
+pub struct MutableVecReadGuard<'s, T> {
+    guard: &'s MutableVecData<T>,
 }
 
-impl<'a, T> Deref for MutableVecReadGuard<'a, T>
-where
-    T: Clone,
-{
+impl<'s, T> Deref for MutableVecReadGuard<'s, T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
@@ -3516,8 +3578,16 @@ where
 }
 
 /// Provides limited mutable access to the underlying [`Vec`].
-pub struct MutableVecWriteGuard<'a, T> {
-    guard: RwLockWriteGuard<'a, MutableVecState<T>>,
+pub struct MutableVecWriteGuard<'s, T> {
+    guard: Mut<'s, MutableVecData<T>>,
+}
+
+impl<'s, T> Deref for MutableVecWriteGuard<'s, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard.vec
+    }
 }
 
 impl<'a, T> MutableVecWriteGuard<'a, T>
@@ -3616,38 +3686,224 @@ where
     pub fn replace<A>(&mut self, values: A)
     where
         Vec<T>: From<A>,
-        A: Clone,
     {
-        self.guard.vec = values.clone().into();
-        self.guard
-            .pending_diffs
-            .push(VecDiff::Replace { values: values.into() });
+        let values: Vec<T> = values.into();
+        self.guard.vec = values.clone();
+        self.guard.pending_diffs.push(VecDiff::Replace { values });
     }
 }
 
-impl<'a, T> Deref for MutableVecWriteGuard<'a, T>
-where
-    T: Clone,
-{
-    type Target = [T];
+static STALE_MUTABLE_VECS: LazyLock<Mutex<Vec<Entity>>> = LazyLock::new(Mutex::default);
 
-    fn deref(&self) -> &Self::Target {
-        &self.guard.vec
-    }
-}
-
-struct MutableVecState<T> {
+/// [`Component`] that holds the actual state for a [`MutableVec`].
+#[derive(Component)]
+pub struct MutableVecData<T> {
     vec: Vec<T>,
     pending_diffs: Vec<VecDiff<T>>,
-    signal: Option<LazySignal>,
+    broadcaster: LazySignal,
 }
 
-/// Wrapper around a [`Vec`] that tracks mutations as [`VecDiff`]s and emits them on
-/// [`.flush`](MutableVec::flush), enabling diff-less constant-time reactive updates for downstream
-/// [`SignalVec`]s.
-#[derive(Clone)]
+/// Wrapper around a [`Vec`] that emits mutations as [`VecDiff`]s, enabling diff-less constant-time
+/// reactive updates for downstream [`SignalVec`]s.
 pub struct MutableVec<T> {
-    state: Arc<RwLock<MutableVecState<T>>>,
+    entity: Entity,
+    references: Arc<AtomicUsize>,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for MutableVec<T> {
+    fn clone(&self) -> Self {
+        self.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        Self {
+            entity: self.entity,
+            references: self.references.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for MutableVec<T> {
+    fn drop(&mut self) {
+        if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+            STALE_MUTABLE_VECS.lock().unwrap().push(self.entity);
+        }
+    }
+}
+
+impl<T> MutableVec<T> {
+    /// Provides read-only access to the underlying [`Vec`] via either a `&World` or a
+    /// `&Query<MutableVecData<T>>`.
+    pub fn read<'s>(&self, mutable_vec_data_reader: impl ReadMutableVecData<'s, T>) -> MutableVecReadGuard<'s, T>
+    where
+        T: SSs,
+    {
+        MutableVecReadGuard {
+            guard: mutable_vec_data_reader.read(self.entity),
+        }
+    }
+    /// Provides write access to the underlying [`Vec`] via either a `&mut World` or a
+    /// `&mut Query<&mut MutableVecData<T>>`.
+    pub fn write<'w>(&self, mutable_vec_data_writer: impl WriteMutableVecData<'w, T>) -> MutableVecWriteGuard<'w, T>
+    where
+        T: SSs,
+    {
+        MutableVecWriteGuard {
+            guard: mutable_vec_data_writer.write(self.entity),
+        }
+    }
+
+    /// Returns a [`Source`] signal from this [`MutableVec`].
+    pub fn signal_vec(&self) -> Source<T>
+    where
+        T: Clone + SSs,
+    {
+        let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
+            let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
+
+            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
+                if !*has_run {
+                    *has_run = true;
+                    let initial_vec = self_.read(&*world).to_vec();
+                    if !initial_vec.is_empty() {
+                        Some(vec![VecDiff::Replace { values: initial_vec }])
+                    } else {
+                        None
+                    }
+                } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
+            });
+
+            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
+
+            let trigger = Box::new(move |world: &mut World| {
+                process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
+            });
+
+            let mut replay_entity = world.entity_mut(*replay_signal);
+            replay_entity.insert(VecReplayTrigger(trigger));
+
+            pipe_signal(world, broadcaster_system, replay_signal);
+            replay_signal
+        }));
+
+        Source {
+            signal: replay_lazy_signal,
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub(crate) fn despawn_stale_mutable_vecs(world: &mut World) {
+    let mut queue = STALE_MUTABLE_VECS.lock().unwrap();
+    for entity in queue.drain(..) {
+        world.despawn(entity);
+    }
+}
+
+fn new_mutable_vec_data<T>(values: Vec<T>) -> (MutableVecData<T>, LazyEntity)
+where
+    T: Clone + SSs,
+{
+    let data_entity = LazyEntity::new();
+    let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
+        let source_system = move |_: In<()>, mut mutable_vec_datas: Query<&mut MutableVecData<T>>| {
+            let mut data = mutable_vec_datas.get_mut(*data_entity).unwrap();
+                if data.pending_diffs.is_empty() {
+                    None
+                } else {
+                    Some(core::mem::take(&mut data.pending_diffs))
+                }
+        };
+
+        register_signal::<(), Vec<VecDiff<T>>, _, _, _>(world, source_system)
+    }));
+    (
+        MutableVecData {
+            vec: values,
+            pending_diffs: Vec::new(),
+            broadcaster,
+        },
+        data_entity,
+    )
+}
+
+impl<T> From<&mut World> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(world: &mut World) -> Self {
+        let (data, data_entity) = new_mutable_vec_data::<T>(Vec::new());
+        let entity = world.spawn(data).id();
+        data_entity.set(entity);
+        Self {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> FromWorld for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from_world(world: &mut World) -> Self {
+        world.into()
+    }
+}
+
+/// Builder for constructing a [`MutableVec`] with initial values, e.g. `MutableVecBuilder::from([0,
+/// 1, 2]).spawn(&mut World)`.
+pub struct MutableVecBuilder<T>(Vec<T>);
+
+impl<T, A> From<A> for MutableVecBuilder<T>
+where
+    Vec<T>: From<A>,
+{
+    fn from(value: A) -> Self {
+        Self(value.into())
+    }
+}
+
+impl<T: SSs + Clone> MutableVecBuilder<T> {
+    /// Spawns a [`MutableVec`] using a `&mut World`.
+    pub fn spawn(self, world: &mut World) -> MutableVec<T> {
+        let (data, data_entity) = new_mutable_vec_data::<T>(self.0);
+        let entity = world.spawn(data).id();
+        data_entity.set(entity);
+        MutableVec {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Spawns a [`MutableVec`] using a `&mut Commands`.
+    pub fn spawnc(self, commands: &mut Commands) -> MutableVec<T> {
+        let (data, data_entity) = new_mutable_vec_data::<T>(self.0);
+        let entity = commands.spawn(data).id();
+        data_entity.set(entity);
+        MutableVec {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> From<&mut Commands<'_, '_>> for MutableVec<T>
+where
+    T: Clone + SSs,
+{
+    fn from(commands: &mut Commands) -> Self {
+        let (data, data_entity) = new_mutable_vec_data::<T>(Vec::new());
+        let entity = commands.spawn(data).id();
+        data_entity.set(entity);
+        Self {
+            entity,
+            references: Arc::new(AtomicUsize::new(1)),
+            _marker: PhantomData,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -3656,21 +3912,6 @@ pub(crate) struct QueuedVecDiffs<T>(pub(crate) Vec<VecDiff<T>>);
 impl<T: Clone> Clone for QueuedVecDiffs<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
-    }
-}
-
-impl<T, A> From<T> for MutableVec<A>
-where
-    Vec<A>: From<T>,
-{
-    fn from(values: T) -> Self {
-        MutableVec {
-            state: Arc::new(RwLock::new(MutableVecState {
-                vec: values.into(),
-                pending_diffs: Vec::new(),
-                signal: None,
-            })),
-        }
     }
 }
 
@@ -3687,192 +3928,83 @@ impl Replayable for VecReplayTrigger {
     }
 }
 
-impl<T> MutableVec<T> {
-    /// Constructs a new, empty [`MutableVec<T>`].
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(RwLock::new(MutableVecState {
-                vec: Vec::new(),
-                pending_diffs: Vec::new(),
-                signal: None,
-            })),
-        }
-    }
-
-    /// Locks this [`MutableVec`] with shared read access, blocking the current thread until it can
-    /// be acquired, see [`RwLock::read`].
-    pub fn read(&self) -> MutableVecReadGuard<'_, T> {
-        MutableVecReadGuard {
-            guard: self.state.read().unwrap(),
-        }
-    }
-
-    /// Locks this [`MutableVec`] with exclusive write access, blocking the current thread until it
-    /// can be acquired, see [`RwLock::write`].
-    pub fn write(&self) -> MutableVecWriteGuard<'_, T> {
-        MutableVecWriteGuard {
-            guard: self.state.write().unwrap(),
-        }
-    }
-
-    fn get_or_create_broadcaster_signal(&self) -> LazySignal
-    where
-        T: Clone + SSs,
-    {
-        let mut state = self.state.write().unwrap();
-
-        // If the signal already exists, just clone and return it.
-        if let Some(lazy_signal) = &state.signal {
-            return lazy_signal.clone();
-        }
-
-        // Otherwise, create the broadcaster signal for the first time.
-        let broadcaster_lazy_signal = LazySignal::new(move |world: &mut World| {
-            let self_entity = LazyEntity::new();
-
-            // This is the system for the one-and-only broadcaster. It just drains diffs that `flush` has put
-            // into its component.
-            let source_system_logic = clone!((self_entity) move |_: In<()>, world: &mut World| {
-                if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<T>>(self_entity.get()) {
-                    if diffs.0.is_empty() {
-                        None
-                    } else {
-                        Some(diffs.0.drain(..).collect())
-                    }
-                } else {
-                    None
-                }
-            });
-            let signal_system = register_signal::<(), Vec<VecDiff<T>>, _, _, _>(world, source_system_logic);
-            self_entity.set(*signal_system);
-
-            // The broadcaster itself does not have an initial state to replay. It just needs the component to
-            // receive flushed diffs.
-            world.entity_mut(*signal_system).insert(QueuedVecDiffs::<T>(vec![]));
-            signal_system
-        });
-
-        // Store it for future calls.
-        state.signal = Some(broadcaster_lazy_signal.clone());
-        broadcaster_lazy_signal
-    }
-
-    /// Returns a [`Source`] signal from this [`MutableVec`].
-    pub fn signal_vec(&self) -> Source<T>
-    where
-        T: Clone + SSs,
-    {
-        let broadcaster_signal = self.get_or_create_broadcaster_signal();
-        let replay_lazy_signal = LazySignal::new(clone!((self.state => state) move | world: & mut World | {
-            let self_entity = LazyEntity::new();
-            let broadcaster_system = broadcaster_signal.register(world);
-
-            // This system has two modes tracked by its `has_run` Local state:
-            //
-            // 1. First run: It ignores upstream diffs and processes its own QueuedVecDiffs (the initial state).
-            //
-            // 2. Subsequent runs: It processes diffs from the upstream broadcaster.
-            let replay_system_logic =
-                clone!(
-                    (self_entity) move | In(upstream_diffs): In<Vec<VecDiff<T>>>,
-                    world: & mut World,
-                    mut has_run: Local < bool >| {
-                        if !*has_run {
-                            // First run is triggered manually. Process the initial state queued on this
-                            // system's entity.
-                            *has_run = true;
-                            let initial_diffs =
-                                world
-                                    .get_entity_mut(self_entity.get())
-                                    .ok()
-                                    .and_then(|mut entity| entity.take::<QueuedVecDiffs<T>>())
-                                    .map(|queued| queued.0)
-                                    .unwrap_or_default();
-                            if initial_diffs.is_empty() {
-                                None
-                            } else {
-                                Some(initial_diffs)
-                            }
-                        } else {
-                            // Subsequent runs are triggered by the broadcaster. Process upstream diffs.
-                            if upstream_diffs.is_empty() {
-                                None
-                            } else {
-                                Some(upstream_diffs)
-                            }
-                        }
-                    }
-                );
-
-            // 1. Register the replay system.
-            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
-            self_entity.set(*replay_signal);
-
-            // The trigger now unconditionally pokes the replay system with an empty input.
-            // The replay system's own logic will handle whether it's the first run or not.
-            let trigger = Box::new(move |world: &mut World| {
-                process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
-            });
-
-            // 2. Queue the initial state for this new subscriber.
-            let initial_vec = state.read().unwrap().vec.clone();
-            let initial_diffs = if !initial_vec.is_empty() {
-                vec![VecDiff::Replace { values: initial_vec }]
-            } else {
-                vec![]
-            };
-            world.entity_mut(*replay_signal).insert((QueuedVecDiffs(initial_diffs), VecReplayTrigger(trigger)));
-
-            // 3. Pipe the broadcaster to the replay node.
-            pipe_signal(world, broadcaster_system, replay_signal);
-            replay_signal
-        }));
-        Source {
-            signal: replay_lazy_signal,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Emits any pending [`VecDiff`]s to downstream [`SignalVec`]s.
-    pub fn flush_into_world(&self, world: &mut World)
-    where
-        T: SSs,
-    {
-        let mut state = self.state.write().unwrap();
-        if state.pending_diffs.is_empty() {
-            return;
-        }
-        let signal = if let Some(lazy_signal) = &state.signal
-            && let LazySystem::Registered(signal_system) = *lazy_signal.inner.system.read().unwrap()
+pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
+    let triggers: Vec<Entity> = world
+        .query_filtered::<Entity, With<ReplayTrigger>>()
+        .iter(world)
+        .collect();
+    for trigger_entity in triggers {
+        if let Some(trigger_component) = world
+            .get_entity_mut(trigger_entity)
+            .ok()
+            .and_then(|mut e| e.take::<ReplayTrigger>())
         {
-            signal_system
-        } else {
-            return;
-        };
-        if let Ok(mut entity) = world.get_entity_mut(*signal)
-            && let Some(mut queued_diffs) = entity.get_mut::<QueuedVecDiffs<T>>()
-        {
-            queued_diffs.0.append(&mut state.pending_diffs);
+            trigger_component.trigger()(world);
         }
     }
+}
 
-    /// Returns an `impl Command` that can be passed to [`Commands::queue`] to flush this
-    /// [`MutableVec`]'s pending [`VecDiff`]s, see [`.flush_into_world`](Self::flush_into_world).
-    pub fn flush(&self) -> impl Command
-    where
-        T: Clone + SSs,
-    {
-        let self_ = self.clone();
-        move |world: &mut World| self_.flush_into_world(world)
+/// Specifies mutation accessors for [`MutableVec`]s.
+pub trait ReadMutableVecData<'s, T>
+where
+    T: Send + Sync,
+{
+    #[allow(missing_docs)]
+    fn read(self, entity: Entity) -> &'s MutableVecData<T>;
+}
+
+impl<'s, T> ReadMutableVecData<'s, T> for &'s Query<'_, 's, &MutableVecData<T>>
+where
+    T: SSs,
+{
+    fn read(self, entity: Entity) -> &'s MutableVecData<T> {
+        self.get(entity).unwrap()
+    }
+}
+
+impl<'s, T> ReadMutableVecData<'s, T> for &'s World
+where
+    T: SSs,
+{
+    fn read(self, entity: Entity) -> &'s MutableVecData<T> {
+        self.get(entity).unwrap()
+    }
+}
+
+/// Specifies mutation accessors for [`MutableVec`]s.
+pub trait WriteMutableVecData<'w, T>
+where
+    T: Send + Sync,
+{
+    #[allow(missing_docs)]
+    fn write(self, entity: Entity) -> Mut<'w, MutableVecData<T>>;
+}
+
+impl<'a, 'w, 's, T> WriteMutableVecData<'a, T> for &'a mut Query<'w, 's, &mut MutableVecData<T>>
+where
+    T: SSs,
+{
+    fn write(self, entity: Entity) -> Mut<'a, MutableVecData<T>> {
+        self.get_mut(entity).unwrap()
+    }
+}
+
+impl<'w, T> WriteMutableVecData<'w, T> for &'w mut World
+where
+    T: SSs,
+{
+    fn write(self, entity: Entity) -> Mut<'w, MutableVecData<T>> {
+        self.get_mut(entity).unwrap()
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::JonmoPlugin;
     use bevy::prelude::*;
+    use bevy_platform::sync::RwLock;
+    use test_log::test;
 
     #[derive(Resource, Default, Debug)]
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
@@ -3893,10 +4025,6 @@ mod tests {
             diffs, output.0
         );
         output.0.extend(diffs);
-    }
-
-    fn get_signal_vec_output<T: SSs + Clone + fmt::Debug>(world: &World) -> Vec<VecDiff<T>> {
-        world.resource::<SignalVecOutput<T>>().0.clone()
     }
 
     // Helper to make assertions cleaner
@@ -3951,7 +4079,7 @@ mod tests {
     }
 
     // Helper function to apply a series of diffs to a vector to check the final state.
-    fn apply_diffs<T: Clone>(initial: &mut Vec<T>, diffs: &[VecDiff<T>]) {
+    fn apply_diffs<T: Clone>(initial: &mut Vec<T>, diffs: Vec<VecDiff<T>>) {
         for diff in diffs {
             diff.apply_to_vec(initial);
         }
@@ -3973,650 +4101,647 @@ mod tests {
             .and_then(|mut res| res.0.take())
     }
 
+    pub(crate) fn cleanup(maps_too: bool) {
+        STALE_MUTABLE_VECS.lock().unwrap().clear();
+        if maps_too {
+            crate::signal_map::tests::cleanup(false);
+        }
+    }
+
     #[test]
     fn test_for_each() {
-        // A comprehensive test for `SignalVecExt::for_each`. This test verifies that
-        // the combinator correctly receives a batch of `VecDiff`s and transforms the
-        // `SignalVec` into a standard `Signal`.
-
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The output of our `for_each` system will be the full, reconstructed vector.
-        app.init_resource::<FinalSignalOutput<Vec<String>>>();
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
-
-        // This system reconstructs the state of the vec by applying the diffs it
-        // receives. It then outputs the complete, current state. This allows us to
-        // verify that `for_each` receives the diffs correctly and transforms the stream.
-        let reconstructor_system = |In(diffs): In<Vec<VecDiff<String>>>, mut state: Local<Vec<String>>| {
-            // Only emit an output if there were actual changes.
-            if diffs.is_empty() {
-                return None;
-            }
-            for diff in diffs {
-                diff.apply_to_vec(&mut state);
-            }
-            // Output the new, complete state.
-            Some(state.clone())
-        };
-
-        let handle = source_vec
-            .signal_vec()
-            .for_each(reconstructor_system)
-            .map(capture_final_output::<Vec<String>>)
-            .register(app.world_mut());
-
-        // --- 2. Test Initial State ---
-        // The initial `Replace` diff should be received and processed.
-        app.update();
-        let expected_initial_state = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(expected_initial_state),
-            "Initial state was not reconstructed correctly by for_each"
-        );
-
-        // --- 3. Test Batched Mutations ---
-        // Perform multiple operations before flushing to test batch processing.
         {
-            let mut writer = source_vec.write();
-            writer.push("c".to_string()); // source: ["a", "b", "c"]
-            writer.set(0, "A".to_string()); // source: ["A", "b", "c"]
-            writer.remove(1); // source: ["A", "c"]
+            // A comprehensive test for `SignalVecExt::for_each`. This test verifies that
+            // the combinator correctly receives a batch of `VecDiff`s and transforms the
+            // `SignalVec` into a standard `Signal`.
+
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+
+            // The output of our `for_each` system will be the full, reconstructed vector.
+            app.init_resource::<FinalSignalOutput<Vec<String>>>();
+            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+
+            // This system reconstructs the state of the vec by applying the diffs it
+            // receives. It then outputs the complete, current state. This allows us to
+            // verify that `for_each` receives the diffs correctly and transforms the stream.
+            let reconstructor_system = |In(diffs): In<Vec<VecDiff<String>>>, mut state: Local<Vec<String>>| {
+                // Only emit an output if there were actual changes.
+                if diffs.is_empty() {
+                    return None;
+                }
+                for diff in diffs {
+                    diff.apply_to_vec(&mut state);
+                }
+                // Output the new, complete state.
+                Some(state.clone())
+            };
+
+            let handle = source_vec
+                .signal_vec()
+                .for_each(reconstructor_system)
+                .map(capture_final_output::<Vec<String>>)
+                .register(app.world_mut());
+
+            // --- 2. Test Initial State ---
+            // The initial `Replace` diff should be received and processed.
+            app.update();
+            let expected_initial_state = vec!["a".to_string(), "b".to_string()];
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(expected_initial_state),
+                "Initial state was not reconstructed correctly by for_each"
+            );
+
+            // --- 3. Test Batched Mutations ---
+            // Perform multiple operations before flushing to test batch processing.
+            {
+                let mut writer = source_vec.write(app.world_mut());
+                writer.push("c".to_string()); // source: ["a", "b", "c"]
+                writer.set(0, "A".to_string()); // source: ["A", "b", "c"]
+                writer.remove(1); // source: ["A", "c"]
+            }
+            app.update();
+            let expected_batched_state = vec!["A".to_string(), "c".to_string()];
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(expected_batched_state),
+                "State after batched mutations was not reconstructed correctly"
+            );
+
+            // --- 4. Test No-Op Frame ---
+            // If the source doesn't flush, the `for_each` system should not run,
+            // and the output signal should not emit a new value.
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                None,
+                "Signal emitted on a no-op frame"
+            );
+
+            // --- 5. Test Clear Operation ---
+            // The `Clear` diff should result in an empty vector.
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let expected_cleared_state: Vec<String> = Vec::new();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(expected_cleared_state),
+                "State after Clear was not reconstructed correctly"
+            );
+
+            // --- 6. Cleanup ---
+            handle.cleanup(app.world_mut());
         }
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let expected_batched_state = vec!["A".to_string(), "c".to_string()];
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(expected_batched_state),
-            "State after batched mutations was not reconstructed correctly"
-        );
 
-        // --- 4. Test No-Op Frame ---
-        // If the source doesn't flush, the `for_each` system should not run,
-        // and the output signal should not emit a new value.
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            None,
-            "Signal emitted on a no-op frame"
-        );
-
-        // --- 5. Test Clear Operation ---
-        // The `Clear` diff should result in an empty vector.
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let expected_cleared_state: Vec<String> = Vec::new();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(expected_cleared_state),
-            "State after Clear was not reconstructed correctly"
-        );
-
-        // --- 6. Cleanup ---
-        handle.cleanup(app.world_mut());
+        cleanup(true)
     }
 
     #[test]
     fn test_map() {
-        // A comprehensive test for `SignalVecExt::map`, covering all `VecDiff`
-        // types in both success and system-failure scenarios.
+        {
+            // A comprehensive test for `SignalVecExt::map`, covering all `VecDiff`
+            // types in both success and system-failure scenarios.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
 
-        // The output `SignalVec` will contain `String`s.
-        app.init_resource::<SignalVecOutput<String>>();
+            // The output `SignalVec` will contain `String`s.
+            app.init_resource::<SignalVecOutput<String>>();
 
-        // The source vector that we will mutate.
-        let source_vec = MutableVec::from(vec![1, 10]);
+            // The source vector that we will mutate.
+            let source_vec = MutableVecBuilder::from([1, 10]).spawn(app.world_mut());
 
-        // Define a resource that the mapping system will depend on. This allows us to
-        // test system failure by removing the resource.
-        #[derive(Resource)]
-        struct MapFactor(String);
+            // Define a resource that the mapping system will depend on. This allows us to
+            // test system failure by removing the resource.
+            #[derive(Resource)]
+            struct MapFactor(String);
 
-        // The mapping system: appends a factor from the resource to the number.
-        let mapping_system = |In(val): In<i32>, factor: Res<MapFactor>| format!("{}{}", val, factor.0);
+            // The mapping system: appends a factor from the resource to the number.
+            let mapping_system = |In(val): In<i32>, factor: Res<MapFactor>| format!("{}{}", val, factor.0);
 
-        // The signal chain under test.
-        let mapped_signal = source_vec.signal_vec().map(mapping_system);
+            // The signal chain under test.
+            let mapped_signal = source_vec.signal_vec().map(mapping_system);
 
-        // Register the final signal to a system that captures its output diffs.
-        let handle = mapped_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            // Register the final signal to a system that captures its output diffs.
+            let handle = mapped_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // A local copy of the mapped vector's state to verify against.
-        let mut current_state: Vec<String> = vec![];
+            // A local copy of the mapped vector's state to verify against.
+            let mut current_state: Vec<String> = vec![];
 
-        // --- 2. Test Success Scenarios ---
-        // First, test all diff types when the mapping system is guaranteed to succeed.
-        app.insert_resource(MapFactor("x".to_string()));
+            // --- 2. Test Success Scenarios ---
+            // First, test all diff types when the mapping system is guaranteed to succeed.
+            app.insert_resource(MapFactor("x".to_string()));
 
-        // Test: Initial `Replace`
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec!["1x".to_string(), "10x".to_string()]
-            },
-            "Initial `Replace` was incorrect."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["1x".to_string(), "10x".to_string()]);
+            // Test: Initial `Replace`
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec!["1x".to_string(), "10x".to_string()]
+                },
+                "Initial `Replace` was incorrect."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["1x".to_string(), "10x".to_string()]);
 
-        // Test: `Push`
-        source_vec.write().push(4);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push {
-                value: "4x".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["1x".to_string(), "10x".to_string(), "4x".to_string()]
-        );
+            // Test: `Push`
+            source_vec.write(app.world_mut()).push(4);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push {
+                    value: "4x".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["1x".to_string(), "10x".to_string(), "4x".to_string()]
+            );
 
-        // Test: `InsertAt`
-        source_vec.write().insert(1, 5);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: "5x".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["1x".to_string(), "5x".to_string(), "10x".to_string(), "4x".to_string()]
-        );
+            // Test: `InsertAt`
+            source_vec.write(app.world_mut()).insert(1, 5);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt {
+                    index: 1,
+                    value: "5x".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["1x".to_string(), "5x".to_string(), "10x".to_string(), "4x".to_string()]
+            );
 
-        // Test: `UpdateAt`
-        source_vec.write().set(0, 99);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: "99x".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["99x".to_string(), "5x".to_string(), "10x".to_string(), "4x".to_string()]
-        );
+            // Test: `UpdateAt`
+            source_vec.write(app.world_mut()).set(0, 99);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: "99x".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["99x".to_string(), "5x".to_string(), "10x".to_string(), "4x".to_string()]
+            );
 
-        // Test: `RemoveAt` (passes through without mapping)
-        source_vec.write().remove(2); // removes 10
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["99x".to_string(), "5x".to_string(), "4x".to_string()]
-        );
+            // Test: `RemoveAt` (passes through without mapping)
+            source_vec.write(app.world_mut()).remove(2); // removes 10
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["99x".to_string(), "5x".to_string(), "4x".to_string()]
+            );
 
-        // Test: `Pop` (passes through without mapping)
-        source_vec.write().pop(); // removes 4
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Pop);
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["99x".to_string(), "5x".to_string()]);
+            // Test: `Pop` (passes through without mapping)
+            source_vec.write(app.world_mut()).pop(); // removes 4
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Pop);
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["99x".to_string(), "5x".to_string()]);
 
-        // Test: `Move` (passes through without mapping)
-        source_vec.write().move_item(1, 0); // moves 5 to front
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 1,
-                new_index: 0
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["5x".to_string(), "99x".to_string()]);
+            // Test: `Move` (passes through without mapping)
+            source_vec.write(app.world_mut()).move_item(1, 0); // moves 5 to front
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 1,
+                    new_index: 0
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["5x".to_string(), "99x".to_string()]);
 
-        // Test: `Clear` (passes through without mapping)
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Test: `Clear` (passes through without mapping)
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Clear);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 3. Test System Failure Scenarios ---
-        // Now, remove the resource to cause the mapping system to fail.
-        app.world_mut().remove_resource::<MapFactor>();
+            // --- 3. Test System Failure Scenarios ---
+            // Now, remove the resource to cause the mapping system to fail.
+            app.world_mut().remove_resource::<MapFactor>();
 
-        // Test: `Push` with failing system.
-        // The `run_system_with(...).ok()` will return `None`, so the item is dropped.
-        source_vec.write().push(88);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert!(
-            diffs.is_empty(),
-            "Pushing with a failing system should produce no diff."
-        );
-        assert!(current_state.is_empty(), "State should remain empty.");
+            // Test: `Push` with failing system.
+            // The `run_system_with(...).ok()` will return `None`, so the item is dropped.
+            source_vec.write(app.world_mut()).push(88);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Pushing with a failing system should produce no diff."
+            );
+            assert!(current_state.is_empty(), "State should remain empty.");
 
-        // Test: `Replace` with failing system.
-        // `map` will filter_map over the values, and all will fail. The output should be
-        // a `Replace` diff with an empty vector.
-        source_vec.write().replace(vec![1, 2, 3]);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Replace with a failing system should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace { values: vec![] },
-            "Replace with failing system should result in an empty vector."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Test: `Replace` with failing system.
+            // `map` will filter_map over the values, and all will fail. The output should be
+            // a `Replace` diff with an empty vector.
+            source_vec.write(app.world_mut()).replace(vec![1, 2, 3]);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Replace with a failing system should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![] },
+                "Replace with failing system should result in an empty vector."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 4. Test System Recovery ---
-        // Re-introduce the resource. The system should now succeed again.
-        app.insert_resource(MapFactor("y".to_string()));
+            // --- 4. Test System Recovery ---
+            // Re-introduce the resource. The system should now succeed again.
+            app.insert_resource(MapFactor("y".to_string()));
 
-        // Test: `Push` after recovery. The source vec is [1, 2, 3] from the last
-        // replace. Now we push 7. The `map` only processes the `Push` diff.
-        source_vec.write().push(7);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push after recovery should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push {
-                value: "7y".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["7y".to_string()],
-            "State should only contain the newly pushed item after recovery."
-        );
+            // Test: `Push` after recovery. The source vec is [1, 2, 3] from the last
+            // replace. Now we push 7. The `map` only processes the `Push` diff.
+            source_vec.write(app.world_mut()).push(7);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push after recovery should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push {
+                    value: "7y".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["7y".to_string()],
+                "State should only contain the newly pushed item after recovery."
+            );
 
-        // --- 5. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 5. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_map_in() {
-        // A comprehensive test for `SignalVecExt::map_in`, covering all `VecDiff`
-        // types and verifying it correctly uses state captured by the closure.
+        {
+            // A comprehensive test for `SignalVecExt::map_in`, covering all `VecDiff`
+            // types and verifying it correctly uses state captured by the closure.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<String>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<String>>();
 
-        let source_vec = MutableVec::from(vec![1, 10, 100]);
+            let source_vec = MutableVecBuilder::from([1, 10, 100]).spawn(app.world_mut());
 
-        // A variable to be captured by the `map_in` closure.
-        // We'll use this to demonstrate that the closure's captured state is respected
-        // and can change over time.
-        let mapping_factor = Arc::new(RwLock::new("a".to_string()));
+            // A variable to be captured by the `map_in` closure.
+            // We'll use this to demonstrate that the closure's captured state is respected
+            // and can change over time.
+            let mapping_factor = Arc::new(RwLock::new("a".to_string()));
 
-        // The signal chain under test, using `map_in` with a `move` closure.
-        let mapped_signal = source_vec.signal_vec().map_in(clone!((mapping_factor) move |val: i32| {
-            let factor = mapping_factor.read().unwrap();
-            format!("{}{}", val, *factor)
-        }));
+            // The signal chain under test, using `map_in` with a `move` closure.
+            let mapped_signal = source_vec.signal_vec().map_in(clone!((mapping_factor) move |val: i32| {
+                let factor = mapping_factor.read().unwrap();
+                format!("{}{}", val, *factor)
+            }));
 
-        let handle = mapped_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = mapped_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // A local copy of the mapped vector's state to verify against.
-        let mut current_state: Vec<String> = vec![];
+            // A local copy of the mapped vector's state to verify against.
+            let mut current_state: Vec<String> = vec![];
 
-        // --- 2. Test Scenarios ---
+            // --- 2. Test Scenarios ---
 
-        // Test: Initial `Replace`
-        // The first update should replay the initial state of the source vector,
-        // mapped with the initial factor "a".
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec!["1a".to_string(), "10a".to_string(), "100a".to_string()]
-            },
-            "Initial `Replace` was incorrect."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["1a".to_string(), "10a".to_string(), "100a".to_string()]
-        );
+            // Test: Initial `Replace`
+            // The first update should replay the initial state of the source vector,
+            // mapped with the initial factor "a".
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec!["1a".to_string(), "10a".to_string(), "100a".to_string()]
+                },
+                "Initial `Replace` was incorrect."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["1a".to_string(), "10a".to_string(), "100a".to_string()]
+            );
 
-        // --- Change the captured state ---
-        // Modify the captured factor. Subsequent mapping operations should use this
-        // new value.
-        *mapping_factor.write().unwrap() = "b".to_string();
+            // --- Change the captured state ---
+            // Modify the captured factor. Subsequent mapping operations should use this
+            // new value.
+            *mapping_factor.write().unwrap() = "b".to_string();
 
-        // Test: `Push` using the new factor "b"
-        source_vec.write().push(4);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push {
-                value: "4b".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![
-                "1a".to_string(),
-                "10a".to_string(),
-                "100a".to_string(),
-                "4b".to_string()
-            ]
-        );
+            // Test: `Push` using the new factor "b"
+            source_vec.write(app.world_mut()).push(4);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push {
+                    value: "4b".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![
+                    "1a".to_string(),
+                    "10a".to_string(),
+                    "100a".to_string(),
+                    "4b".to_string()
+                ]
+            );
 
-        // Test: `InsertAt` using the new factor "b"
-        source_vec.write().insert(1, 5);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: "5b".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![
-                "1a".to_string(),
-                "5b".to_string(),
-                "10a".to_string(),
-                "100a".to_string(),
-                "4b".to_string()
-            ]
-        );
+            // Test: `InsertAt` using the new factor "b"
+            source_vec.write(app.world_mut()).insert(1, 5);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt {
+                    index: 1,
+                    value: "5b".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![
+                    "1a".to_string(),
+                    "5b".to_string(),
+                    "10a".to_string(),
+                    "100a".to_string(),
+                    "4b".to_string()
+                ]
+            );
 
-        // Test: `UpdateAt` using the new factor "b"
-        source_vec.write().set(0, 99);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: "99b".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![
-                "99b".to_string(),
-                "5b".to_string(),
-                "10a".to_string(),
-                "100a".to_string(),
-                "4b".to_string()
-            ]
-        );
+            // Test: `UpdateAt` using the new factor "b"
+            source_vec.write(app.world_mut()).set(0, 99);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: "99b".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![
+                    "99b".to_string(),
+                    "5b".to_string(),
+                    "10a".to_string(),
+                    "100a".to_string(),
+                    "4b".to_string()
+                ]
+            );
 
-        // --- Test pass-through diffs ---
-        // These diffs don't involve mapping values, so they are simply forwarded.
+            // --- Test pass-through diffs ---
+            // These diffs don't involve mapping values, so they are simply forwarded.
 
-        // Test: `RemoveAt`
-        source_vec.write().remove(2); // removes 10
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![
-                "99b".to_string(),
-                "5b".to_string(),
-                "100a".to_string(),
-                "4b".to_string()
-            ]
-        );
+            // Test: `RemoveAt`
+            source_vec.write(app.world_mut()).remove(2); // removes 10
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![
+                    "99b".to_string(),
+                    "5b".to_string(),
+                    "100a".to_string(),
+                    "4b".to_string()
+                ]
+            );
 
-        // Test: `Pop`
-        source_vec.write().pop(); // removes 4
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Pop);
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["99b".to_string(), "5b".to_string(), "100a".to_string()]
-        );
+            // Test: `Pop`
+            source_vec.write(app.world_mut()).pop(); // removes 4
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Pop);
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["99b".to_string(), "5b".to_string(), "100a".to_string()]
+            );
 
-        // Test: `Move`
-        source_vec.write().move_item(1, 0); // moves 5 to front
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 1,
-                new_index: 0
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["5b".to_string(), "99b".to_string(), "100a".to_string()]
-        );
+            // Test: `Move`
+            source_vec.write(app.world_mut()).move_item(1, 0); // moves 5 to front
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 1,
+                    new_index: 0
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["5b".to_string(), "99b".to_string(), "100a".to_string()]
+            );
 
-        // Test: `Clear`
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Test: `Clear`
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Clear);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 3. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 3. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_map_in_ref() {
-        // A comprehensive test for `SignalVecExt::map_in_ref`, covering all `VecDiff`
-        // types and verifying it correctly uses a closure that takes a reference.
+        {
+            // A comprehensive test for `SignalVecExt::map_in_ref`, covering all `VecDiff`
+            // types and verifying it correctly uses a closure that takes a reference.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<String>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<String>>();
 
-        // The source vector contains integers.
-        let source_vec = MutableVec::from(vec![10, 20]);
+            // The source vector contains integers.
+            let source_vec = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
 
-        // The signal chain under test, using `map_in_ref` with a function pointer
-        // that operates on a reference (`&i32`). This is an idiomatic use case.
-        let mapped_signal = source_vec.signal_vec().map_in_ref(ToString::to_string);
+            // The signal chain under test, using `map_in_ref` with a function pointer
+            // that operates on a reference (`&i32`). This is an idiomatic use case.
+            let mapped_signal = source_vec.signal_vec().map_in_ref(ToString::to_string);
 
-        let handle = mapped_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = mapped_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // A local copy of the mapped vector's state to verify against.
-        let mut current_state: Vec<String> = vec![];
+            // A local copy of the mapped vector's state to verify against.
+            let mut current_state: Vec<String> = vec![];
 
-        // --- 2. Test Scenarios ---
+            // --- 2. Test Scenarios ---
 
-        // Test: Initial `Replace`
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec!["10".to_string(), "20".to_string()]
-            },
-            "Initial `Replace` was incorrect."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["10".to_string(), "20".to_string()]);
+            // Test: Initial `Replace`
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec!["10".to_string(), "20".to_string()]
+                },
+                "Initial `Replace` was incorrect."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["10".to_string(), "20".to_string()]);
 
-        // Test: `Push`
-        source_vec.write().push(30);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push {
-                value: "30".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["10".to_string(), "20".to_string(), "30".to_string()]
-        );
+            // Test: `Push`
+            source_vec.write(app.world_mut()).push(30);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push {
+                    value: "30".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["10".to_string(), "20".to_string(), "30".to_string()]
+            );
 
-        // Test: `InsertAt`
-        source_vec.write().insert(1, 5);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: "5".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["10".to_string(), "5".to_string(), "20".to_string(), "30".to_string()]
-        );
+            // Test: `InsertAt`
+            source_vec.write(app.world_mut()).insert(1, 5);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt {
+                    index: 1,
+                    value: "5".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["10".to_string(), "5".to_string(), "20".to_string(), "30".to_string()]
+            );
 
-        // Test: `UpdateAt`
-        source_vec.write().set(0, 99);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: "99".to_string()
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec!["99".to_string(), "5".to_string(), "20".to_string(), "30".to_string()]
-        );
+            // Test: `UpdateAt`
+            source_vec.write(app.world_mut()).set(0, 99);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: "99".to_string()
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec!["99".to_string(), "5".to_string(), "20".to_string(), "30".to_string()]
+            );
 
-        // --- Test pass-through diffs ---
-        // These diffs don't involve mapping values, so they are simply forwarded.
+            // --- Test pass-through diffs ---
+            // These diffs don't involve mapping values, so they are simply forwarded.
 
-        // Test: `RemoveAt`
-        source_vec.write().remove(2); // removes 20
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["99".to_string(), "5".to_string(), "30".to_string()]);
+            // Test: `RemoveAt`
+            source_vec.write(app.world_mut()).remove(2); // removes 20
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["99".to_string(), "5".to_string(), "30".to_string()]);
 
-        // Test: `Pop`
-        source_vec.write().pop(); // removes 30
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Pop);
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["99".to_string(), "5".to_string()]);
+            // Test: `Pop`
+            source_vec.write(app.world_mut()).pop(); // removes 30
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Pop);
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["99".to_string(), "5".to_string()]);
 
-        // Test: `Move`
-        source_vec.write().move_item(1, 0); // moves 5 to front
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 1,
-                new_index: 0
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["5".to_string(), "99".to_string()]);
+            // Test: `Move`
+            source_vec.write(app.world_mut()).move_item(1, 0); // moves 5 to front
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 1,
+                    new_index: 0
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["5".to_string(), "99".to_string()]);
 
-        // Test: `Clear`
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Test: `Clear`
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Clear);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 3. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 3. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     /// This test provides comprehensive coverage for `SignalVecExt::map_signal`.
@@ -4643,459 +4768,450 @@ mod tests {
     ///    updates from the old, now-orphaned inner signal are no longer propagated.
     #[test]
     fn test_map_signal() {
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<Name>>();
+        {
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<Name>>();
 
-        // Setup: Create entities with `Name` components that our signals will track.
-        let entity_a = app.world_mut().spawn(Name::new("Alice")).id();
-        let entity_b = app.world_mut().spawn(Name::new("Bob")).id();
+            // Setup: Create entities with `Name` components that our signals will track.
+            let entity_a = app.world_mut().spawn(Name::new("Alice")).id();
+            let entity_b = app.world_mut().spawn(Name::new("Bob")).id();
 
-        // The source vec contains entities. The goal is to create a derived vec that
-        // contains the _names_ of these entities.
-        let entity_vec = MutableVec::from([entity_a, entity_b]);
+            // The source vec contains entities. The goal is to create a derived vec that
+            // contains the _names_ of these entities.
+            let entity_vec = MutableVecBuilder::from([entity_a, entity_b]).spawn(app.world_mut());
 
-        // This "factory" system takes an entity and creates a signal that tracks its
-        // `Name`.
-        let factory_system = |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity).dedupe();
+            // This "factory" system takes an entity and creates a signal that tracks its
+            // `Name`.
+            let factory_system = |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity).dedupe();
 
-        // Apply `map_signal` to transform the SignalVec`<Entity>` into a
-        // SignalVec`<Name>`.
-        let name_vec_signal = entity_vec.signal_vec().map_signal(factory_system);
-        let handle = name_vec_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            // Apply `map_signal` to transform the SignalVec`<Entity>` into a
+            // SignalVec`<Name>`.
+            let name_vec_signal = entity_vec.signal_vec().map_signal(factory_system);
+            let handle = name_vec_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // Test 1: Initial State.
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial state should produce one Replace diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec![Name::new("Alice"), Name::new("Bob")]
-            },
-            "Initial state is incorrect"
-        );
+            // Test 1: Initial State.
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial state should produce one Replace diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![Name::new("Alice"), Name::new("Bob")]
+                },
+                "Initial state is incorrect"
+            );
 
-        // Test 2: Inner Signal Update.
-        *app.world_mut().get_mut::<Name>(entity_a).unwrap() = Name::new("Alicia");
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Name change should produce one Update diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: Name::new("Alicia"),
-            },
-            "Update diff is incorrect"
-        );
+            // Test 2: Inner Signal Update.
+            *app.world_mut().get_mut::<Name>(entity_a).unwrap() = Name::new("Alicia");
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Name change should produce one Update diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: Name::new("Alicia"),
+                },
+                "Update diff is incorrect"
+            );
 
-        // Test 3: No change should produce no diff.
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert!(diffs.is_empty(), "No change should produce no diffs");
+            // Test 3: No change should produce no diff.
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert!(diffs.is_empty(), "No change should produce no diffs");
 
-        // Test 4: Source SignalVec Push.
-        let entity_c = app.world_mut().spawn(Name::new("Charlie")).id();
-        entity_vec.write().push(entity_c);
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push should produce one diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push {
-                value: Name::new("Charlie")
-            },
-            "Push diff is incorrect"
-        );
+            // Test 4: Source SignalVec Push.
+            let entity_c = app.world_mut().spawn(Name::new("Charlie")).id();
+            entity_vec.write(app.world_mut()).push(entity_c);
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push should produce one diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push {
+                    value: Name::new("Charlie")
+                },
+                "Push diff is incorrect"
+            );
 
-        // Test 5: Source SignalVec InsertAt.
-        let entity_d = app.world_mut().spawn(Name::new("David")).id();
-        entity_vec.write().insert(1, entity_d);
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "InsertAt should produce one diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: Name::new("David"),
-            },
-            "InsertAt diff is incorrect"
-        );
+            // Test 5: Source SignalVec InsertAt.
+            let entity_d = app.world_mut().spawn(Name::new("David")).id();
+            entity_vec.write(app.world_mut()).insert(1, entity_d);
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "InsertAt should produce one diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt {
+                    index: 1,
+                    value: Name::new("David"),
+                },
+                "InsertAt diff is incorrect"
+            );
 
-        // Test 6: Source SignalVec RemoveAt. Remove Bob
-        entity_vec.write().remove(2);
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff");
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 }, "RemoveAt diff is incorrect");
+            // Test 6: Source SignalVec RemoveAt. Remove Bob
+            entity_vec.write(app.world_mut()).remove(2);
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff");
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 }, "RemoveAt diff is incorrect");
 
-        // Verify cleanup by ensuring updates to the removed entity's signal are ignored.
-        *app.world_mut().get_mut::<Name>(entity_b).unwrap() = Name::new("Robert");
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert!(diffs.is_empty(), "Update on removed entity should not produce a diff");
+            // Verify cleanup by ensuring updates to the removed entity's signal are ignored.
+            *app.world_mut().get_mut::<Name>(entity_b).unwrap() = Name::new("Robert");
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert!(diffs.is_empty(), "Update on removed entity should not produce a diff");
 
-        // Test 7: Source SignalVec UpdateAt (switching the underlying signal).
-        let entity_e = app.world_mut().spawn(Name::new("Eve")).id();
+            // Test 7: Source SignalVec UpdateAt (switching the underlying signal).
+            let entity_e = app.world_mut().spawn(Name::new("Eve")).id();
 
-        // Replace Alicia with Eve
-        entity_vec.write().set(0, entity_e);
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Set/UpdateAt should produce one diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: Name::new("Eve"),
-            },
-            "Update-to-new-entity diff is incorrect"
-        );
+            // Replace Alicia with Eve
+            entity_vec.write(app.world_mut()).set(0, entity_e);
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Set/UpdateAt should produce one diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: Name::new("Eve"),
+                },
+                "Update-to-new-entity diff is incorrect"
+            );
 
-        // Verify cleanup of old signal
-        *app.world_mut().get_mut::<Name>(entity_a).unwrap() = Name::new("Alicia_v2");
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert!(
-            diffs.is_empty(),
-            "Update on old, replaced entity should not produce a diff"
-        );
+            // Verify cleanup of old signal
+            *app.world_mut().get_mut::<Name>(entity_a).unwrap() = Name::new("Alicia_v2");
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Update on old, replaced entity should not produce a diff"
+            );
 
-        // Verify new signal is active
-        *app.world_mut().get_mut::<Name>(entity_e).unwrap() = Name::new("Evelyn");
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Update on new entity should produce a diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: Name::new("Evelyn"),
-            },
-            "Update on new entity is incorrect"
-        );
+            // Verify new signal is active
+            *app.world_mut().get_mut::<Name>(entity_e).unwrap() = Name::new("Evelyn");
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Update on new entity should produce a diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: Name::new("Evelyn"),
+                },
+                "Update on new entity is incorrect"
+            );
 
-        // Test 8: Source SignalVec Move. Move Charlie to front
-        entity_vec.write().move_item(2, 0);
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Move should produce one diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 2,
-                new_index: 0,
-            },
-            "Move diff is incorrect"
-        );
+            // Test 8: Source SignalVec Move. Move Charlie to front
+            entity_vec.write(app.world_mut()).move_item(2, 0);
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Move should produce one diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 2,
+                    new_index: 0,
+                },
+                "Move diff is incorrect"
+            );
 
-        // Verify tracking of moved item
-        *app.world_mut().get_mut::<Name>(entity_c).unwrap() = Name::new("Charles");
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Update on moved entity should produce a diff");
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 0,
-                value: Name::new("Charles"),
-            },
-            "Update on moved entity is incorrect"
-        );
+            // Verify tracking of moved item
+            *app.world_mut().get_mut::<Name>(entity_c).unwrap() = Name::new("Charles");
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Update on moved entity should produce a diff");
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 0,
+                    value: Name::new("Charles"),
+                },
+                "Update on moved entity is incorrect"
+            );
 
-        // Test 9: Source SignalVec Pop. Removes David
-        entity_vec.write().pop();
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Pop should produce one diff");
-        assert_eq!(diffs[0], VecDiff::Pop, "Pop diff is incorrect");
+            // Test 9: Source SignalVec Pop. Removes David
+            entity_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Pop should produce one diff");
+            assert_eq!(diffs[0], VecDiff::Pop, "Pop diff is incorrect");
 
-        // Test 10: Source SignalVec Clear.
-        entity_vec.write().clear();
-        entity_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<Name>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Clear should produce one diff");
-        assert_eq!(diffs[0], VecDiff::Clear, "Clear diff is incorrect");
-        assert!(entity_vec.read().is_empty());
-        handle.cleanup(app.world_mut());
+            // Test 10: Source SignalVec Clear.
+            entity_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<Name>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Clear should produce one diff");
+            assert_eq!(diffs[0], VecDiff::Clear, "Clear diff is incorrect");
+            assert!(entity_vec.read(app.world()).is_empty());
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_filter() {
-        // A comprehensive test for `SignalVecExt::filter`, covering all `VecDiff`
-        // types and edge cases like items changing their filter status.
+        {
+            // A comprehensive test for `SignalVecExt::filter`, covering all `VecDiff`
+            // types and edge cases like items changing their filter status.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // The source vector contains a mix of values to be filtered.
-        let source_vec = MutableVec::from(vec![1, 2, 3, 4]);
+            // The source vector contains a mix of values to be filtered.
+            let source_vec = MutableVecBuilder::from([1, 2, 3, 4]).spawn(app.world_mut());
 
-        // The filter predicate: only allow even numbers.
-        let is_even = |In(x): In<i32>| x % 2 == 0;
+            // The filter predicate: only allow even numbers.
+            let is_even = |In(x): In<i32>| x % 2 == 0;
 
-        // The signal chain under test.
-        let filtered_signal = source_vec.signal_vec().filter(is_even);
+            // The signal chain under test.
+            let filtered_signal = source_vec.signal_vec().filter(is_even);
 
-        let handle = filtered_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = filtered_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // A local copy of the filtered vector's state to verify against.
-        let mut current_state: Vec<i32> = vec![];
+            // A local copy of the filtered vector's state to verify against.
+            let mut current_state: Vec<i32> = vec![];
 
-        // --- 2. Test Initial State (`Replace`) ---
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace { values: vec![2, 4] },
-            "Initial `Replace` did not filter correctly."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![2, 4]);
+            // --- 2. Test Initial State (`Replace`) ---
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![2, 4] },
+                "Initial `Replace` did not filter correctly."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![2, 4]);
 
-        // --- 3. Test `Push` ---
-        // Push a value that passes the filter (6).
-        source_vec.write().push(6);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Push { value: 6 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![2, 4, 6]);
+            // --- 3. Test `Push` ---
+            // Push a value that passes the filter (6).
+            source_vec.write(app.world_mut()).push(6);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Push { value: 6 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![2, 4, 6]);
 
-        // Push a value that fails the filter (7).
-        source_vec.write().push(7);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert!(diffs.is_empty(), "Pushing a filtered-out value should produce no diff.");
-        assert_eq!(current_state, vec![2, 4, 6]); // State should be unchanged.
+            // Push a value that fails the filter (7).
+            source_vec.write(app.world_mut()).push(7);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert!(diffs.is_empty(), "Pushing a filtered-out value should produce no diff.");
+            assert_eq!(current_state, vec![2, 4, 6]); // State should be unchanged.
 
-        // --- 4. Test `UpdateAt` (Status Change) ---
-        // Update an item from filtered-out to included (3 -> 8).
-        // Source is [1, 2, 3, 4, 6, 7]. Update index 2.
-        // It should be inserted into the output at index 1 (after 2).
-        source_vec.write().set(2, 8);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt { index: 1, value: 8 },
-            "Update from filtered to included failed"
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![2, 8, 4, 6]);
+            // --- 4. Test `UpdateAt` (Status Change) ---
+            // Update an item from filtered-out to included (3 -> 8).
+            // Source is [1, 2, 3, 4, 6, 7]. Update index 2.
+            // It should be inserted into the output at index 1 (after 2).
+            source_vec.write(app.world_mut()).set(2, 8);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt { index: 1, value: 8 },
+                "Update from filtered to included failed"
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![2, 8, 4, 6]);
 
-        // Update an item from included to filtered-out (4 -> 9).
-        // Source is now [1, 2, 8, 4, 6, 7]. Update index 3.
-        // It should be removed from the output at index 2 (where 4 was).
-        source_vec.write().set(3, 9);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::RemoveAt { index: 2 },
-            "Update from included to filtered failed"
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![2, 8, 6]);
+            // Update an item from included to filtered-out (4 -> 9).
+            // Source is now [1, 2, 8, 4, 6, 7]. Update index 3.
+            // It should be removed from the output at index 2 (where 4 was).
+            source_vec.write(app.world_mut()).set(3, 9);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::RemoveAt { index: 2 },
+                "Update from included to filtered failed"
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![2, 8, 6]);
 
-        // --- 5. Test `RemoveAt` ---
-        // Remove an included item (2) from the source at index 1.
-        source_vec.write().remove(1);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 }); // It was at the start of the output
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![8, 6]);
+            // --- 5. Test `RemoveAt` ---
+            // Remove an included item (2) from the source at index 1.
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 }); // It was at the start of the output
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![8, 6]);
 
-        // --- 6. Test `Move` ---
-        // Source is now [1, 8, 9, 6, 7]. Filtered is [8, 6].
-        // Move 8 (source index 1) to after 6 (source index 3).
-        // Source becomes [1, 9, 6, 8, 7].
-        // This should move index 0 (value 8) to index 1 in the output.
-        source_vec.write().move_item(1, 3);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 0,
-                new_index: 1
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![6, 8]);
+            // --- 6. Test `Move` ---
+            // Source is now [1, 8, 9, 6, 7]. Filtered is [8, 6].
+            // Move 8 (source index 1) to after 6 (source index 3).
+            // Source becomes [1, 9, 6, 8, 7].
+            // This should move index 0 (value 8) to index 1 in the output.
+            source_vec.write(app.world_mut()).move_item(1, 3);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 0,
+                    new_index: 1
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![6, 8]);
 
-        // --- 7. Test `Clear` ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // --- 7. Test `Clear` ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Clear);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 8. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 8. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_filter_map() {
-        // A comprehensive test for `SignalVecExt::filter_map`, covering all `VecDiff`
-        // types and the three status-change scenarios for `UpdateAt`.
+        {
+            // A comprehensive test for `SignalVecExt::filter_map`, covering all `VecDiff`
+            // types and the three status-change scenarios for `UpdateAt`.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<u32>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<u32>>();
 
-        // The source vector contains strings, some of which are parsable as numbers.
-        let source_vec = MutableVec::from(vec!["10", "foo", "20", "bar"]);
+            // The source vector contains strings, some of which are parsable as numbers.
+            let source_vec = MutableVecBuilder::from(["10", "foo", "20", "bar"]).spawn(app.world_mut());
 
-        // The filter_map predicate: parse strings to u32, returning Some on success
-        // and None on failure.
-        let parse_u32 = |In(s): In<&'static str>| s.parse::<u32>().ok();
+            // The filter_map predicate: parse strings to u32, returning Some on success
+            // and None on failure.
+            let parse_u32 = |In(s): In<&'static str>| s.parse::<u32>().ok();
 
-        // The signal chain under test.
-        let filtered_mapped_signal = source_vec.signal_vec().filter_map(parse_u32);
+            // The signal chain under test.
+            let filtered_mapped_signal = source_vec.signal_vec().filter_map(parse_u32);
 
-        let handle = filtered_mapped_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = filtered_mapped_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // A local copy of the filtered/mapped vector's state.
-        let mut current_state: Vec<u32> = vec![];
+            // A local copy of the filtered/mapped vector's state.
+            let mut current_state: Vec<u32> = vec![];
 
-        // --- 2. Test Initial State (`Replace`) ---
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace { values: vec![10, 20] },
-            "Initial `Replace` did not filter and map correctly."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![10, 20]);
+            // --- 2. Test Initial State (`Replace`) ---
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![10, 20] },
+                "Initial `Replace` did not filter and map correctly."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![10, 20]);
 
-        // --- 3. Test `Push` ---
-        // Push a value that passes the filter_map ("30").
-        source_vec.write().push("30");
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Push { value: 30 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![10, 20, 30]);
+            // --- 3. Test `Push` ---
+            // Push a value that passes the filter_map ("30").
+            source_vec.write(app.world_mut()).push("30");
+            // drop(source_vec)
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Push { value: 30 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![10, 20, 30]);
 
-        // Push a value that fails the filter_map ("baz").
-        source_vec.write().push("baz");
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert!(diffs.is_empty(), "Pushing a filtered-out value should produce no diff.");
+            // Push a value that fails the filter_map ("baz").
+            source_vec.write(app.world_mut()).push("baz");
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert!(diffs.is_empty(), "Pushing a filtered-out value should produce no diff.");
 
-        // --- 4. Test `UpdateAt` Status Changes ---
-        // Case 1: None -> Some (Update "foo" at source index 1 to "40").
-        source_vec.write().set(1, "40");
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::InsertAt { index: 1, value: 40 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![10, 40, 20, 30]);
+            // --- 4. Test `UpdateAt` Status Changes ---
+            // Case 1: None -> Some (Update "foo" at source index 1 to "40").
+            source_vec.write(app.world_mut()).set(1, "40");
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::InsertAt { index: 1, value: 40 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![10, 40, 20, 30]);
 
-        // Case 2: Some -> None (Update "20" at source index 2 to "qux").
-        source_vec.write().set(2, "qux");
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![10, 40, 30]);
+            // Case 2: Some -> None (Update "20" at source index 2 to "qux").
+            source_vec.write(app.world_mut()).set(2, "qux");
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 2 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![10, 40, 30]);
 
-        // Case 3: Some -> Some (Update "10" at source index 0 to "50").
-        source_vec.write().set(0, "50");
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::UpdateAt { index: 0, value: 50 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![50, 40, 30]);
+            // Case 3: Some -> Some (Update "10" at source index 0 to "50").
+            source_vec.write(app.world_mut()).set(0, "50");
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::UpdateAt { index: 0, value: 50 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![50, 40, 30]);
 
-        // --- 5. Test `RemoveAt` ---
-        // Source is now: ["50", "40", "qux", "bar", "30", "baz"]
-        // Filtered is: [50, 40, 30]
-        // Remove "40" from source at index 1. This is at output index 1.
-        source_vec.write().remove(1);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 1 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![50, 30]);
+            // --- 5. Test `RemoveAt` ---
+            // Source is now: ["50", "40", "qux", "bar", "30", "baz"]
+            // Filtered is: [50, 40, 30]
+            // Remove "40" from source at index 1. This is at output index 1.
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 1 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![50, 30]);
 
-        // --- 6. Test `Move` ---
-        // Source is now: ["50", "qux", "bar", "30", "baz"]
-        // Filtered is: [50, 30]
-        // Move "30" (source index 3) to the front (source index 0).
-        // This moves output index 1 to output index 0.
-        source_vec.write().move_item(3, 0);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::Move {
-                old_index: 1,
-                new_index: 0
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![30, 50]);
+            // --- 6. Test `Move` ---
+            // Source is now: ["50", "qux", "bar", "30", "baz"]
+            // Filtered is: [50, 30]
+            // Move "30" (source index 3) to the front (source index 0).
+            // This moves output index 1 to output index 0.
+            source_vec.write(app.world_mut()).move_item(3, 0);
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::Move {
+                    old_index: 1,
+                    new_index: 0
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![30, 50]);
 
-        // --- 7. Test `Clear` ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<u32>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(diffs[0], VecDiff::Clear);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // --- 7. Test `Clear` ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Clear);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 8. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 8. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     /// This test provides comprehensive coverage for a single
@@ -5114,120 +5230,118 @@ mod tests {
     ///    removed from the filtered list based on their new value.
     #[test]
     fn test_filter_signal() {
-        // A resource to control the filter's behavior.
-        #[derive(Resource, Clone, PartialEq, Debug)]
-        struct FilterMode(bool);
+        {
+            // A resource to control the filter's behavior.
+            #[derive(Resource, Clone, PartialEq, Debug)]
+            struct FilterMode(bool);
 
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // --- Setup --- Initially, filter for even numbers.
-        app.insert_resource(FilterMode(true));
-        let source_vec = MutableVec::from(vec![1, 2, 3, 4]);
-        let filtered_signal = source_vec.signal_vec().filter_signal(|In(val): In<i32>| {
-            SignalBuilder::from_resource::<FilterMode>().map(move |In(mode): In<FilterMode>| {
-                // even or odd
-                if mode.0 { val % 2 == 0 } else { val % 2 != 0 }
-            })
-        });
-        let handle = filtered_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            // --- Setup --- Initially, filter for even numbers.
+            app.insert_resource(FilterMode(true));
+            let source_vec = MutableVecBuilder::from([1, 2, 3, 4]).spawn(app.world_mut());
+            let filtered_signal = source_vec.signal_vec().filter_signal(|In(val): In<i32>| {
+                SignalBuilder::from_resource::<FilterMode>().map(move |In(mode): In<FilterMode>| {
+                    // even or odd
+                    if mode.0 { val % 2 == 0 } else { val % 2 != 0 }
+                })
+            });
+            let handle = filtered_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // --- 1. Initial State (Even) ---
-        app.update();
-        let mut current_state = vec![];
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(current_state, vec![2, 4], "Initial state (even) is incorrect.");
+            // --- 1. Initial State (Even) ---
+            app.update();
+            let mut current_state = vec![];
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(current_state, vec![2, 4], "Initial state (even) is incorrect.");
 
-        // --- 2. Change Filter (to Odd) ---
-        *app.world_mut().resource_mut::<FilterMode>() = FilterMode(false);
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(current_state, vec![1, 3], "State after switching to odd is incorrect.");
+            // --- 2. Change Filter (to Odd) ---
+            *app.world_mut().resource_mut::<FilterMode>() = FilterMode(false);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(current_state, vec![1, 3], "State after switching to odd is incorrect.");
 
-        // --- 3. Source Vec Push (respecting Odd filter) --- Push an odd number, should
-        // appear.
-        source_vec.write().push(5);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            vec![1, 3, 5],
-            "State after pushing odd number is incorrect."
-        );
+            // --- 3. Source Vec Push (respecting Odd filter) --- Push an odd number, should
+            // appear.
+            source_vec.write(app.world_mut()).push(5);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![1, 3, 5],
+                "State after pushing odd number is incorrect."
+            );
 
-        // Push an even number, should be filtered out.
-        source_vec.write().push(6);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert!(
-            diffs.is_empty(),
-            "Pushing a filtered-out number should produce no diffs."
-        );
-        assert_eq!(
-            current_state,
-            vec![1, 3, 5],
-            "State should be unchanged after pushing even number."
-        );
+            // Push an even number, should be filtered out.
+            source_vec.write(app.world_mut()).push(6);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Pushing a filtered-out number should produce no diffs."
+            );
+            assert_eq!(
+                current_state,
+                vec![1, 3, 5],
+                "State should be unchanged after pushing even number."
+            );
 
-        // --- 4. Change Filter (back to Even) ---
-        *app.world_mut().resource_mut::<FilterMode>() = FilterMode(true);
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
+            // --- 4. Change Filter (back to Even) ---
+            *app.world_mut().resource_mut::<FilterMode>() = FilterMode(true);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
 
-        // Source vec is now [1, 2, 3, 4, 5, 6]. Evens are [2, 4, 6].
-        assert_eq!(
-            current_state,
-            vec![2, 4, 6],
-            "State after switching back to even is incorrect."
-        );
+            // Source vec is now [1, 2, 3, 4, 5, 6]. Evens are [2, 4, 6].
+            assert_eq!(
+                current_state,
+                vec![2, 4, 6],
+                "State after switching back to even is incorrect."
+            );
 
-        // --- 5. Source Vec RemoveAt --- Remove `4` (even) from source vec (at index 3).
-        source_vec.write().remove(3);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(current_state, vec![2, 6], "State after removing '4' is incorrect.");
+            // --- 5. Source Vec RemoveAt --- Remove `4` (even) from source vec (at index 3).
+            source_vec.write(app.world_mut()).remove(3);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(current_state, vec![2, 6], "State after removing '4' is incorrect.");
 
-        // --- 6. Source Vec UpdateAt --- Update `3` (odd, at index 2) to `8` (even). This
-        // should insert `8` into the filtered list.
-        source_vec.write().set(2, 8);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
+            // --- 6. Source Vec UpdateAt --- Update `3` (odd, at index 2) to `8` (even). This
+            // should insert `8` into the filtered list.
+            source_vec.write(app.world_mut()).set(2, 8);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
 
-        // Source is now [1, 2, 8, 5, 6]. Evens are [2, 8, 6].
-        assert_eq!(
-            current_state,
-            vec![2, 8, 6],
-            "State after updating 3 to 8 is incorrect."
-        );
+            // Source is now [1, 2, 8, 5, 6]. Evens are [2, 8, 6].
+            assert_eq!(
+                current_state,
+                vec![2, 8, 6],
+                "State after updating 3 to 8 is incorrect."
+            );
 
-        // Update `6` (even, at index 4) to `7` (odd). This should remove `6` from the
-        // filtered list.
-        source_vec.write().set(4, 7);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
+            // Update `6` (even, at index 4) to `7` (odd). This should remove `6` from the
+            // filtered list.
+            source_vec.write(app.world_mut()).set(4, 7);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
 
-        // Source is now [1, 2, 8, 5, 7]. Evens are [2, 8].
-        assert_eq!(current_state, vec![2, 8], "State after updating 6 to 7 is incorrect.");
+            // Source is now [1, 2, 8, 5, 7]. Evens are [2, 8].
+            assert_eq!(current_state, vec![2, 8], "State after updating 6 to 7 is incorrect.");
 
-        // --- 7. Source Vec Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Clear should produce one diff.");
-        assert_eq!(diffs[0], VecDiff::Clear, "Expected a Clear diff.");
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty(), "State after clear should be empty.");
+            // --- 7. Source Vec Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Clear should produce one diff.");
+            assert_eq!(diffs[0], VecDiff::Clear, "Expected a Clear diff.");
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty(), "State after clear should be empty.");
 
-        // --- Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     /// This test verifies the behavior of chaining multiple `.filter_signal()` calls.
@@ -5241,1110 +5355,1079 @@ mod tests {
     /// correctly as filter conditions change throughout the chain.
     #[test]
     fn test_filter_signal_chaining() {
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+        {
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // --- Setup --- Resources to control the two filters
-        #[derive(Resource, Clone, PartialEq, Debug)]
-        struct IsPositive(bool);
+            // --- Setup --- Resources to control the two filters
+            #[derive(Resource, Clone, PartialEq, Debug)]
+            struct IsPositive(bool);
 
-        #[derive(Resource, Clone, PartialEq, Debug)]
-        struct IsEven(bool);
+            #[derive(Resource, Clone, PartialEq, Debug)]
+            struct IsEven(bool);
 
-        // Initially, we only want non-positive numbers
-        app.insert_resource(IsPositive(false));
+            // Initially, we only want non-positive numbers
+            app.insert_resource(IsPositive(false));
 
-        // And we want even numbers
-        app.insert_resource(IsEven(true));
+            // And we want even numbers
+            app.insert_resource(IsEven(true));
 
-        // The source vector
-        let source_vec = MutableVec::from(vec![-2, -1, 0, 1, 2]);
+            // The source vector
+            let source_vec = MutableVecBuilder::from([-2, -1, 0, 1, 2]).spawn(app.world_mut());
 
-        // --- The Signal Chain ---
-        let final_signal = source_vec
-            .signal_vec()
-            // Filter 1: controlled by IsPositive resource.
-            .filter_signal(|In(val): In<i32>| {
-                SignalBuilder::from_resource::<IsPositive>()
-                    .map(move |In(res): In<IsPositive>| if res.0 { val > 0 } else { val <= 0 })
-            })
-            // Filter 2: controlled by IsEven resource.
-            .filter_signal(|In(val): In<i32>| {
-                SignalBuilder::from_resource::<IsEven>()
-                    .map(move |In(res): In<IsEven>| if res.0 { val % 2 == 0 } else { val % 2 != 0 })
-            });
-        let handle = final_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            // --- The Signal Chain ---
+            let final_signal = source_vec
+                .signal_vec()
+                // Filter 1: controlled by IsPositive resource.
+                .filter_signal(|In(val): In<i32>| {
+                    SignalBuilder::from_resource::<IsPositive>()
+                        .map(move |In(res): In<IsPositive>| if res.0 { val > 0 } else { val <= 0 })
+                })
+                // Filter 2: controlled by IsEven resource.
+                .filter_signal(|In(val): In<i32>| {
+                    SignalBuilder::from_resource::<IsEven>()
+                        .map(move |In(res): In<IsEven>| if res.0 { val % 2 == 0 } else { val % 2 != 0 })
+                });
+            let handle = final_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // --- 1. Initial State --- IsPositive(false) -> pass [-2, -1, 0] IsEven(true)
-        //  -> from the above, pass [-2, 0]
-        app.update();
-        let mut current_state = vec![];
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(current_state, vec![-2, 0], "Initial state is incorrect.");
+            // --- 1. Initial State --- IsPositive(false) -> pass [-2, -1, 0] IsEven(true)
+            //  -> from the above, pass [-2, 0]
+            app.update();
+            let mut current_state = vec![];
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(current_state, vec![-2, 0], "Initial state is incorrect.");
 
-        // --- 2. Change the first filter's condition --- Now IsPositive(true) -> pass [1,
-        // 2] The second filter IsEven(true) is unchanged -> from the new set, pass [2]
-        // The combined effect should be to remove [-2, 0] and insert [2].
-        *app.world_mut().resource_mut::<IsPositive>() = IsPositive(true);
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            vec![2],
-            "State after flipping first filter is incorrect."
-        );
+            // --- 2. Change the first filter's condition --- Now IsPositive(true) -> pass [1,
+            // 2] The second filter IsEven(true) is unchanged -> from the new set, pass [2]
+            // The combined effect should be to remove [-2, 0] and insert [2].
+            *app.world_mut().resource_mut::<IsPositive>() = IsPositive(true);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![2],
+                "State after flipping first filter is incorrect."
+            );
 
-        // --- 3. Change the second filter's condition --- IsPositive(true) is unchanged
-        // -> pass [1, 2] IsEven(false) -> from the above, pass [1] The combined effect
-        // should be to remove [2] and insert [1].
-        *app.world_mut().resource_mut::<IsEven>() = IsEven(false);
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            vec![1],
-            "State after flipping second filter is incorrect."
-        );
+            // --- 3. Change the second filter's condition --- IsPositive(true) is unchanged
+            // -> pass [1, 2] IsEven(false) -> from the above, pass [1] The combined effect
+            // should be to remove [2] and insert [1].
+            *app.world_mut().resource_mut::<IsEven>() = IsEven(false);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![1],
+                "State after flipping second filter is incorrect."
+            );
 
-        // --- 4. Change the first filter back --- IsPositive(false) -> pass [-2, -1, 0]
-        // IsEven(false) -> from the above, pass [-1] The combined effect should be to
-        // remove [1] and insert [-1].
-        *app.world_mut().resource_mut::<IsPositive>() = IsPositive(false);
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            vec![-1],
-            "State after flipping first filter back is incorrect."
-        );
+            // --- 4. Change the first filter back --- IsPositive(false) -> pass [-2, -1, 0]
+            // IsEven(false) -> from the above, pass [-1] The combined effect should be to
+            // remove [1] and insert [-1].
+            *app.world_mut().resource_mut::<IsPositive>() = IsPositive(false);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![-1],
+                "State after flipping first filter back is incorrect."
+            );
 
-        // --- 5. Test source vec modification --- Add an item that should pass both
-        // current filters: IsPositive(false) and IsEven(false) -> Add -3. It should be
-        // pushed to the end of the filtered list.
-        source_vec.write().push(-3);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<i32>(app.world_mut()));
-        assert_eq!(current_state, vec![-1, -3], "State after pushing -3 is incorrect.");
+            // --- 5. Test source vec modification --- Add an item that should pass both
+            // current filters: IsPositive(false) and IsEven(false) -> Add -3. It should be
+            // pushed to the end of the filtered list.
+            source_vec.write(app.world_mut()).push(-3);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<i32>(app.world_mut()));
+            assert_eq!(current_state, vec![-1, -3], "State after pushing -3 is incorrect.");
 
-        // --- Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_to_signal() {
-        // A comprehensive test for `SignalVecExt::to_signal`, verifying that it
-        // correctly reconstructs the full vector state from all `VecDiff` types.
-
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<FinalSignalOutput<Vec<String>>>();
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
-
-        // The signal chain under test.
-        let state_signal = source_vec.signal_vec().to_signal();
-        let handle = state_signal
-            .map(capture_final_output::<Vec<String>>)
-            .register(app.world_mut());
-
-        // --- 2. Test Initial State ---
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["a".to_string(), "b".to_string()]),
-            "Initial state was not correctly emitted."
-        );
-
-        // --- 3. Test Individual Diffs ---
-        // Test Push
-        source_vec.write().push("c".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
-            "State after Push is incorrect."
-        );
-
-        // Test RemoveAt
-        source_vec.write().remove(1); // removes "b"
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["a".to_string(), "c".to_string()]),
-            "State after RemoveAt is incorrect."
-        );
-
-        // Test InsertAt
-        source_vec.write().insert(0, "x".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["x".to_string(), "a".to_string(), "c".to_string()]),
-            "State after InsertAt is incorrect."
-        );
-
-        // Test UpdateAt
-        source_vec.write().set(2, "C".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["x".to_string(), "a".to_string(), "C".to_string()]),
-            "State after UpdateAt is incorrect."
-        );
-
-        // Test Move
-        source_vec.write().move_item(2, 0); // moves "C" to the front
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["C".to_string(), "x".to_string(), "a".to_string()]),
-            "State after Move is incorrect."
-        );
-
-        // Test Pop
-        source_vec.write().pop(); // removes "a"
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["C".to_string(), "x".to_string()]),
-            "State after Pop is incorrect."
-        );
-
-        // --- 4. Test No-Op Frame ---
-        // An update without any source changes should not emit a new state.
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            None,
-            "Signal emitted on a no-op frame."
-        );
-
-        // --- 5. Test Batched Mutations ---
         {
-            let mut writer = source_vec.write();
-            writer.push("y".to_string()); // State: ["C", "x", "y"]
-            writer.remove(0); // State: ["x", "y"]
+            // A comprehensive test for `SignalVecExt::to_signal`, verifying that it
+            // correctly reconstructs the full vector state from all `VecDiff` types.
+
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<FinalSignalOutput<Vec<String>>>();
+            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+
+            // The signal chain under test.
+            let state_signal = source_vec.signal_vec().to_signal();
+            let handle = state_signal
+                .map(capture_final_output::<Vec<String>>)
+                .register(app.world_mut());
+
+            // --- 2. Test Initial State ---
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["a".to_string(), "b".to_string()]),
+                "Initial state was not correctly emitted."
+            );
+
+            // --- 3. Test Individual Diffs ---
+            // Test Push
+            source_vec.write(app.world_mut()).push("c".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+                "State after Push is incorrect."
+            );
+
+            // Test RemoveAt
+            source_vec.write(app.world_mut()).remove(1); // removes "b"
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["a".to_string(), "c".to_string()]),
+                "State after RemoveAt is incorrect."
+            );
+
+            // Test InsertAt
+            source_vec.write(app.world_mut()).insert(0, "x".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["x".to_string(), "a".to_string(), "c".to_string()]),
+                "State after InsertAt is incorrect."
+            );
+
+            // Test UpdateAt
+            source_vec.write(app.world_mut()).set(2, "C".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["x".to_string(), "a".to_string(), "C".to_string()]),
+                "State after UpdateAt is incorrect."
+            );
+
+            // Test Move
+            source_vec.write(app.world_mut()).move_item(2, 0); // moves "C" to the front
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["C".to_string(), "x".to_string(), "a".to_string()]),
+                "State after Move is incorrect."
+            );
+
+            // Test Pop
+            source_vec.write(app.world_mut()).pop(); // removes "a"
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["C".to_string(), "x".to_string()]),
+                "State after Pop is incorrect."
+            );
+
+            // --- 4. Test No-Op Frame ---
+            // An update without any source changes should not emit a new state.
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                None,
+                "Signal emitted on a no-op frame."
+            );
+
+            // --- 5. Test Batched Mutations ---
+            {
+                let mut writer = source_vec.write(app.world_mut());
+                writer.push("y".to_string()); // State: ["C", "x", "y"]
+                writer.remove(0); // State: ["x", "y"]
+            }
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec!["x".to_string(), "y".to_string()]),
+                "State after batched mutations is incorrect."
+            );
+
+            // --- 6. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<Vec<String>>(app.world_mut()),
+                Some(vec![]),
+                "State after Clear is incorrect."
+            );
+
+            // --- 7. Cleanup ---
+            handle.cleanup(app.world_mut());
         }
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec!["x".to_string(), "y".to_string()]),
-            "State after batched mutations is incorrect."
-        );
 
-        // --- 6. Test Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<Vec<String>>(app.world_mut()),
-            Some(vec![]),
-            "State after Clear is incorrect."
-        );
-
-        // --- 7. Cleanup ---
-        handle.cleanup(app.world_mut());
+        cleanup(true)
     }
 
     #[test]
     fn test_is_empty() {
-        // A comprehensive test for `SignalVecExt::is_empty`, verifying that it
-        // correctly emits true/false and re-emits on every source change, as intended.
+        {
+            // A comprehensive test for `SignalVecExt::is_empty`, verifying that it
+            // correctly emits true/false and re-emits on every source change, as intended.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<FinalSignalOutput<bool>>();
-        // Start with a non-empty vec to test the `false` state first.
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<FinalSignalOutput<bool>>();
+            // Start with a non-empty vec to test the `false` state first.
+            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
 
-        let is_empty_signal = source_vec.signal_vec().is_empty();
-        let handle = is_empty_signal
-            .map(capture_final_output::<bool>)
-            .register(app.world_mut());
+            let is_empty_signal = source_vec.signal_vec().is_empty();
+            let handle = is_empty_signal
+                .map(capture_final_output::<bool>)
+                .register(app.world_mut());
 
-        // --- 2. Test Initial State (Non-Empty) ---
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Initial state for non-empty vec should be `false`."
-        );
+            // --- 2. Test Initial State (Non-Empty) ---
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Initial state for non-empty vec should be `false`."
+            );
 
-        // --- 3. Test Operations that REMAIN Non-Empty ---
-        // These should re-emit `false` because the underlying vector changed, even if
-        // the emptiness state did not.
+            // --- 3. Test Operations that REMAIN Non-Empty ---
+            // These should re-emit `false` because the underlying vector changed, even if
+            // the emptiness state did not.
 
-        // Push: size 2 -> 3. Still not empty.
-        source_vec.write().push("c".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Pushing to a non-empty vec should re-emit `false`."
-        );
+            // Push: size 2 -> 3. Still not empty.
+            source_vec.write(app.world_mut()).push("c".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Pushing to a non-empty vec should re-emit `false`."
+            );
 
-        // UpdateAt: size 3 -> 3. Still not empty.
-        source_vec.write().set(0, "A".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Updating a non-empty vec should re-emit `false`."
-        );
+            // UpdateAt: size 3 -> 3. Still not empty.
+            source_vec.write(app.world_mut()).set(0, "A".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Updating a non-empty vec should re-emit `false`."
+            );
 
-        // Move: size 3 -> 3. Still not empty.
-        source_vec.write().move_item(0, 2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Moving within a non-empty vec should re-emit `false`."
-        );
+            // Move: size 3 -> 3. Still not empty.
+            source_vec.write(app.world_mut()).move_item(0, 2);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Moving within a non-empty vec should re-emit `false`."
+            );
 
-        // --- 4. Test Transition to Empty ---
-        // Current size is 3. We pop three times.
-        source_vec.write().pop(); // size 3 -> 2
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Popping to size 2 should re-emit `false`."
-        );
+            // --- 4. Test Transition to Empty ---
+            // Current size is 3. We pop three times.
+            source_vec.write(app.world_mut()).pop(); // size 3 -> 2
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Popping to size 2 should re-emit `false`."
+            );
 
-        source_vec.write().pop(); // size 2 -> 1
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Popping to size 1 should re-emit `false`."
-        );
+            source_vec.write(app.world_mut()).pop(); // size 2 -> 1
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Popping to size 1 should re-emit `false`."
+            );
 
-        // This is the pop that makes it empty. The state changes from false to true.
-        source_vec.write().pop(); // size 1 -> 0
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(true),
-            "Popping the last item should emit `true`."
-        );
+            // This is the pop that makes it empty. The state changes from false to true.
+            source_vec.write(app.world_mut()).pop(); // size 1 -> 0
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(true),
+                "Popping the last item should emit `true`."
+            );
 
-        // --- 5. Test True No-Op Frame ---
-        // An update without any source diffs should not cause an emit.
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            None,
-            "Signal should not emit on a true no-op frame."
-        );
+            // --- 5. Test True No-Op Frame ---
+            // An update without any source diffs should not cause an emit.
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                None,
+                "Signal should not emit on a true no-op frame."
+            );
 
-        // --- 6. Test Transition to Non-Empty ---
-        // The state changes from true to false.
-        source_vec.write().push("z".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(false),
-            "Pushing to an empty vec should emit `false`."
-        );
+            // --- 6. Test Transition to Non-Empty ---
+            // The state changes from true to false.
+            source_vec.write(app.world_mut()).push("z".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(false),
+                "Pushing to an empty vec should emit `false`."
+            );
 
-        // --- 7. Test Clear Operation ---
-        // The state changes from false to true.
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<bool>(app.world_mut()),
-            Some(true),
-            "Clear on a non-empty vec should emit `true`."
-        );
+            // --- 7. Test Clear Operation ---
+            // The state changes from false to true.
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<bool>(app.world_mut()),
+                Some(true),
+                "Clear on a non-empty vec should emit `true`."
+            );
 
-        // --- 8. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 8. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_len() {
-        // A comprehensive test for `SignalVecExt::len`, verifying that it correctly
-        // reports the vector's length and re-emits on every source change.
-
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<FinalSignalOutput<usize>>();
-        // Start with a non-empty vec.
-        let source_vec = MutableVec::from(vec!["a".to_string(), "b".to_string()]);
-
-        let len_signal = source_vec.signal_vec().len();
-        let handle = len_signal.map(capture_final_output::<usize>).register(app.world_mut());
-
-        // --- 2. Test Initial State ---
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(2),
-            "Initial length should be 2."
-        );
-
-        // --- 3. Test Length-Changing Operations ---
-        // Push: size 2 -> 3
-        source_vec.write().push("c".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(3),
-            "Length after Push should be 3."
-        );
-
-        // InsertAt: size 3 -> 4
-        source_vec.write().insert(1, "x".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(4),
-            "Length after InsertAt should be 4."
-        );
-
-        // RemoveAt: size 4 -> 3
-        source_vec.write().remove(2); // removes "b"
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(3),
-            "Length after RemoveAt should be 3."
-        );
-
-        // Pop: size 3 -> 2
-        source_vec.write().pop(); // removes "c"
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(2),
-            "Length after Pop should be 2."
-        );
-
-        // --- 4. Test Length-Preserving Operations ---
-        // These should still re-emit the current length because the underlying vec changed.
-
-        // UpdateAt: size 2 -> 2
-        source_vec.write().set(0, "A".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(2),
-            "UpdateAt should re-emit length 2."
-        );
-
-        // Move: size 2 -> 2
-        source_vec.write().move_item(0, 1);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(2),
-            "Move should re-emit length 2."
-        );
-
-        // --- 5. Test True No-Op Frame ---
-        // An update without any source changes should not emit a new value.
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            None,
-            "Signal emitted on a no-op frame."
-        );
-
-        // --- 6. Test Batched Mutations (Net Zero Length Change) ---
         {
-            let mut writer = source_vec.write();
-            writer.push("y".to_string()); // len -> 3
-            writer.remove(0); // len -> 2
+            // A comprehensive test for `SignalVecExt::len`, verifying that it correctly
+            // reports the vector's length and re-emits on every source change.
+
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<FinalSignalOutput<usize>>();
+            // Start with a non-empty vec.
+            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+
+            let len_signal = source_vec.signal_vec().len();
+            let handle = len_signal.map(capture_final_output::<usize>).register(app.world_mut());
+
+            // --- 2. Test Initial State ---
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(2),
+                "Initial length should be 2."
+            );
+
+            // --- 3. Test Length-Changing Operations ---
+            // Push: size 2 -> 3
+            source_vec.write(app.world_mut()).push("c".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(3),
+                "Length after Push should be 3."
+            );
+
+            // InsertAt: size 3 -> 4
+            source_vec.write(app.world_mut()).insert(1, "x".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(4),
+                "Length after InsertAt should be 4."
+            );
+
+            // RemoveAt: size 4 -> 3
+            source_vec.write(app.world_mut()).remove(2); // removes "b"
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(3),
+                "Length after RemoveAt should be 3."
+            );
+
+            // Pop: size 3 -> 2
+            source_vec.write(app.world_mut()).pop(); // removes "c"
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(2),
+                "Length after Pop should be 2."
+            );
+
+            // --- 4. Test Length-Preserving Operations ---
+            // These should still re-emit the current length because the underlying vec changed.
+
+            // UpdateAt: size 2 -> 2
+            source_vec.write(app.world_mut()).set(0, "A".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(2),
+                "UpdateAt should re-emit length 2."
+            );
+
+            // Move: size 2 -> 2
+            source_vec.write(app.world_mut()).move_item(0, 1);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(2),
+                "Move should re-emit length 2."
+            );
+
+            // --- 5. Test True No-Op Frame ---
+            // An update without any source changes should not emit a new value.
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                None,
+                "Signal emitted on a no-op frame."
+            );
+
+            // --- 6. Test Batched Mutations (Net Zero Length Change) ---
+            {
+                let mut writer = source_vec.write(app.world_mut());
+                writer.push("y".to_string()); // len -> 3
+                writer.remove(0); // len -> 2
+            }
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(2),
+                "Batched mutations with net-zero length change should emit final length."
+            );
+
+            // --- 7. Test Clear Operation ---
+            // State changes from 2 to 0.
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(0),
+                "Length after Clear should be 0."
+            );
+
+            // --- 8. Test Transition from Empty ---
+            source_vec.write(app.world_mut()).push("z".to_string());
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<usize>(app.world_mut()),
+                Some(1),
+                "Length after pushing to an empty vec should be 1."
+            );
+
+            // --- 9. Cleanup ---
+            handle.cleanup(app.world_mut());
         }
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(2),
-            "Batched mutations with net-zero length change should emit final length."
-        );
 
-        // --- 7. Test Clear Operation ---
-        // State changes from 2 to 0.
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(0),
-            "Length after Clear should be 0."
-        );
-
-        // --- 8. Test Transition from Empty ---
-        source_vec.write().push("z".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<usize>(app.world_mut()),
-            Some(1),
-            "Length after pushing to an empty vec should be 1."
-        );
-
-        // --- 9. Cleanup ---
-        handle.cleanup(app.world_mut());
+        cleanup(true)
     }
 
     #[test]
     fn test_sum() {
-        // A comprehensive test for `SignalVecExt::sum`, verifying that it correctly
-        // calculates the sum and re-emits on every source change, as intended.
+        {
+            // A comprehensive test for `SignalVecExt::sum`, verifying that it correctly
+            // calculates the sum and re-emits on every source change, as intended.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<FinalSignalOutput<i32>>();
-        let source_vec = MutableVec::from(vec![10, 20]);
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<FinalSignalOutput<i32>>();
+            let source_vec = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
 
-        let sum_signal = source_vec.signal_vec().sum();
-        let handle = sum_signal.map(capture_final_output::<i32>).register(app.world_mut());
+            let sum_signal = source_vec.signal_vec().sum();
+            let handle = sum_signal.map(capture_final_output::<i32>).register(app.world_mut());
 
-        // --- 2. Test Initial State ---
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(30),
-            "Initial sum should be 30."
-        );
+            // --- 2. Test Initial State ---
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(30),
+                "Initial sum should be 30."
+            );
 
-        // --- 3. Test Value-Changing Operations ---
-        // Push: 30 -> 35
-        source_vec.write().push(5);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(35),
-            "Sum after Push should be 35."
-        );
+            // --- 3. Test Value-Changing Operations ---
+            // Push: 30 -> 35
+            source_vec.write(app.world_mut()).push(5);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(35),
+                "Sum after Push should be 35."
+            );
 
-        // UpdateAt: 35 -> 45 (updates 10 to 20)
-        source_vec.write().set(0, 20);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(45),
-            "Sum after UpdateAt should be 45."
-        );
+            // UpdateAt: 35 -> 45 (updates 10 to 20)
+            source_vec.write(app.world_mut()).set(0, 20);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(45),
+                "Sum after UpdateAt should be 45."
+            );
 
-        // RemoveAt: 45 -> 25 (removes 20 at index 1)
-        source_vec.write().remove(1);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(25),
-            "Sum after RemoveAt should be 25."
-        );
+            // RemoveAt: 45 -> 25 (removes 20 at index 1)
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(25),
+                "Sum after RemoveAt should be 25."
+            );
 
-        // Pop: 25 -> 5 (removes 20 at the end)
-        source_vec.write().pop(); // vec is now [20]
-        source_vec.write().pop(); // vec is now []
-        source_vec.write().push(5); // vec is now [5]
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(5),
-            "Sum after multiple operations should be 5."
-        );
+            // Pop: 25 -> 5 (removes 20 at the end)
+            source_vec.write(app.world_mut()).pop(); // vec is now [20]
+            source_vec.write(app.world_mut()).pop(); // vec is now []
+            source_vec.write(app.world_mut()).push(5); // vec is now [5]
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(5),
+                "Sum after multiple operations should be 5."
+            );
 
-        // --- 4. Test Sum-Preserving Operation (`Move`) ---
-        // Add another element to make move meaningful
-        source_vec.write().push(15); // vec is now [5, 15], sum is 20
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(20),
-            "Sum after adding item for move test should be 20."
-        );
+            // --- 4. Test Sum-Preserving Operation (`Move`) ---
+            // Add another element to make move meaningful
+            source_vec.write(app.world_mut()).push(15); // vec is now [5, 15], sum is 20
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(20),
+                "Sum after adding item for move test should be 20."
+            );
 
-        // Move does not change the sum, but should still re-emit the value.
-        source_vec.write().move_item(0, 1); // vec is now [15, 5], sum is still 20
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(20),
-            "Move operation should re-emit the unchanged sum."
-        );
+            // Move does not change the sum, but should still re-emit the value.
+            source_vec.write(app.world_mut()).move_item(0, 1); // vec is now [15, 5], sum is still 20
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(20),
+                "Move operation should re-emit the unchanged sum."
+            );
 
-        // --- 5. Test True No-Op Frame ---
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            None,
-            "Signal should not emit on a true no-op frame."
-        );
+            // --- 5. Test True No-Op Frame ---
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                None,
+                "Signal should not emit on a true no-op frame."
+            );
 
-        // --- 6. Test Clear Operation ---
-        // State changes from 20 to 0.
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(0),
-            "Sum after Clear should be 0."
-        );
+            // --- 6. Test Clear Operation ---
+            // State changes from 20 to 0.
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(0),
+                "Sum after Clear should be 0."
+            );
 
-        // --- 7. Test Transition from Empty ---
-        source_vec.write().push(-10);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        assert_eq!(
-            get_and_clear_final_output::<i32>(app.world_mut()),
-            Some(-10),
-            "Sum after pushing to an empty vec should be -10."
-        );
+            // --- 7. Test Transition from Empty ---
+            source_vec.write(app.world_mut()).push(-10);
+            app.update();
+            assert_eq!(
+                get_and_clear_final_output::<i32>(app.world_mut()),
+                Some(-10),
+                "Sum after pushing to an empty vec should be -10."
+            );
 
-        // --- 8. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 8. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_chain() {
-        // A comprehensive test for `SignalVecExt::chain`, covering all `VecDiff`
-        // types on both the left and right sides, as well as edge cases like empty
-        // vectors.
+        {
+            // A comprehensive test for `SignalVecExt::chain`, covering all `VecDiff`
+            // types on both the left and right sides, as well as edge cases like empty
+            // vectors.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<String>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<String>>();
 
-        let left_vec = MutableVec::from(vec!["L1".to_string(), "L2".to_string()]);
-        let right_vec = MutableVec::from(vec!["R1".to_string(), "R2".to_string()]);
+            let left_vec = MutableVecBuilder::from(["L1".to_string(), "L2".to_string()]).spawn(app.world_mut());
+            let right_vec = MutableVecBuilder::from(["R1".to_string(), "R2".to_string()]).spawn(app.world_mut());
 
-        let chained_signal = left_vec.signal_vec().chain(right_vec.signal_vec());
-        let handle = chained_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let chained_signal = left_vec.signal_vec().chain(right_vec.signal_vec());
+            let handle = chained_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        let mut current_state: Vec<String> = vec![];
+            let mut current_state: Vec<String> = vec![];
 
-        // --- 2. Initial State ---
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L1", "L2", "R1", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-            "Initial state was not correctly concatenated."
-        );
-        let left_len = || left_vec.read().len();
+            // --- 2. Initial State ---
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L1", "L2", "R1", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                "Initial state was not correctly concatenated."
+            );
+            let left_len = |world: &World| left_vec.read(world).len();
 
-        // --- 3. Left-Side Mutations ---
+            // --- 3. Left-Side Mutations ---
 
-        // Push
-        left_vec.write().push("L3".to_string());
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::InsertAt {
-                index: 2,
-                value: "L3".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L1", "L2", "L3", "R1", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Push
+            left_vec.write(app.world_mut()).push("L3".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::InsertAt {
+                    index: 2,
+                    value: "L3".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L1", "L2", "L3", "R1", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // UpdateAt
-        left_vec.write().set(0, "L1-new".to_string());
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::UpdateAt {
-                index: 0,
-                value: "L1-new".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L1-new", "L2", "L3", "R1", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // UpdateAt
+            left_vec.write(app.world_mut()).set(0, "L1-new".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::UpdateAt {
+                    index: 0,
+                    value: "L1-new".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L1-new", "L2", "L3", "R1", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Move
-        left_vec.write().move_item(2, 0); // "L3" to front
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::Move {
-                old_index: 2,
-                new_index: 0
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L3", "L1-new", "L2", "R1", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Move
+            left_vec.write(app.world_mut()).move_item(2, 0); // "L3" to front
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::Move {
+                    old_index: 2,
+                    new_index: 0
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L3", "L1-new", "L2", "R1", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Pop
-        left_vec.write().pop(); // removes "L2"
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::RemoveAt { index: 2 }]);
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L3", "L1-new", "R1", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Pop
+            left_vec.write(app.world_mut()).pop(); // removes "L2"
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::RemoveAt { index: 2 }]);
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L3", "L1-new", "R1", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // --- 4. Right-Side Mutations --- (left_len() is now 2)
+            // --- 4. Right-Side Mutations --- (left_len() is now 2)
 
-        // InsertAt
-        right_vec.write().insert(1, "R-insert".to_string());
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::InsertAt {
-                index: left_len() + 1,
-                value: "R-insert".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L3", "L1-new", "R1", "R-insert", "R2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // InsertAt
+            right_vec.write(app.world_mut()).insert(1, "R-insert".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::InsertAt {
+                    index: left_len(app.world()) + 1,
+                    value: "R-insert".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L3", "L1-new", "R1", "R-insert", "R2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Move
-        right_vec.write().move_item(0, 2); // "R1" to end
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::Move {
-                old_index: left_len(),
-                new_index: left_len() + 2
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L3", "L1-new", "R-insert", "R2", "R1"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Move
+            right_vec.write(app.world_mut()).move_item(0, 2); // "R1" to end
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::Move {
+                    old_index: left_len(app.world()),
+                    new_index: left_len(app.world()) + 2
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L3", "L1-new", "R-insert", "R2", "R1"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // --- 5. `Replace` and `Clear` ---
+            // --- 5. `Replace` and `Clear` ---
 
-        // Replace Left
-        left_vec.write().replace(vec!["LX".to_string()]);
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs); // apply diffs to check final state
-        assert_eq!(
-            current_state,
-            ["LX", "R-insert", "R2", "R1"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-            "State after replacing left is incorrect"
-        );
+            // Replace Left
+            left_vec.write(app.world_mut()).replace(vec!["LX".to_string()]);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs); // apply diffs to check final state
+            assert_eq!(
+                current_state,
+                ["LX", "R-insert", "R2", "R1"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                "State after replacing left is incorrect"
+            );
 
-        // Replace Right
-        right_vec.write().replace(vec!["RY".to_string(), "RZ".to_string()]);
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["LX", "RY", "RZ"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            "State after replacing right is incorrect"
-        );
+            // Replace Right
+            right_vec
+                .write(app.world_mut())
+                .replace(vec!["RY".to_string(), "RZ".to_string()]);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["LX", "RY", "RZ"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "State after replacing right is incorrect"
+            );
 
-        // Clear Left
-        left_vec.write().clear();
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["RY", "RZ"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            "State after clearing left is incorrect"
-        );
-        assert_eq!(left_len(), 0);
+            // Clear Left
+            left_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["RY", "RZ"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "State after clearing left is incorrect"
+            );
+            assert_eq!(left_len(app.world()), 0);
 
-        // Push to Left when it's empty
-        left_vec.write().push("L-again".to_string());
-        left_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::InsertAt {
-                index: 0,
-                value: "L-again".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L-again", "RY", "RZ"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Push to Left when it's empty
+            left_vec.write(app.world_mut()).push("L-again".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::InsertAt {
+                    index: 0,
+                    value: "L-again".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L-again", "RY", "RZ"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Clear Right
-        right_vec.write().clear();
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L-again"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            "State after clearing right is incorrect"
-        );
-        assert_eq!(right_vec.read().len(), 0);
+            // Clear Right
+            right_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L-again"].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "State after clearing right is incorrect"
+            );
+            assert_eq!(right_vec.read(app.world()).len(), 0);
 
-        // Push to Right when it's empty
-        right_vec.write().push("R-again".to_string());
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::Push {
-                value: "R-again".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["L-again", "R-again"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
-        );
+            // Push to Right when it's empty
+            right_vec.write(app.world_mut()).push("R-again".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::Push {
+                    value: "R-again".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["L-again", "R-again"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            );
 
-        // --- 6. Batched Diffs ---
-        left_vec.write().pop(); // L-again is gone
-        right_vec.write().push("R-batch".to_string());
-        left_vec.flush_into_world(app.world_mut());
-        right_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["R-again", "R-batch"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
-        );
+            // --- 6. Batched Diffs ---
+            left_vec.write(app.world_mut()).pop(); // L-again is gone
+            right_vec.write(app.world_mut()).push("R-batch".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["R-again", "R-batch"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            );
 
-        // --- 7. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 7. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_intersperse() {
-        // A comprehensive test for `SignalVecExt::intersperse`, covering all `VecDiff`
-        // types and various edge cases.
+        {
+            // A comprehensive test for `SignalVecExt::intersperse`, covering all `VecDiff`
+            // types and various edge cases.
 
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<String>>();
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<String>>();
 
-        let separator = "sep".to_string();
-        let source_vec = MutableVec::new(); // Start empty for initial tests
+            let separator = "sep".to_string();
+            let source_vec = MutableVec::from(app.world_mut()); // Start empty for initial tests
 
-        let interspersed_signal = source_vec.signal_vec().intersperse(separator.clone());
-        let handle = interspersed_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let interspersed_signal = source_vec.signal_vec().intersperse(separator.clone());
+            let handle = interspersed_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        let mut current_state: Vec<String> = vec![];
+            let mut current_state: Vec<String> = vec![];
 
-        // --- 2. Test Initial and Edge Cases ---
+            // --- 2. Test Initial and Edge Cases ---
 
-        // Initial state is empty.
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert!(diffs.is_empty(), "Initial empty vec should produce no diffs.");
-        assert!(current_state.is_empty());
+            // Initial state is empty.
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert!(diffs.is_empty(), "Initial empty vec should produce no diffs.");
+            assert!(current_state.is_empty());
 
-        // Replace with empty
-        source_vec.write().replace(Vec::<String>::new());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::Replace { values: vec![] }]);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Replace with empty
+            source_vec.write(app.world_mut()).replace(Vec::<String>::new());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::Replace { values: vec![] }]);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // Replace with one item (no separators)
-        source_vec.write().replace(vec!["A".to_string()]);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::Replace {
-                values: vec!["A".to_string()]
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["A".to_string()]);
+            // Replace with one item (no separators)
+            source_vec.write(app.world_mut()).replace(vec!["A".to_string()]);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::Replace {
+                    values: vec!["A".to_string()]
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["A".to_string()]);
 
-        // Replace with multiple items
-        source_vec.write().replace(vec!["A".to_string(), "B".to_string()]);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::Replace {
-                values: vec!["A".to_string(), separator.clone(), "B".to_string()]
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["A".to_string(), separator.clone(), "B".to_string()]);
+            // Replace with multiple items
+            source_vec
+                .write(app.world_mut())
+                .replace(vec!["A".to_string(), "B".to_string()]);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::Replace {
+                    values: vec!["A".to_string(), separator.clone(), "B".to_string()]
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["A".to_string(), separator.clone(), "B".to_string()]);
 
-        // --- 3. Test Push & Pop ---
+            // --- 3. Test Push & Pop ---
 
-        // Push to multi-item vec
-        source_vec.write().push("C".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["A", "sep", "B", "sep", "C"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Push to multi-item vec
+            source_vec.write(app.world_mut()).push("C".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["A", "sep", "B", "sep", "C"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Pop from multi-item vec
-        source_vec.write().pop();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["A", "sep", "B"].iter().map(|&s| s.to_string()).collect::<Vec<_>>()
-        );
+            // Pop from multi-item vec
+            source_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["A", "sep", "B"].iter().map(|&s| s.to_string()).collect::<Vec<_>>()
+            );
 
-        // Pop until one item left
-        source_vec.write().pop();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["A".to_string()]);
+            // Pop until one item left
+            source_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["A".to_string()]);
 
-        // Pop the last item
-        source_vec.write().pop();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Pop the last item
+            source_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // Push to empty vec
-        source_vec.write().push("Z".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec!["Z".to_string()]);
+            // Push to empty vec
+            source_vec.write(app.world_mut()).push("Z".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec!["Z".to_string()]);
 
-        // --- 4. Test Insert & Remove ---
-        source_vec.write().replace(vec!["A".to_string(), "C".to_string()]);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<String>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            ["A", "sep", "C"].iter().map(|&s| s.to_string()).collect::<Vec<_>>()
-        );
+            // --- 4. Test Insert & Remove ---
+            source_vec
+                .write(app.world_mut())
+                .replace(vec!["A".to_string(), "C".to_string()]);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<String>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                ["A", "sep", "C"].iter().map(|&s| s.to_string()).collect::<Vec<_>>()
+            );
 
-        // Insert in middle
-        source_vec.write().insert(1, "B".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["A", "sep", "B", "sep", "C"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Insert in middle
+            source_vec.write(app.world_mut()).insert(1, "B".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["A", "sep", "B", "sep", "C"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Insert at beginning
-        source_vec.write().insert(0, "S".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["S", "sep", "A", "sep", "B", "sep", "C"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Insert at beginning
+            source_vec.write(app.world_mut()).insert(0, "S".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["S", "sep", "A", "sep", "B", "sep", "C"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Insert at end (should behave like push)
-        source_vec.write().insert(4, "E".to_string());
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["S", "sep", "A", "sep", "B", "sep", "C", "sep", "E"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>(),
-            "InsertAt at end failed"
-        );
+            // Insert at end (should behave like push)
+            source_vec.write(app.world_mut()).insert(4, "E".to_string());
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["S", "sep", "A", "sep", "B", "sep", "C", "sep", "E"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>(),
+                "InsertAt at end failed"
+            );
 
-        // Remove from middle ("A")
-        source_vec.write().remove(1);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["S", "sep", "B", "sep", "C", "sep", "E"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Remove from middle ("A")
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["S", "sep", "B", "sep", "C", "sep", "E"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Remove from end ("E")
-        source_vec.write().remove(3);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["S", "sep", "B", "sep", "C"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // Remove from end ("E")
+            source_vec.write(app.world_mut()).remove(3);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["S", "sep", "B", "sep", "C"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // --- 5. Test Update & Move ---
-        // Update
-        source_vec.write().set(1, "Beta".to_string()); // "B" -> "Beta"
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(
-            diffs,
-            vec![VecDiff::UpdateAt {
-                index: 2,
-                value: "Beta".to_string()
-            }]
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["S", "sep", "Beta", "sep", "C"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>()
-        );
+            // --- 5. Test Update & Move ---
+            // Update
+            source_vec.write(app.world_mut()).set(1, "Beta".to_string()); // "B" -> "Beta"
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(
+                diffs,
+                vec![VecDiff::UpdateAt {
+                    index: 2,
+                    value: "Beta".to_string()
+                }]
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["S", "sep", "Beta", "sep", "C"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        // Move
-        // Source: ["S", "Beta", "C"] -> move 0 to 2 -> ["Beta", "C", "S"]
-        // Interspersed: ["S", "sep", "Beta", "sep", "C"] -> ["Beta", "sep", "C", "sep", "S"]
-        source_vec.write().move_item(0, 2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        // The exact diffs for Move can be complex; we verify the final state.
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            ["Beta", "sep", "C", "sep", "S"]
-                .iter()
-                .map(|&s| s.to_string())
-                .collect::<Vec<_>>(),
-            "Move failed"
-        );
+            // Move
+            // Source: ["S", "Beta", "C"] -> move 0 to 2 -> ["Beta", "C", "S"]
+            // Interspersed: ["S", "sep", "Beta", "sep", "C"] -> ["Beta", "sep", "C", "sep", "S"]
+            source_vec.write(app.world_mut()).move_item(0, 2);
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            // The exact diffs for Move can be complex; we verify the final state.
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                ["Beta", "sep", "C", "sep", "S"]
+                    .iter()
+                    .map(|&s| s.to_string())
+                    .collect::<Vec<_>>(),
+                "Move failed"
+            );
 
-        // --- 6. Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<String>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::Clear]);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // --- 6. Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<String>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::Clear]);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
 
-        // --- 7. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 7. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     /// A helper enum to represent the items in our final interspersed vector,
@@ -6403,491 +6486,489 @@ mod tests {
     ///    `Move`, etc.) occur in the source vector.
     #[test]
     fn test_intersperse_with() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        // Use `insert_resource` with an explicit value, as `ItemOrSep` doesn't have a Default.
-        app.insert_resource(SignalVecOutput::<ItemOrSep>(Vec::new()));
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            // Use `insert_resource` with an explicit value, as `ItemOrSep` doesn't have a Default.
+            app.insert_resource(SignalVecOutput::<ItemOrSep>(Vec::new()));
 
-        let source_vec = MutableVec::from(vec![10u32, 20, 30]);
+            let source_vec = MutableVecBuilder::from([10u32, 20, 30]).spawn(app.world_mut());
 
-        // CORRECTION: The closure's input parameter must be the concrete type
-        // `signal::Source<Option<usize>>`, not a generic `impl Signal`. This satisfies
-        // the `IntoSystem` trait bound.
-        let separator_factory =
-            |In(index_signal): In<crate::signal::Source<Option<usize>>>| ItemOrSep::Sep(index_signal);
+            // CORRECTION: The closure's input parameter must be the concrete type
+            // `signal::Source<Option<usize>>`, not a generic `impl Signal`. This satisfies
+            // the `IntoSystem` trait bound.
+            let separator_factory =
+                |In(index_signal): In<crate::signal::Source<Option<usize>>>| ItemOrSep::Sep(index_signal);
 
-        let interspersed_signal = source_vec
-            .signal_vec()
-            .map_in(ItemOrSep::Item) // Map source items into our test enum
-            .intersperse_with(separator_factory);
+            let interspersed_signal = source_vec
+                .signal_vec()
+                .map_in(ItemOrSep::Item) // Map source items into our test enum
+                .intersperse_with(separator_factory);
 
-        let handle = interspersed_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = interspersed_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        // This local vec will mirror the state of the final interspersed signal.
-        let mut current_state: Vec<ItemOrSep> = vec![];
+            // This local vec will mirror the state of the final interspersed signal.
+            let mut current_state: Vec<ItemOrSep> = vec![];
 
-        // --- 2. Test Initial State ---
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
+            // --- 2. Test Initial State ---
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
 
-        // CORRECTION: Use the correct `signal::Source` for the placeholder.
-        // We also need to provide the type hint for the closure to resolve ambiguity.
-        let placeholder_sep = ItemOrSep::Sep(SignalBuilder::from_system(|_: In<()>| None::<usize>));
-        assert_eq!(
-            current_state,
-            vec![
-                ItemOrSep::Item(10),
-                placeholder_sep.clone(),
-                ItemOrSep::Item(20),
-                placeholder_sep.clone(),
-                ItemOrSep::Item(30),
-            ],
-            "Initial structure is incorrect."
-        );
-
-        // Verify the indices of the separators by registering and polling their signals.
-        let mut handles_to_clean = Vec::new();
-        let sep_signals: Vec<_> = current_state
-            .iter()
-            .filter_map(|x| match x {
-                ItemOrSep::Sep(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(sep_signals.len(), 2);
-        let h1 = sep_signals[0].clone().register(app.world_mut());
-        let h2 = sep_signals[1].clone().register(app.world_mut());
-        assert_eq!(poll_index(app.world_mut(), &h1), Some(0));
-        assert_eq!(poll_index(app.world_mut(), &h2), Some(1));
-        handles_to_clean.push(h1);
-        handles_to_clean.push(h2);
-
-        // --- 3. Test Push ---
-        source_vec.write().push(40);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
-
-        assert_eq!(current_state.len(), 7, "State length after push is incorrect.");
-        assert_eq!(current_state[6], ItemOrSep::Item(40));
-
-        if let ItemOrSep::Sep(signal) = &current_state[5] {
-            let h = signal.clone().register(app.world_mut());
+            // CORRECTION: Use the correct `signal::Source` for the placeholder.
+            // We also need to provide the type hint for the closure to resolve ambiguity.
+            let placeholder_sep = ItemOrSep::Sep(SignalBuilder::from_system(|_: In<()>| None::<usize>));
             assert_eq!(
-                poll_index(app.world_mut(), &h),
-                Some(2),
-                "New separator's index is incorrect."
+                current_state,
+                vec![
+                    ItemOrSep::Item(10),
+                    placeholder_sep.clone(),
+                    ItemOrSep::Item(20),
+                    placeholder_sep.clone(),
+                    ItemOrSep::Item(30),
+                ],
+                "Initial structure is incorrect."
             );
-            handles_to_clean.push(h);
-        } else {
-            panic!("Expected a separator at index 5");
+
+            // Verify the indices of the separators by registering and polling their signals.
+            let mut handles_to_clean = Vec::new();
+            let sep_signals: Vec<_> = current_state
+                .iter()
+                .filter_map(|x| match x {
+                    ItemOrSep::Sep(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(sep_signals.len(), 2);
+            let h1 = sep_signals[0].clone().register(app.world_mut());
+            let h2 = sep_signals[1].clone().register(app.world_mut());
+            assert_eq!(poll_index(app.world_mut(), &h1), Some(0));
+            assert_eq!(poll_index(app.world_mut(), &h2), Some(1));
+            handles_to_clean.push(h1);
+            handles_to_clean.push(h2);
+
+            // --- 3. Test Push ---
+            source_vec.write(app.world_mut()).push(40);
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
+
+            assert_eq!(current_state.len(), 7, "State length after push is incorrect.");
+            assert_eq!(current_state[6], ItemOrSep::Item(40));
+
+            if let ItemOrSep::Sep(signal) = &current_state[5] {
+                let h = signal.clone().register(app.world_mut());
+                assert_eq!(
+                    poll_index(app.world_mut(), &h),
+                    Some(2),
+                    "New separator's index is incorrect."
+                );
+                handles_to_clean.push(h);
+            } else {
+                panic!("Expected a separator at index 5");
+            }
+
+            // --- 4. Test RemoveAt (from middle) and Index Reactivity ---
+            source_vec.write(app.world_mut()).remove(1); // Removes 20
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
+
+            assert_eq!(current_state.len(), 5, "State length after RemoveAt is incorrect.");
+            assert_eq!(
+                current_state,
+                vec![
+                    ItemOrSep::Item(10),
+                    placeholder_sep.clone(),
+                    ItemOrSep::Item(30),
+                    placeholder_sep.clone(),
+                    ItemOrSep::Item(40),
+                ],
+                "Structure after RemoveAt is incorrect."
+            );
+
+            // The crucial test: the separator that was after `30` (original index 2) should
+            // now have its index signal updated to `1`.
+            let sep_signals_after_remove: Vec<_> = current_state
+                .iter()
+                .filter_map(|x| {
+                    if let ItemOrSep::Sep(s) = x {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(sep_signals_after_remove.len(), 2);
+            let h_rem_1 = sep_signals_after_remove[0].clone().register(app.world_mut());
+            let h_rem_2 = sep_signals_after_remove[1].clone().register(app.world_mut());
+            assert_eq!(poll_index(app.world_mut(), &h_rem_1), Some(0));
+            assert_eq!(
+                poll_index(app.world_mut(), &h_rem_2),
+                Some(1),
+                "Separator index did not reactively update after RemoveAt."
+            );
+            handles_to_clean.push(h_rem_1);
+            handles_to_clean.push(h_rem_2);
+
+            // --- 5. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
+            assert!(current_state.is_empty(), "State after Clear should be empty.");
+
+            // --- 6. Final Cleanup ---
+            handle.cleanup(app.world_mut());
+            for h in handles_to_clean {
+                h.cleanup(app.world_mut());
+            }
+            app.update(); // Run one last time to process cleanup commands.
         }
 
-        // --- 4. Test RemoveAt (from middle) and Index Reactivity ---
-        source_vec.write().remove(1); // Removes 20
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
-
-        assert_eq!(current_state.len(), 5, "State length after RemoveAt is incorrect.");
-        assert_eq!(
-            current_state,
-            vec![
-                ItemOrSep::Item(10),
-                placeholder_sep.clone(),
-                ItemOrSep::Item(30),
-                placeholder_sep.clone(),
-                ItemOrSep::Item(40),
-            ],
-            "Structure after RemoveAt is incorrect."
-        );
-
-        // The crucial test: the separator that was after `30` (original index 2) should
-        // now have its index signal updated to `1`.
-        let sep_signals_after_remove: Vec<_> = current_state
-            .iter()
-            .filter_map(|x| {
-                if let ItemOrSep::Sep(s) = x {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(sep_signals_after_remove.len(), 2);
-        let h_rem_1 = sep_signals_after_remove[0].clone().register(app.world_mut());
-        let h_rem_2 = sep_signals_after_remove[1].clone().register(app.world_mut());
-        assert_eq!(poll_index(app.world_mut(), &h_rem_1), Some(0));
-        assert_eq!(
-            poll_index(app.world_mut(), &h_rem_2),
-            Some(1),
-            "Separator index did not reactively update after RemoveAt."
-        );
-        handles_to_clean.push(h_rem_1);
-        handles_to_clean.push(h_rem_2);
-
-        // --- 5. Test Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<ItemOrSep>(app.world_mut()));
-        assert!(current_state.is_empty(), "State after Clear should be empty.");
-
-        // --- 6. Final Cleanup ---
-        handle.cleanup(app.world_mut());
-        for h in handles_to_clean {
-            h.cleanup(app.world_mut());
-        }
-        app.update(); // Run one last time to process cleanup commands.
+        cleanup(true)
     }
 
     #[test]
     fn test_sort_by() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<(u32, char)>>();
-        let source_vec = MutableVec::from(vec![(3, 'c'), (1, 'a'), (4, 'd')]);
-        let compare_system = |In((left, right)): In<((u32, char), (u32, char))>| left.0.cmp(&right.0);
-        let sorted_signal = source_vec.signal_vec().sort_by(compare_system);
-        let handle = sorted_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
-        let mut current_state: Vec<(u32, char)> = vec![];
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<(u32, char)>>();
+            let source_vec = MutableVecBuilder::from([(3, 'c'), (1, 'a'), (4, 'd')]).spawn(app.world_mut());
+            let compare_system = |In((left, right)): In<((u32, char), (u32, char))>| left.0.cmp(&right.0);
+            let sorted_signal = source_vec.signal_vec().sort_by(compare_system);
+            let handle = sorted_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
+            let mut current_state: Vec<(u32, char)> = vec![];
 
-        // --- 2. Test Initial State ---
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![(1, 'a'), (3, 'c'), (4, 'd')],
-            "Initial state is not correctly sorted."
-        );
+            // --- 2. Test Initial State ---
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![(1, 'a'), (3, 'c'), (4, 'd')],
+                "Initial state is not correctly sorted."
+            );
 
-        // --- 3. Test Push ---
-        source_vec.write().push((2, 'b'));
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: (2, 'b')
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]);
-
-        // --- 4. Test RemoveAt ---
-        source_vec.write().remove(1); // Removes (1, 'a')
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![(2, 'b'), (3, 'c'), (4, 'd')]);
-
-        // --- 5. Test UpdateAt ---
-        // Case A: Update without changing sort order.
-        source_vec.write().set(0, (3, 'C')); // Was (3, 'c')
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(diffs.len(), 1);
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 1,
-                value: (3, 'C')
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![(2, 'b'), (3, 'C'), (4, 'd')]);
-
-        // Case B: Update that changes sort order.
-        // Source is now [(3, 'C'), (4, 'd'), (2, 'b')]. Sorted is [(2, 'b'), (3, 'C'), (4, 'd')]
-        // Update (4, 'd') at source index 1 to (0, 'z').
-        // The old item was at sorted index 2. The new item should be at sorted index 0.
-        source_vec.write().set(1, (0, 'z'));
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(diffs.len(), 2, "Update with sort change should be Remove+Insert.");
-        assert_eq!(
-            diffs,
-            vec![
-                VecDiff::RemoveAt { index: 2 }, // Remove (4, 'd') from old sorted pos
+            // --- 3. Test Push ---
+            source_vec.write(app.world_mut()).push((2, 'b'));
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(
+                diffs[0],
                 VecDiff::InsertAt {
-                    index: 0,
-                    value: (0, 'z')
-                }  // Insert (0, 'z') at new sorted pos
-            ],
-            "Updating key did not produce correct move diffs."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![(0, 'z'), (2, 'b'), (3, 'C')],
-            "State after moving update is incorrect."
-        );
+                    index: 1,
+                    value: (2, 'b')
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]);
 
-        // --- 6. Test Move (in source) ---
-        // Source: [(3, 'C'), (0, 'z'), (2, 'b')] -> move 0 to 2 -> [(0, 'z'), (2, 'b'), (3, 'C')]
-        // Sorted output should not change at all.
-        source_vec.write().move_item(0, 2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert!(diffs.is_empty(), "Moving in source should not affect sorted output.");
-        assert_eq!(current_state, vec![(0, 'z'), (2, 'b'), (3, 'C')]);
+            // --- 4. Test RemoveAt ---
+            source_vec.write(app.world_mut()).remove(1); // Removes (1, 'a')
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![(2, 'b'), (3, 'c'), (4, 'd')]);
 
-        // --- 7. Test Stability (Duplicate Keys) ---
-        source_vec.write().push((3, 'c'));
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(
-            &mut current_state,
-            &get_and_clear_output::<(u32, char)>(app.world_mut()),
-        );
-        assert_eq!(
-            current_state,
-            vec![(0, 'z'), (2, 'b'), (3, 'C'), (3, 'c')],
-            "Stability with duplicate keys failed."
-        );
+            // --- 5. Test UpdateAt ---
+            // Case A: Update without changing sort order.
+            source_vec.write(app.world_mut()).set(0, (3, 'C')); // Was (3, 'c')
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 1,
+                    value: (3, 'C')
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![(2, 'b'), (3, 'C'), (4, 'd')]);
 
-        // --- 8. Test Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::Clear]);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
+            // Case B: Update that changes sort order.
+            // Source is now [(3, 'C'), (4, 'd'), (2, 'b')]. Sorted is [(2, 'b'), (3, 'C'), (4, 'd')]
+            // Update (4, 'd') at source index 1 to (0, 'z').
+            // The old item was at sorted index 2. The new item should be at sorted index 0.
+            source_vec.write(app.world_mut()).set(1, (0, 'z'));
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(diffs.len(), 2, "Update with sort change should be Remove+Insert.");
+            assert_eq!(
+                diffs,
+                vec![
+                    VecDiff::RemoveAt { index: 2 }, // Remove (4, 'd') from old sorted pos
+                    VecDiff::InsertAt {
+                        index: 0,
+                        value: (0, 'z')
+                    }  // Insert (0, 'z') at new sorted pos
+                ],
+                "Updating key did not produce correct move diffs."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![(0, 'z'), (2, 'b'), (3, 'C')],
+                "State after moving update is incorrect."
+            );
 
-        // --- 9. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 6. Test Move (in source) ---
+            // Source: [(3, 'C'), (0, 'z'), (2, 'b')] -> move 0 to 2 -> [(0, 'z'), (2, 'b'), (3, 'C')]
+            // Sorted output should not change at all.
+            source_vec.write(app.world_mut()).move_item(0, 2);
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert!(diffs.is_empty(), "Moving in source should not affect sorted output.");
+            assert_eq!(current_state, vec![(0, 'z'), (2, 'b'), (3, 'C')]);
+
+            // --- 7. Test Stability (Duplicate Keys) ---
+            source_vec.write(app.world_mut()).push((3, 'c'));
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<(u32, char)>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![(0, 'z'), (2, 'b'), (3, 'C'), (3, 'c')],
+                "Stability with duplicate keys failed."
+            );
+
+            // --- 8. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::Clear]);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
+
+            // --- 9. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_sort_by_cmp() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // The source vector, intentionally unsorted.
-        let source_vec = MutableVec::from(vec![5, 1, 4, -2, 3]);
+            // The source vector, intentionally unsorted.
+            let source_vec = MutableVecBuilder::from([5, 1, 4, -2, 3]).spawn(app.world_mut());
 
-        // The signal chain under test, using the convenience method.
-        let sorted_signal = source_vec.signal_vec().sort_by_cmp();
+            // The signal chain under test, using the convenience method.
+            let sorted_signal = source_vec.signal_vec().sort_by_cmp();
 
-        let handle = sorted_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
+            let handle = sorted_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
 
-        let mut current_state: Vec<i32> = vec![];
+            let mut current_state: Vec<i32> = vec![];
 
-        // --- 2. Test Initial State ---
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![-2, 1, 3, 4, 5],
-            "Initial state is not correctly sorted by cmp."
-        );
+            // --- 2. Test Initial State ---
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![-2, 1, 3, 4, 5],
+                "Initial state is not correctly sorted by cmp."
+            );
 
-        // --- 3. Test Push ---
-        // Push an item that should be inserted in the middle.
-        source_vec.write().push(2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt { index: 2, value: 2 },
-            "Pushing 2 should insert at sorted index 2."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(current_state, vec![-2, 1, 2, 3, 4, 5], "State after Push is incorrect.");
+            // --- 3. Test Push ---
+            // Push an item that should be inserted in the middle.
+            source_vec.write(app.world_mut()).push(2);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt { index: 2, value: 2 },
+                "Pushing 2 should insert at sorted index 2."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![-2, 1, 2, 3, 4, 5], "State after Push is incorrect.");
 
-        // --- 4. Test RemoveAt ---
-        // Remove '4' from the source vec.
-        // Source is now: `[5, 1, 4, -2, 3, 2]` -> remove at index 2 (`4`)
-        // Source becomes: `[5, 1, -2, 3, 2]`
-        // Sorted output before was: `[-2, 1, 2, 3, 4, 5]`
-        // The item '4' is at sorted index 4.
-        source_vec.write().remove(2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::RemoveAt { index: 4 },
-            "Removing 4 should remove at sorted index 4."
-        );
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![-2, 1, 2, 3, 5],
-            "State after RemoveAt is incorrect."
-        );
+            // --- 4. Test RemoveAt ---
+            // Remove '4' from the source vec.
+            // Source is now: `[5, 1, 4, -2, 3, 2]` -> remove at index 2 (`4`)
+            // Source becomes: `[5, 1, -2, 3, 2]`
+            // Sorted output before was: `[-2, 1, 2, 3, 4, 5]`
+            // The item '4' is at sorted index 4.
+            source_vec.write(app.world_mut()).remove(2);
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::RemoveAt { index: 4 },
+                "Removing 4 should remove at sorted index 4."
+            );
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![-2, 1, 2, 3, 5],
+                "State after RemoveAt is incorrect."
+            );
 
-        // --- 5. Test Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<i32>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::Clear]);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty(), "State after clear should be empty.");
+            // --- 5. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::Clear]);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty(), "State after clear should be empty.");
 
-        // --- 6. Cleanup ---
-        handle.cleanup(app.world_mut());
+            // --- 6. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
     }
 
     #[test]
     fn test_sort_by_key() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
+        {
+            // --- 1. Setup ---
+            let mut app = create_test_app();
 
-        #[derive(Clone, Debug, PartialEq, Default)]
-        struct DataItem {
-            id: i32,
-            name: &'static str,
+            #[derive(Clone, Debug, PartialEq, Default)]
+            struct DataItem {
+                id: i32,
+                name: &'static str,
+            }
+
+            app.init_resource::<SignalVecOutput<DataItem>>();
+
+            let source_vec = MutableVecBuilder::from([
+                DataItem { id: 3, name: "C" },
+                DataItem { id: 1, name: "A" },
+                DataItem { id: 4, name: "D" },
+            ])
+            .spawn(app.world_mut());
+
+            let key_system = |In(item): In<DataItem>| item.id;
+            let sorted_signal = source_vec.signal_vec().sort_by_key(key_system);
+            let handle = sorted_signal
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
+
+            let mut current_state: Vec<DataItem> = vec![];
+
+            // --- 2. Test Initial State ---
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(
+                current_state,
+                vec![
+                    DataItem { id: 1, name: "A" },
+                    DataItem { id: 3, name: "C" },
+                    DataItem { id: 4, name: "D" }
+                ],
+                "Initial state is not correctly sorted by key."
+            );
+
+            // --- 3. Test Push ---
+            source_vec.write(app.world_mut()).push(DataItem { id: 2, name: "B" });
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::InsertAt {
+                    index: 1,
+                    value: DataItem { id: 2, name: "B" }
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+
+            // --- 4. Test RemoveAt ---
+            source_vec.write(app.world_mut()).remove(1); // Removes (1, 'A')
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
+            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
+            apply_diffs(&mut current_state, diffs);
+
+            // --- 5. Test UpdateAt ---
+            // Case A: Update without changing the key.
+            source_vec
+                .write(app.world_mut())
+                .set(0, DataItem { id: 3, name: "C-new" });
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Update without key change should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::UpdateAt {
+                    index: 1,
+                    value: DataItem { id: 3, name: "C-new" }
+                }
+            );
+            apply_diffs(&mut current_state, diffs);
+
+            // Case B: Update that changes the key and sort order.
+            source_vec.write(app.world_mut()).set(1, DataItem { id: 0, name: "Z" }); // was (4, 'D')
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs.len(), 2, "Update with key change should be Remove+Insert.");
+            assert_eq!(
+                diffs,
+                vec![
+                    VecDiff::RemoveAt { index: 2 },
+                    VecDiff::InsertAt {
+                        index: 0,
+                        value: DataItem { id: 0, name: "Z" }
+                    }
+                ],
+                "Updating key did not produce correct move diffs."
+            );
+            apply_diffs(&mut current_state, diffs);
+
+            // --- 6. Test Move (in source) ---
+            source_vec.write(app.world_mut()).move_item(0, 2);
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert!(diffs.is_empty(), "Moving in source should not affect sorted output.");
+
+            // --- 7. Test Stability (Duplicate Keys) ---
+            source_vec
+                .write(app.world_mut())
+                .push(DataItem { id: 3, name: "c-dup" });
+            app.update();
+            apply_diffs(&mut current_state, get_and_clear_output::<DataItem>(app.world_mut()));
+            assert_eq!(
+                current_state,
+                vec![
+                    DataItem { id: 0, name: "Z" },
+                    DataItem { id: 2, name: "B" },
+                    DataItem { id: 3, name: "C-new" },
+                    DataItem { id: 3, name: "c-dup" }
+                ],
+                "Stability with duplicate keys failed."
+            );
+
+            // --- 8. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_and_clear_output::<DataItem>(app.world_mut());
+            assert_eq!(diffs, vec![VecDiff::Clear]);
+            apply_diffs(&mut current_state, diffs);
+            assert!(current_state.is_empty());
+
+            // --- 9. Cleanup ---
+            handle.cleanup(app.world_mut());
         }
 
-        app.init_resource::<SignalVecOutput<DataItem>>();
-
-        let source_vec = MutableVec::from(vec![
-            DataItem { id: 3, name: "C" },
-            DataItem { id: 1, name: "A" },
-            DataItem { id: 4, name: "D" },
-        ]);
-
-        let key_system = |In(item): In<DataItem>| item.id;
-        let sorted_signal = source_vec.signal_vec().sort_by_key(key_system);
-        let handle = sorted_signal
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
-
-        let mut current_state: Vec<DataItem> = vec![];
-
-        // --- 2. Test Initial State ---
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
-        apply_diffs(&mut current_state, &diffs);
-        assert_eq!(
-            current_state,
-            vec![
-                DataItem { id: 1, name: "A" },
-                DataItem { id: 3, name: "C" },
-                DataItem { id: 4, name: "D" }
-            ],
-            "Initial state is not correctly sorted by key."
-        );
-
-        // --- 3. Test Push ---
-        source_vec.write().push(DataItem { id: 2, name: "B" });
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::InsertAt {
-                index: 1,
-                value: DataItem { id: 2, name: "B" }
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-
-        // --- 4. Test RemoveAt ---
-        source_vec.write().remove(1); // Removes (1, 'A')
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
-        assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
-        apply_diffs(&mut current_state, &diffs);
-
-        // --- 5. Test UpdateAt ---
-        // Case A: Update without changing the key.
-        source_vec.write().set(0, DataItem { id: 3, name: "C-new" });
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Update without key change should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::UpdateAt {
-                index: 1,
-                value: DataItem { id: 3, name: "C-new" }
-            }
-        );
-        apply_diffs(&mut current_state, &diffs);
-
-        // Case B: Update that changes the key and sort order.
-        source_vec.write().set(1, DataItem { id: 0, name: "Z" }); // was (4, 'D')
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs.len(), 2, "Update with key change should be Remove+Insert.");
-        assert_eq!(
-            diffs,
-            vec![
-                VecDiff::RemoveAt { index: 2 },
-                VecDiff::InsertAt {
-                    index: 0,
-                    value: DataItem { id: 0, name: "Z" }
-                }
-            ],
-            "Updating key did not produce correct move diffs."
-        );
-        apply_diffs(&mut current_state, &diffs);
-
-        // --- 6. Test Move (in source) ---
-        source_vec.write().move_item(0, 2);
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert!(diffs.is_empty(), "Moving in source should not affect sorted output.");
-
-        // --- 7. Test Stability (Duplicate Keys) ---
-        source_vec.write().push(DataItem { id: 3, name: "c-dup" });
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        apply_diffs(&mut current_state, &get_and_clear_output::<DataItem>(app.world_mut()));
-        assert_eq!(
-            current_state,
-            vec![
-                DataItem { id: 0, name: "Z" },
-                DataItem { id: 2, name: "B" },
-                DataItem { id: 3, name: "C-new" },
-                DataItem { id: 3, name: "c-dup" }
-            ],
-            "Stability with duplicate keys failed."
-        );
-
-        // --- 8. Test Clear ---
-        source_vec.write().clear();
-        source_vec.flush_into_world(app.world_mut());
-        app.update();
-        let diffs = get_and_clear_output::<DataItem>(app.world_mut());
-        assert_eq!(diffs, vec![VecDiff::Clear]);
-        apply_diffs(&mut current_state, &diffs);
-        assert!(current_state.is_empty());
-
-        // --- 9. Cleanup ---
-        handle.cleanup(app.world_mut());
+        cleanup(true)
     }
 
     /* #[test]
@@ -6929,7 +7010,6 @@ mod tests {
         // --- 2. Inner Vec Change: Push to `vec_a` ---
         // A push to the _first_ inner vector should insert at the correct global index.
         vec_a.write().push(12);
-        vec_a.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -6939,13 +7019,12 @@ mod tests {
             VecDiff::InsertAt { index: 2, value: 12 },
             "Should insert at index 2 (end of vec_a's block)."
         );
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         assert_eq!(current_state, vec![10, 11, 12, 20]);
 
         // --- 3. Inner Vec Change: Push to `vec_b` ---
         // A push to the _second_ inner vector should insert at an offset index.
         vec_b.write().push(21);
-        vec_b.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -6956,19 +7035,18 @@ mod tests {
             VecDiff::InsertAt { index: 4, value: 21 },
             "Should insert at index 4 (end of vec_b's block)."
         );
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         assert_eq!(current_state, vec![10, 11, 12, 20, 21]);
 
         // --- 4. Outer Vec Change: Remove `vec_b` ---
         // Removing an inner vector should remove its entire block of items.
         source_of_vecs.write().remove(1); // Removes vec_b
-        source_of_vecs.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
         // The implementation should produce two RemoveAt diffs for vec_b's two items.
         assert_eq!(diffs.len(), 2, "Removing vec_b should produce 2 diffs.");
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         // The final state should no longer contain 20 or 21.
         assert_eq!(
             current_state,
@@ -6980,7 +7058,6 @@ mod tests {
         // --- 5. Cleanup Verification ---
         // Updates to the removed `vec_b` should now be ignored.
         vec_b.write().push(99);
-        vec_b.flush_into_world(app.world_mut());
         app.update();
         let diffs = get_and_clear_output::<u32>(app.world_mut());
         assert!(diffs.is_empty(), "Should ignore diffs from the removed vec_b.");
@@ -6988,13 +7065,12 @@ mod tests {
         // --- 6. Outer Vec Change: Push a new vector ---
         let vec_d = MutableVec::from([40u32, 41]);
         source_of_vecs.write().push(vec_d.signal_vec());
-        source_of_vecs.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
         // Pushing a new inner vector should add its initial items to the end.
         assert_eq!(diffs.len(), 2, "Pushing new vec_d should produce 2 diffs.");
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         assert_eq!(
             current_state,
             vec![10, 11, 12, 40, 41],
@@ -7006,11 +7082,10 @@ mod tests {
         // Current state: [10, 11, 12, (empty), 40, 41].
         // Move vec_d (index 2) to the front (index 0).
         source_of_vecs.write().move_item(2, 0);
-        source_of_vecs.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         assert_eq!(
             current_state,
             vec![40, 41, 10, 11, 12],
@@ -7020,39 +7095,14 @@ mod tests {
         // --- 8. Outer Vec Change: Clear ---
         // Clearing the outer vector should remove all items.
         source_of_vecs.write().clear();
-        source_of_vecs.flush_into_world(app.world_mut());
         app.update();
 
         let diffs = get_and_clear_output::<u32>(app.world_mut());
         assert_eq!(diffs.len(), 1, "Clear on outer vec should produce one diff.");
         assert_eq!(diffs[0], VecDiff::Clear, "Expected a Clear diff.");
-        apply_diffs(&mut current_state, &diffs);
+        apply_diffs(&mut current_state, diffs);
         assert!(current_state.is_empty(), "Final state should be empty after clear.");
 
         handle.cleanup(app.world_mut());
     } */
-
-    #[test]
-    fn test_mutable_vec_push_and_flush() {
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<u32>>();
-        let mutable_vec = MutableVec::new();
-        let signal_handle = mutable_vec
-            .signal_vec()
-            .for_each(capture_signal_vec_output)
-            .register(app.world_mut());
-
-        // Initial flush (should be empty, no Replace diff)
-        app.update();
-        let initial_output = get_signal_vec_output::<u32>(app.world());
-        assert_eq!(initial_output.len(), 0);
-        mutable_vec.write().push(1u32);
-        mutable_vec.flush_into_world(app.world_mut());
-        app.update();
-        let output = get_signal_vec_output::<u32>(app.world());
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0], VecDiff::Push { value: 1 });
-        assert_eq!(mutable_vec.read().as_ref(), &[1]);
-        signal_handle.cleanup(app.world_mut());
-    }
 }

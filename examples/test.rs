@@ -8,14 +8,14 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let numbers = MutableVec::from([1, 2, 3, 4, 5]);
+    let numbers = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(app.world_mut());
     app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
             PostStartup,
             (
                 move |world: &mut World| {
-                    ui_root(numbers.clone()).spawn(world);
+                    ui_root(numbers.clone(), world).spawn(world);
                 },
                 camera,
             ),
@@ -32,10 +32,10 @@ struct Numbers(MutableVec<i32>);
 struct Lifetime(f32);
 
 #[rustfmt::skip]
-fn ui_root(numbers: MutableVec<i32>) -> JonmoBuilder {
-    let list_a = MutableVec::from([1, 2, 3, 4, 5]).signal_vec();
-    let list_b = MutableVec::from([3, 4, 5]).signal_vec();
-    let map = MutableBTreeMap::from([(1, 2), (2, 3)]);
+fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
+    let list_a = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(world).signal_vec();
+    let list_b = MutableVecBuilder::from([3, 4, 5]).spawn(world).signal_vec();
+    let map = MutableBTreeMapBuilder::from([(1, 2), (2, 3)]).spawn(world);
     // map.signal_map().
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
@@ -136,18 +136,16 @@ fn live(mut lifetimes: Query<&mut Lifetime>, time: Res<Time>) {
     }
 }
 
-fn hotkeys(keys: Res<ButtonInput<KeyCode>>, numbers: ResMut<Numbers>, mut commands: Commands) {
-    let mut flush = false;
-    let mut guard = numbers.0.write();
+fn hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    numbers: ResMut<Numbers>,
+    mut mutable_vec_datas: Query<&mut MutableVecData<i32>>,
+) {
+    let mut guard = numbers.0.write(&mut mutable_vec_datas);
     if keys.just_pressed(KeyCode::Equal) {
         guard.push((guard.len() + 1) as i32);
-        flush = true;
     } else if keys.just_pressed(KeyCode::Minus) {
         guard.pop();
-        flush = true;
-    }
-    if flush {
-        commands.queue(numbers.0.flush());
     }
 }
 

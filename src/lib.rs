@@ -4,11 +4,10 @@
     feature = "document-features",
     doc = document_features::document_features!()
 )]
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 
@@ -21,25 +20,13 @@ pub mod signal_vec;
 #[allow(missing_docs)]
 pub mod utils;
 
-fn trigger_replays<ReplayTrigger: Component + signal_vec::Replayable>(world: &mut World) {
-    let triggers: Vec<Entity> = world
-        .query_filtered::<Entity, With<ReplayTrigger>>()
-        .iter(world)
-        .collect();
-    for trigger_entity in triggers {
-        if let Some(trigger_component) = world
-            .get_entity_mut(trigger_entity)
-            .ok()
-            .and_then(|mut e| e.take::<ReplayTrigger>())
-        {
-            trigger_component.trigger()(world);
-        }
-    }
-}
-
 /// Includes the systems required for [jonmo](crate) to function.
 #[derive(Default)]
 pub struct JonmoPlugin;
+
+/// [`SystemSet`] that can be used to schedule systems around signal processing.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
@@ -47,13 +34,18 @@ impl Plugin for JonmoPlugin {
             Last,
             (
                 (
-                    trigger_replays::<signal_vec::VecReplayTrigger>,
-                    trigger_replays::<signal_map::MapReplayTrigger>,
+                    signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
+                    signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
                 ),
                 graph::process_signal_graph,
-                graph::flush_cleanup_signals,
+                (
+                    graph::despawn_stale_signals,
+                    signal_vec::despawn_stale_mutable_vecs,
+                    signal_map::despawn_stale_mutable_btree_maps,
+                ),
             )
-                .chain(),
+                .chain()
+                .in_set(SignalProcessing),
         );
     }
 }
@@ -66,8 +58,11 @@ pub mod prelude {
         JonmoPlugin,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
-        signal_map::{MutableBTreeMap, SignalMap, SignalMapExt},
-        signal_vec::{IntoSignalVecEither, MutableVec, SignalVec, SignalVecEither, SignalVecExt},
+        signal_map::{MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap, SignalMapExt},
+        signal_vec::{
+            IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
+            SignalVecExt,
+        },
         utils::{LazyEntity, clone},
     };
     #[doc(no_inline)]

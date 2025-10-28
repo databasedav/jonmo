@@ -12,11 +12,12 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let letters = MutableBTreeMap::from(
+    let letters = MutableBTreeMapBuilder::from(
         ROWS.iter()
             .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
             .collect::<BTreeMap<_, _>>(),
-    );
+    )
+    .spawn(app.world_mut());
     app.add_plugins(examples_plugin)
         .insert_resource(Letters(letters.clone()))
         .add_systems(
@@ -178,7 +179,11 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
     )
 }
 
-fn listen(keys: ResMut<ButtonInput<KeyCode>>, letters: Res<Letters>, mut commands: Commands) {
+fn listen(
+    keys: ResMut<ButtonInput<KeyCode>>,
+    letters: Res<Letters>,
+    mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<char, LetterData>>,
+) {
     let map = HashMap::from([
         (KeyCode::KeyA, 'a'),
         (KeyCode::KeyB, 'b'),
@@ -207,10 +212,9 @@ fn listen(keys: ResMut<ButtonInput<KeyCode>>, letters: Res<Letters>, mut command
         (KeyCode::KeyY, 'y'),
         (KeyCode::KeyZ, 'z'),
     ]);
-    let mut flush = false;
     for (key, char) in map.iter() {
         if keys.just_pressed(*key) {
-            let mut guard = letters.0.write();
+            let mut guard = letters.0.write(&mut mutable_btree_map_datas);
             guard.insert(
                 *char,
                 LetterData {
@@ -218,9 +222,8 @@ fn listen(keys: ResMut<ButtonInput<KeyCode>>, letters: Res<Letters>, mut command
                     count: guard.get(char).unwrap().count + 1,
                 },
             );
-            flush = true;
         } else if keys.just_released(*key) {
-            let mut guard = letters.0.write();
+            let mut guard = letters.0.write(&mut mutable_btree_map_datas);
             guard.insert(
                 *char,
                 LetterData {
@@ -228,11 +231,7 @@ fn listen(keys: ResMut<ButtonInput<KeyCode>>, letters: Res<Letters>, mut command
                     ..guard.get(char).unwrap().clone()
                 },
             );
-            flush = true;
         }
-    }
-    if flush {
-        commands.queue(letters.0.flush());
     }
 }
 
