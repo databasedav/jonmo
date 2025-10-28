@@ -865,7 +865,6 @@ mod tests {
         app.update();
 
         // Verify the component was mutated correctly.
-        app.world_mut().entity(entity1);
         let component1 = app.world().get::<TestComponent>(entity1).unwrap();
         assert_eq!(component1.0, 15, "Component should be 10 + 5 = 15.");
 
@@ -1428,7 +1427,6 @@ mod tests {
             drop(output_guard);
 
             // Reactivity test
-            app.world_mut().entity(parent);
             app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent B".to_string();
             app.update();
             let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
@@ -2120,9 +2118,7 @@ mod tests {
 
         // Mutate the parent's component again. If the signal was not cleaned up,
         // this could panic when trying to access the despawned child.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn
-    Update"
-            .to_string();
+        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn Update".to_string();
         app.update();
 
         // The test passes if the previous update didn't panic.

@@ -1521,12 +1521,15 @@ pub trait SignalExt: Signal {
         Throttle {
             signal: self.map(
                 move |In(item): In<Self::Item>, time: Res<Time>, mut timer_option: Local<Option<Timer>>| {
+                    bevy_log::info!("delta y: {:?}", time.delta());
                     match timer_option.as_mut() {
                         None => {
                             *timer_option = Some(Timer::new(duration, TimerMode::Once));
+                            bevy_log::info!("delta f: {:?}", time.delta());
                             Some(item)
                         }
                         Some(timer) => {
+                            bevy_log::info!("delta: {:?}", time.delta());
                             if timer.tick(time.delta()).finished() {
                                 timer.reset();
                                 Some(item)
@@ -1976,10 +1979,11 @@ mod tests {
     // Import Bevy prelude for MinimalPlugins and other common items
     use bevy::prelude::*;
     use bevy_platform::sync::*;
-    use bevy_time::TimeUpdateStrategy;
+    use bevy_time::TimePlugin;
 
     // Add Duration
     use core::time::Duration;
+    use test_log::test;
 
     // Helper component and resource for testing Add Default
     #[derive(Component, Clone, Debug, PartialEq, Reflect, Default, Resource)]
@@ -2641,12 +2645,15 @@ mod tests {
 
     #[test]
     fn test_throttle() {
-        let mut app = create_test_app();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins.build().disable::<TimePlugin>(), JonmoPlugin));
+        app.init_resource::<Time>(); // manually managing time for the test
         app.init_resource::<SignalOutput<i32>>();
 
         // A simple counter to generate a new value (1, 2, 3...) for each update.
         let source_signal = SignalBuilder::from_system(|_: In<()>, mut counter: Local<i32>| {
             *counter += 1;
+            bevy_log::info!("fuck");
             *counter
         });
 
@@ -2655,68 +2662,71 @@ mod tests {
             .map(capture_output)
             .register(app.world_mut());
 
-        // 1. Initial emission: The first value should always pass through.
+        // 1. Initial emission: The first update runs with near-zero delta. The first value should always
+        //    pass.
         app.update();
         assert_eq!(
-            get_output(&app.world()),
+            get_output(app.world()),
             Some(1),
             "First value (1) should pass immediately."
         );
         // Clear the output to prepare for the next check.
         app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
 
-        // 2. Blocked emission: Advance time by less than the duration. The next value (2) should be
-        //    blocked.
+        // 2. Blocked emission: Manually advance time by 50ms.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(50)));
-        app.update();
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(50));
+        app.update(); // `time.delta()` is now 50ms. The timer ticks but isn't finished.
         assert_eq!(
-            get_output::<i32>(&app.world()),
+            get_output::<i32>(app.world()),
             None,
             "Value (2) emitted after 50ms should be blocked."
         );
 
-        // 3. Another blocked emission: Update again with no time elapsed. The next value (3) should also be
-        //    blocked.
+        // 3. Another blocked emission: Advance time by another 40ms (total 90ms).
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(0)));
-        app.update();
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(40));
+        app.update(); // `time.delta()` is 40ms. Timer ticks to 90ms. Still not finished.
         assert_eq!(
-            get_output::<i32>(&app.world()),
+            get_output::<i32>(app.world()),
             None,
-            "Value (3) emitted immediately after should also be blocked."
+            "Value (3) emitted after 90ms total should be blocked."
         );
-
-        // 4. Allowed emission: Advance time past the threshold (50ms from step 2 + 60ms now = 110ms total).
+        app.world_mut().entity(**handle);
+        // 4. Allowed emission: Advance time by another 20ms (total 110ms).
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(60)));
-        app.update();
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(20));
+        app.update(); // `time.delta()` is 20ms. Timer ticks to 110ms, which is >= 100ms.
         // The source signal has been called 4 times now. The value should be 4.
         assert_eq!(
-            get_output(&app.world()),
+            get_output(app.world()),
             Some(4),
             "Value (4) should pass after total duration > 100ms."
         );
         app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
 
-        // 5. Blocked again: Immediately after an emission, the timer resets, so the next value (5) is
-        //    blocked.
+        // 5. Blocked again: The timer was reset on the last pass. A small advance is not enough.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(10)));
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(10));
         app.update();
         assert_eq!(
-            get_output::<i32>(&app.world()),
+            get_output::<i32>(app.world()),
             None,
             "Value (5) immediately after a pass should be blocked again."
         );
 
         // 6. Pass again: Advance time to pass the threshold again.
         app.world_mut()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(100)));
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(100));
         app.update();
         // The source signal has now been called 6 times. The value should be 6.
         assert_eq!(
-            get_output(&app.world()),
+            get_output(app.world()),
             Some(6),
             "Value (6) should pass again after another full duration."
         );

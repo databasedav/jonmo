@@ -977,10 +977,9 @@ impl<K, V> MutableBTreeMap<K, V> {
         V: Clone + SSs,
     {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
-            let self_entity = LazyEntity::new();
             let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_entity, self_) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World, mut has_run: Local<bool>| {
+            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World, mut has_run: Local<bool>| {
                 if !*has_run {
                     *has_run = true;
                     let initial_map = self_.read(&*world);
@@ -993,7 +992,6 @@ impl<K, V> MutableBTreeMap<K, V> {
             });
 
             let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
-            self_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));

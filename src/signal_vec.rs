@@ -3758,10 +3758,9 @@ impl<T> MutableVec<T> {
         T: Clone + SSs,
     {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
-            let self_entity = LazyEntity::new();
             let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_entity, self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
+            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
                 if !*has_run {
                     *has_run = true;
                     let initial_vec = self_.read(&*world).to_vec();
@@ -3774,7 +3773,6 @@ impl<T> MutableVec<T> {
             });
 
             let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
-            self_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
@@ -4006,7 +4004,7 @@ pub(crate) mod tests {
     use crate::JonmoPlugin;
     use bevy::prelude::*;
     use bevy_platform::sync::RwLock;
-    use test_log;
+    use test_log::test;
 
     #[derive(Resource, Default, Debug)]
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
@@ -5085,7 +5083,7 @@ pub(crate) mod tests {
         cleanup(true)
     }
 
-    #[test_log::test]
+    #[test]
     fn test_filter_map() {
         {
             // A comprehensive test for `SignalVecExt::filter_map`, covering all `VecDiff`
