@@ -102,7 +102,7 @@ impl JonmoBuilder {
     }
 
     /// Attach an [`Observer`] to this builder.
-    pub fn observe<E: Event, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
+    pub fn observe<E: EntityEvent, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
         self.on_spawn(|world, entity| {
             if let Ok(mut entity) = world.get_entity_mut(entity) {
                 entity.observe(observer);

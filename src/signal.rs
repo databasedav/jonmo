@@ -26,6 +26,10 @@ cfg_if::cfg_if! {
 use core::{marker::PhantomData, ops};
 use dyn_clone::{DynClone, clone_trait_object};
 
+// TODO: fix the check-all-features command in kaaj
+// TODO: make replayable actually able to replay cached signal vecs and add a test for this case (the filters example does not actually do this)
+// TODO: upgrade to bevy 0.17
+
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
 pub trait Signal: SSs {
@@ -1527,7 +1531,7 @@ pub trait SignalExt: Signal {
                             Some(item)
                         }
                         Some(timer) => {
-                            if timer.tick(time.delta()).finished() {
+                            if timer.tick(time.delta()).is_finished() {
                                 timer.reset();
                                 Some(item)
                             } else {

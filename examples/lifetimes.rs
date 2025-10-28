@@ -121,7 +121,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
             // button entity to listen for a `Click` event.
             world.entity_mut(entity).observe(
                 // This closure is the event handler that runs when the button is clicked.
-                move |_: Trigger<Pointer<Click>>,
+                move |_: On<Pointer<Click>>,
                       colors: Res<Colors>,
                       mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     // Try to get the `Index` component from the clicked entity.
@@ -136,7 +136,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
             Node::default(),
             Text::new("+"),
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(JustifyText::Center),
+            TextLayout::new_with_justify(Justify::Center),
         ))),
     )
 }
@@ -200,7 +200,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
                 // Start with a `Text` component with no sections. We'll add them as children.
                 Text::new(""),
                 TextColor(Color::BLACK), // Default color, can be overridden by children.
-                TextLayout::new_with_justify(JustifyText::Center),
+                TextLayout::new_with_justify(Justify::Center),
             ))
             // Child 1: A static text span.
             .child((TextColor(Color::BLACK), TextSpan::new("item ")))
@@ -258,7 +258,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
             // button entity to listen for a `Click` event.
             world.entity_mut(entity).observe(
                 // This closure is the event handler that runs when the button is clicked.
-                move |_: Trigger<Pointer<Click>>,
+                move |_: On<Pointer<Click>>,
                       indices: Query<&Index>,
                       colors: Res<Colors>,
                       mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
@@ -279,7 +279,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
             Node::default(),
             Text::new("x"),
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(JustifyText::Center),
+            TextLayout::new_with_justify(Justify::Center),
         ))),
     )
 }
