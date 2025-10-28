@@ -11,12 +11,12 @@ repository = "https://github.com/databasedav/jonmo"
 documentation = "https://docs.rs/jonmo"
 
 [dependencies]
-bevy_app = { version = "0.16", default-features = false }
-bevy_derive = { version = "0.16", default-features = false }
-bevy_ecs = { version = "0.16", default-features = false }
-bevy_platform = { version = "0.16", default-features = false }
-bevy_log = { version = "0.16", default-features = false, optional = true }
-bevy_time = { version = "0.16", default-features = false, optional = true }
+bevy_app = { version = "0.17", default-features = false }
+bevy_derive = { version = "0.17", default-features = false }
+bevy_ecs = { version = "0.17", default-features = false }
+bevy_platform = { version = "0.17", default-features = false }
+bevy_log = { version = "0.17", default-features = false, optional = true }
+bevy_time = { version = "0.17", default-features = false, optional = true }
 enclose = "1.2"
 dyn-clone = "1.0"
 apply = "0.3"
@@ -63,7 +63,7 @@ web = [
 deployed_wasm_example = []
 
 [dev-dependencies]
-bevy = { version = "0.16", features = ["track_location"] }
+bevy = { version = "0.17", features = ["track_location"] }
 rand = "0.9"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 

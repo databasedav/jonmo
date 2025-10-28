@@ -118,8 +118,8 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
     // observers
     .with_entity(move |mut entity| {
         entity.observe(
-            move |trigger: Trigger<Pointer<Click>>, mut counters: Query<&mut Counter>| {
-                if matches!(trigger.button, PointerButton::Primary) {
+            move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+                if matches!(on.button, PointerButton::Primary) {
                     // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
                     // state-holding entity.
                     if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {

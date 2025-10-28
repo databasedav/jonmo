@@ -44,7 +44,7 @@ fn ui(world: &mut World) {
 }
 
 fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {
-    if ticker.tick(time.delta()).finished() {
+    if ticker.tick(time.delta()).is_finished() {
         for mut value in values.iter_mut() {
             value.0 = value.0.wrapping_add(1);
         }

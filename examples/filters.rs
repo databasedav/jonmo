@@ -110,10 +110,10 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 Text::new("source"),
                 TextColor(Color::WHITE),
                 TextFont::from_font_size(30.),
-                TextLayout::new_with_justify(JustifyText::Center),
+                TextLayout::new_with_justify(Justify::Center),
             )))
             .child(button("+", -2.).apply(on_click(
-                |_: Trigger<Pointer<Click>>,
+                |_: On<Pointer<Click>>,
                  datas: Res<Datas>,
                  mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     datas.0.write(&mut mutable_vec_datas).insert(0, random_data());
@@ -150,7 +150,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 // BackgroundColor(Color::WHITE),
             ))
             .child(button("+", -2.).apply(on_click(
-                |_: Trigger<Pointer<Click>>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                |_: On<Pointer<Click>>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     rows.0.write(&mut mutable_vec_datas).push(());
                 },
             ))),
@@ -205,7 +205,7 @@ fn text_node(text: &'static str) -> JonmoBuilder {
         Node::default(),
         Text::new(text),
         TextColor(Color::WHITE),
-        TextLayout::new_with_justify(JustifyText::Center),
+        TextLayout::new_with_justify(Justify::Center),
         BorderRadius::all(Val::Px(GAP)),
     ))
 }
@@ -237,7 +237,7 @@ fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(JonmoBuilder
     move |builder| {
         builder
             .apply(on_click(
-                clone!((row_parent) move |_: Trigger<Pointer<Click>>, mut number_filters: Query<&mut NumberFilters>| {
+                clone!((row_parent) move |_: On<Pointer<Click>>, mut number_filters: Query<&mut NumberFilters>| {
                     toggle(&mut number_filters.get_mut(row_parent.get()).unwrap().0, parity);
                 }),
             ))
@@ -274,7 +274,7 @@ fn number_toggles(row_parent: LazyEntity) -> JonmoBuilder {
             .insert(TextFont::from_font_size(13.))
             .insert(BackgroundColor(bevy::color::palettes::basic::GRAY.into()))
             .apply(on_click(
-                clone!((row_parent) move |_: Trigger<Pointer<Click>>, world: &mut World| {
+                clone!((row_parent) move |_: On<Pointer<Click>>, world: &mut World| {
                     let mut entity = world.entity_mut(row_parent.get());
                     if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
                 }),
@@ -298,7 +298,7 @@ fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> JonmoBuilder {
         BackgroundColor(bevy::color::palettes::basic::GRAY.into()),
     ))
     .apply(on_click(
-        clone!((row_parent) move |_: Trigger<Pointer<Click>>, mut shape_filters: Query<&mut ShapeFilters>| {
+        clone!((row_parent) move |_: On<Pointer<Click>>, mut shape_filters: Query<&mut ShapeFilters>| {
             toggle(&mut shape_filters.get_mut(row_parent.get()).unwrap().0, shape);
         }),
     ))
@@ -342,10 +342,10 @@ fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
                     },
                     BorderRadius::all(Val::Px(GAP)),
                     BackgroundColor(color.into()),
-                    BorderColor(Color::BLACK),
+                    BorderColor::all(Color::BLACK),
                 ))
                 .apply(on_click(
-                    clone!((row_parent) move |_: Trigger<Pointer<Click>>, mut color_filters: Query<&mut ColorFilters>| {
+                    clone!((row_parent) move |_: On<Pointer<Click>>, mut color_filters: Query<&mut ColorFilters>| {
                         toggle(&mut color_filters.get_mut(row_parent.get()).unwrap().0, color);
                     }),
                 ))
@@ -370,7 +370,7 @@ fn button(text: &'static str, offset: f32) -> JonmoBuilder {
             ..default()
         },
         BackgroundColor(bevy::color::palettes::basic::GRAY.into()),
-        BorderColor(Color::WHITE),
+        BorderColor::all(Color::WHITE),
         BorderRadius::all(Val::Px(GAP)),
     ))
     .child(
@@ -402,11 +402,11 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
         button("-", -3.)
             .component_signal(index.map_in(|index| index.map(Index)))
             .apply(on_click(
-                |click: Trigger<Pointer<Click>>,
+                |click: On<Pointer<Click>>,
                  rows: Res<Rows>,
                  indices: Query<&Index>,
                  mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
-                    if let Ok(&Index(index)) = indices.get(click.target()) {
+                    if let Ok(&Index(index)) = indices.get(click.event().event_target()) {
                         rows.0.write(&mut mutable_vec_datas).remove(index);
                     }
                 },
@@ -504,11 +504,11 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
     ))
     .component_signal(index.map_in(|index| index.map(Index)))
     .apply(on_click(
-        |click: Trigger<Pointer<Click>>,
+        |click: On<Pointer<Click>>,
          datas: Res<Datas>,
          indices: Query<&Index>,
          mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
-            if let Ok(&Index(index)) = indices.get(click.target()) {
+            if let Ok(&Index(index)) = indices.get(click.event().event_target()) {
                 datas.0.write(&mut mutable_vec_datas).remove(index);
             }
         },
@@ -517,7 +517,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
         Node::default(),
         Text::new(number.to_string()),
         TextColor(Color::BLACK),
-        TextLayout::new_with_justify(JustifyText::Center),
+        TextLayout::new_with_justify(Justify::Center),
     ))
 }
 

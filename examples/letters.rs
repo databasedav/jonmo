@@ -130,7 +130,7 @@ fn text_node() -> JonmoBuilder {
     JonmoBuilder::from((
         Node::default(),
         TextColor(Color::WHITE),
-        TextLayout::new_with_justify(JustifyText::Center),
+        TextLayout::new_with_justify(Justify::Center),
         BorderRadius::all(Val::Px(GAP)),
     ))
 }
@@ -147,8 +147,8 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
         BorderRadius::all(Val::Px(GAP * 2.)),
     ))
     .with_entity(|mut entity| {
-        entity.observe(|click: Trigger<Pointer<Click>>, nodes: Query<&ComputedNode>| {
-            println!("{}", nodes.get(click.target()).unwrap().size());
+        entity.observe(|click: On<Pointer<Click>>, nodes: Query<&ComputedNode>| {
+            println!("{}", nodes.get(click.event().event_target()).unwrap().size());
         });
     })
     .component_signal(
