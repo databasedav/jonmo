@@ -60,7 +60,7 @@ impl<U: 'static> Signal for Box<dyn Signal<Item = U> + Send + Sync> {
 /// type can't be known at compile-time.
 pub trait SignalDynClone: Signal + DynClone {}
 
-clone_trait_object!(<T> SignalDynClone <Item = T>);
+clone_trait_object!(<T> SignalDynClone<Item = T>);
 
 impl<T: Signal + Clone + 'static> SignalDynClone for T {}
 
@@ -1521,15 +1521,12 @@ pub trait SignalExt: Signal {
         Throttle {
             signal: self.map(
                 move |In(item): In<Self::Item>, time: Res<Time>, mut timer_option: Local<Option<Timer>>| {
-                    bevy_log::info!("delta y: {:?}", time.delta());
                     match timer_option.as_mut() {
                         None => {
                             *timer_option = Some(Timer::new(duration, TimerMode::Once));
-                            bevy_log::info!("delta f: {:?}", time.delta());
                             Some(item)
                         }
                         Some(timer) => {
-                            bevy_log::info!("delta: {:?}", time.delta());
                             if timer.tick(time.delta()).finished() {
                                 timer.reset();
                                 Some(item)
@@ -2529,118 +2526,123 @@ mod tests {
 
     #[test]
     fn test_switch_signal_vec() {
-        // --- Setup ---
-        let mut app = create_test_app();
-        app.init_resource::<SignalVecOutput<i32>>();
+        {
+            // --- Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
 
-        // Two different data sources to switch between.
-        let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
-        let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            // Two different data sources to switch between.
+            let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
+            let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
 
-        // A resource to control which list is active.
-        #[derive(Resource, Clone, Copy, PartialEq, Debug)]
-        enum ListSelector {
-            A,
-            B,
+            // A resource to control which list is active.
+            #[derive(Resource, Clone, Copy, PartialEq, Debug)]
+            enum ListSelector {
+                A,
+                B,
+            }
+
+            app.insert_resource(ListSelector::A);
+
+            // The control signal reads the resource.
+            let control_signal =
+                SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
+
+            // The signal chain under test.
+            let switched_signal = control_signal.dedupe().switch_signal_vec(
+                clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
+                    ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                    ListSelector:: B => list_b.signal_vec().boxed_clone(),
+                }),
+            );
+
+            // Register the final signal to a capture system.
+            let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
+
+            // --- Test 1: Initial State --- The first update should select List A and emit
+            // its initial state.
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![10, 20] },
+                "Initial state should be a Replace with List A's contents."
+            );
+
+            // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
+            // should be forwarded.
+            list_a.write(app.world_mut()).push(30);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push { value: 30 },
+                "Should forward Push diff from List A."
+            );
+
+            // --- Test 3: The Switch to List B --- Change the selector and update. This
+            // should trigger a switch.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching lists should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![100, 200, 300]
+                },
+                "Switch should emit a Replace with List B's contents."
+            );
+
+            // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
+            // List A should be ignored. This should not be seen
+            list_a.write(app.world_mut()).push(99);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
+
+            // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
+            // should now be forwarded. remove 100
+            list_b.write(app.world_mut()).remove(0);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt from new active list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::RemoveAt { index: 0 },
+                "Should forward RemoveAt diff from List B."
+            );
+
+            // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
+            // list should produce no diffs.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Re-selecting the same list should produce no diffs due to memoization."
+            );
+
+            // --- Test 7: Switch Back to List A --- Switching back should give us the current
+            // state of List A.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![10, 20, 30, 99],
+                    // Note: includes the `push(30)` from earlier
+                },
+                "Switching back should Replace with the current state of List A."
+            );
+            handle.cleanup(app.world_mut());
         }
 
-        app.insert_resource(ListSelector::A);
-
-        // The control signal reads the resource.
-        let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
-
-        // The signal chain under test.
-        let switched_signal = control_signal.dedupe().switch_signal_vec(
-            clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
-                ListSelector:: B => list_b.signal_vec().boxed_clone(),
-            }),
-        );
-
-        // Register the final signal to a capture system.
-        let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
-
-        // --- Test 1: Initial State --- The first update should select List A and emit
-        // its initial state.
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace { values: vec![10, 20] },
-            "Initial state should be a Replace with List A's contents."
-        );
-
-        // --- Test 2: Forwarding Diffs from Active List (A) --- A mutation to List A
-        // should be forwarded.
-        list_a.write(app.world_mut()).push(30);
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Push { value: 30 },
-            "Should forward Push diff from List A."
-        );
-
-        // --- Test 3: The Switch to List B --- Change the selector and update. This
-        // should trigger a switch.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Switching lists should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec![100, 200, 300]
-            },
-            "Switch should emit a Replace with List B's contents."
-        );
-
-        // --- Test 4: Ignoring Diffs from Old List (A) --- A mutation to the now-inactive
-        // List A should be ignored. This should not be seen
-        list_a.write(app.world_mut()).push(99);
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive list.");
-
-        // --- Test 5: Forwarding Diffs from New Active List (B) --- A mutation to List B
-        // should now be forwarded. remove 100
-        list_b.write(app.world_mut()).remove(0);
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "RemoveAt from new active list should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::RemoveAt { index: 0 },
-            "Should forward RemoveAt diff from List B."
-        );
-
-        // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
-        // list should produce no diffs.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert!(
-            diffs.is_empty(),
-            "Re-selecting the same list should produce no diffs due to memoization."
-        );
-
-        // --- Test 7: Switch Back to List A --- Switching back should give us the current
-        // state of List A.
-        *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
-        app.update();
-        let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
-        assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
-        assert_eq!(
-            diffs[0],
-            VecDiff::Replace {
-                values: vec![10, 20, 30, 99],
-                // Note: includes the `push(30)` from earlier
-            },
-            "Switching back should Replace with the current state of List A."
-        );
-        handle.cleanup(app.world_mut());
+        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -2653,7 +2655,6 @@ mod tests {
         // A simple counter to generate a new value (1, 2, 3...) for each update.
         let source_signal = SignalBuilder::from_system(|_: In<()>, mut counter: Local<i32>| {
             *counter += 1;
-            bevy_log::info!("fuck");
             *counter
         });
 
