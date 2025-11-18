@@ -9,7 +9,7 @@ use super::{
     utils::{LazyEntity, SSs, ancestor_map},
 };
 use crate::prelude::clone;
-use bevy_ecs::{prelude::*, system::SystemState};
+use bevy_ecs::{entity_disabling::Internal, prelude::*, system::SystemState};
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         use bevy_log::prelude::*;
@@ -27,8 +27,8 @@ use core::{marker::PhantomData, ops};
 use dyn_clone::{DynClone, clone_trait_object};
 
 // TODO: fix the check-all-features command in kaaj
-// TODO: make replayable actually able to replay cached signal vecs and add a test for this case (the filters example does not actually do this)
-// TODO: upgrade to bevy 0.17
+// TODO: make replayable actually able to replay cached signal vecs and add a test for this case
+// (the filters example does not actually do this) TODO: upgrade to bevy 0.17
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
@@ -1406,7 +1406,7 @@ pub trait SignalExt: Signal {
             // The output system is a "poller". It runs when poked and drains its own queue.
             let output_system_entity = LazyEntity::new();
             let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
+                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
                     if let Ok(mut queue) = q.get_mut(*output_system_entity) {
                         if queue.0.is_empty() {
                             None
@@ -1477,7 +1477,7 @@ pub trait SignalExt: Signal {
                     // running it again. if let Some(trigger) =
                     // world.get_entity_mut(*new_signal_id).ok().and_then(|mut entity|
                     // entity.take::<super::signal_vec::VecReplayTrigger>()) {
-                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
+                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal_id).collect::<Vec<_>>();
                     for signal in [new_signal_id].into_iter().chain(upstreams.into_iter()) {

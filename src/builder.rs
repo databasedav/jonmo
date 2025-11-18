@@ -102,7 +102,10 @@ impl JonmoBuilder {
     }
 
     /// Attach an [`Observer`] to this builder.
-    pub fn observe<E: EntityEvent, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
+    pub fn observe<E: EntityEvent, B: Bundle, Marker>(
+        self,
+        observer: impl IntoObserverSystem<E, B, Marker> + Sync,
+    ) -> Self {
         self.on_spawn(|world, entity| {
             if let Ok(mut entity) = world.get_entity_mut(entity) {
                 entity.observe(observer);
@@ -688,6 +691,7 @@ mod tests {
 
     /// Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
+        cleanup();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app

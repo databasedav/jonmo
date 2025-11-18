@@ -10,7 +10,7 @@ use super::{
 };
 use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
+use bevy_ecs::{change_detection::Mut, entity_disabling::Internal, prelude::*, system::SystemId};
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -477,11 +477,11 @@ fn spawn_filter_signal<T: Clone + SSs>(
         let self_entity = *entity;
 
         // The processor might run after its parent has been cleaned up.
-        let Ok(signal_index_comp) = world.query::<&FilterSignalIndex>().get(world, self_entity) else {
+        let Ok(signal_index_comp) = world.query_filtered::<&FilterSignalIndex, Allow<Internal>>().get(world, self_entity) else {
             return;
         };
         let item_index = signal_index_comp.0;
-        let Ok(mut filter_signal_data) = world.query::<&mut FilterSignalData<T>>().get_mut(world, parent) else {
+        let Ok(mut filter_signal_data) = world.query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>().get_mut(world, parent) else {
             return;
         };
 
@@ -2623,7 +2623,7 @@ pub trait SignalVecExt: SignalVec {
                 SignalBuilder::from_system(
                     clone!(
                         (state_entity_handle) move |_: In<()>,
-                        query: Query<&IntersperseState<Self::Item>>| {
+                        query: Query<&IntersperseState<Self::Item>, Allow<Internal>>| {
                             Some(
                                 query
                                     .get(state_entity_handle.get())
@@ -3930,7 +3930,7 @@ impl Replayable for VecReplayTrigger {
 
 pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
     let triggers: Vec<Entity> = world
-        .query_filtered::<Entity, With<ReplayTrigger>>()
+        .query_filtered::<Entity, (With<ReplayTrigger>, Allow<Internal>)>()
         .iter(world)
         .collect();
     for trigger_entity in triggers {
@@ -4010,6 +4010,7 @@ pub(crate) mod tests {
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
 
     fn create_test_app() -> App {
+        cleanup(true);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app

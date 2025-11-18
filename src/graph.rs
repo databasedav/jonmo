@@ -2,6 +2,7 @@
 use super::utils::SSs;
 use bevy_derive::Deref;
 use bevy_ecs::{
+    entity_disabling::Internal,
     lifecycle::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
@@ -233,7 +234,8 @@ pub(crate) fn process_signals(
 }
 
 pub(crate) fn process_signal_graph(world: &mut World) {
-    let mut orphan_parents = SystemState::<Query<Entity, (With<SystemRunner>, Without<Upstream>)>>::new(world);
+    let mut orphan_parents =
+        SystemState::<Query<Entity, (With<SystemRunner>, Without<Upstream>, Allow<Internal>)>>::new(world);
     let orphan_parents = orphan_parents.get(world);
     let orphan_parents = orphan_parents.iter().map(SignalSystem).collect::<Vec<_>>();
     process_signals(world, orphan_parents, Box::new(()));

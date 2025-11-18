@@ -113,9 +113,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 TextLayout::new_with_justify(Justify::Center),
             )))
             .child(button("+", -2.).apply(on_click(
-                |_: On<Pointer<Click>>,
-                 datas: Res<Datas>,
-                 mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                |_: On<Pointer<Click>>, datas: Res<Datas>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     datas.0.write(&mut mutable_vec_datas).insert(0, random_data());
                 },
             )))
