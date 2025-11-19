@@ -4,6 +4,8 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+# 0.3.0 (2025-11-19)
+
 ### changed
 
 - reactive collections `MutableVec` and `MutableBTreeMap` are now lock-free and managed by entities and components
