@@ -6,12 +6,12 @@ use super::{
         process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
-    signal_vec::{Replayable, SignalVec, VecDiff},
+    signal_vec::{ReplayOnce, Replayable, SignalVec, VecDiff},
     utils::{LazyEntity, SSs},
 };
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
-use bevy_ecs::prelude::*;
+use bevy_ecs::{entity_disabling::Internal, prelude::*};
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -903,11 +903,11 @@ where
 }
 
 #[derive(Component)]
-pub(crate) struct MapReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+pub(crate) struct MapReplayTrigger(Box<dyn Fn(&mut World) + Send + Sync>);
 
 impl Replayable for MapReplayTrigger {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
-        self.0
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync) {
+        &self.0
     }
 }
 
@@ -979,10 +979,10 @@ impl<K, V> MutableBTreeMap<K, V> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World, mut has_run: Local<bool>| {
-                if !*has_run {
-                    *has_run = true;
-                    let initial_map = self_.read(&*world);
+            let replay_entity = LazyEntity::new();
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+                if replay_onces.contains(*replay_entity) {
+                    let initial_map = self_.read(&mutable_btree_map_datas);
                     if !initial_map.is_empty() {
                         Some(vec![MapDiff::Replace { entries: initial_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
                     } else {
@@ -990,15 +990,14 @@ impl<K, V> MutableBTreeMap<K, V> {
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
-
-            let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
+            let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system);
+            replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
             });
 
-            let mut replay_entity = world.entity_mut(*replay_signal);
-            replay_entity.insert(MapReplayTrigger(trigger));
+            world.entity_mut(*replay_signal).insert((MapReplayTrigger(trigger), ReplayOnce));
 
             pipe_signal(world, broadcaster_system, replay_signal);
             replay_signal

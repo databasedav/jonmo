@@ -3760,10 +3760,10 @@ impl<T> MutableVec<T> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
-                if !*has_run {
-                    *has_run = true;
-                    let initial_vec = self_.read(&*world).to_vec();
+            let replay_entity = LazyEntity::new();
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_vec_datas: Query<&MutableVecData<T>>| {
+                if replay_onces.contains(*replay_entity) {
+                    let initial_vec = self_.read(&mutable_vec_datas).to_vec();
                     if !initial_vec.is_empty() {
                         Some(vec![VecDiff::Replace { values: initial_vec }])
                     } else {
@@ -3772,14 +3772,14 @@ impl<T> MutableVec<T> {
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
 
-            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
+            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system);
+            replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
             });
 
-            let mut replay_entity = world.entity_mut(*replay_signal);
-            replay_entity.insert(VecReplayTrigger(trigger));
+            world.entity_mut(*replay_signal).insert((VecReplayTrigger(trigger), ReplayOnce));
 
             pipe_signal(world, broadcaster_system, replay_signal);
             replay_signal
@@ -3916,31 +3916,44 @@ impl<T: Clone> Clone for QueuedVecDiffs<T> {
 }
 
 pub(crate) trait Replayable {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync>;
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync);
 }
 
 #[derive(Component)]
-pub(crate) struct VecReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+pub(crate) struct ReplayOnce;
+
+#[derive(Component)]
+pub(crate) struct VecReplayTrigger(Box<dyn Fn(&mut World) + Send + Sync>);
 
 impl Replayable for VecReplayTrigger {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
-        self.0
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync) {
+        &self.0
+    }
+}
+
+pub(crate) fn trigger_replay<ReplayTrigger: Component + Replayable>(world: &mut World, entity: Entity) -> bool {
+    if let Some(trigger_component) = world
+        .get_entity_mut(entity)
+        .ok()
+        .and_then(|mut entity| entity.take::<ReplayTrigger>())
+    {
+        trigger_component.trigger()(world);
+        let mut entity = world.entity_mut(entity);
+        entity.remove::<ReplayOnce>();
+        entity.insert(trigger_component);
+        true
+    } else {
+        false
     }
 }
 
 pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
     let triggers: Vec<Entity> = world
-        .query_filtered::<Entity, (With<ReplayTrigger>, Allow<Internal>)>()
+        .query_filtered::<Entity, (With<ReplayOnce>, Allow<Internal>)>()
         .iter(world)
         .collect();
-    for trigger_entity in triggers {
-        if let Some(trigger_component) = world
-            .get_entity_mut(trigger_entity)
-            .ok()
-            .and_then(|mut e| e.take::<ReplayTrigger>())
-        {
-            trigger_component.trigger()(world);
-        }
+    for entity in triggers {
+        trigger_replay::<ReplayTrigger>(world, entity);
     }
 }
 

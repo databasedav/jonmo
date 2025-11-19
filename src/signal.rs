@@ -5,7 +5,7 @@ use super::{
         LazySignal, SignalHandle, SignalSystem, Upstream, UpstreamIter, downcast_any_clone, lazy_signal_from_system,
         pipe_signal, poll_signal, process_signals,
     },
-    signal_vec::{Replayable, SignalVec, SignalVecExt, VecDiff},
+    signal_vec::{ReplayOnce, SignalVec, SignalVecExt, VecDiff, trigger_replay},
     utils::{LazyEntity, SSs, ancestor_map},
 };
 use crate::prelude::clone;
@@ -25,10 +25,6 @@ cfg_if::cfg_if! {
 }
 use core::{marker::PhantomData, ops};
 use dyn_clone::{DynClone, clone_trait_object};
-
-// TODO: fix the check-all-features command in kaaj
-// TODO: make replayable actually able to replay cached signal vecs and add a test for this case
-// (the filters example does not actually do this) TODO: upgrade to bevy 0.17
 
 /// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
 /// of the signal graph.
@@ -1427,20 +1423,19 @@ pub trait SignalExt: Signal {
                 .insert(SwitcherQueue(Vec::<VecDiff<S::Item>>::new()));
 
             // This is the core logic. It runs whenever the outer signal changes.
-            let manager_system_logic =
+            let manager_system =
                 move |In(inner_signal_vec): In<S>,
                       world: &mut World,
                       mut active_forwarder: Local<Option<SignalHandle>>,
-                      mut active_memo_handle: Local<Option<SignalHandle>>,
-                      mut active_signal_id: Local<Option<SignalSystem>>| {
+                      mut active_signal: Local<Option<SignalSystem>>| {
                     // A. Get the canonical ID by registering. We need this for memoization.
-                    let new_signal_id_handle = inner_signal_vec.clone().register_signal_vec(world);
-                    let new_signal_id = *new_signal_id_handle;
+                    let new_signal_handle = inner_signal_vec.clone().register_signal_vec(world);
+                    let new_signal = *new_signal_handle;
 
                     // B. MEMOIZATION: If the signal hasn't changed, do nothing.
-                    if Some(new_signal_id) == *active_signal_id {
+                    if Some(new_signal) == *active_signal {
                         // Balance the ref count for this temporary handle.
-                        new_signal_id_handle.cleanup(world);
+                        new_signal_handle.cleanup(world);
                         return;
                     }
 
@@ -1449,10 +1444,7 @@ pub trait SignalExt: Signal {
                     if let Some(old_handle) = active_forwarder.take() {
                         old_handle.cleanup(world);
                     }
-                    if let Some(old_memo_handle) = active_memo_handle.take() {
-                        old_memo_handle.cleanup(world);
-                    }
-                    *active_signal_id = Some(new_signal_id);
+                    *active_signal = Some(new_signal);
 
                     // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
                     // signal and poke the output system.
@@ -1469,27 +1461,26 @@ pub trait SignalExt: Signal {
                     // forwarder's handle and the new memoization handle.
                     let new_forwarder_handle = inner_signal_vec.for_each(forwarder_logic).register(world);
                     *active_forwarder = Some(new_forwarder_handle);
-                    *active_memo_handle = Some(new_signal_id_handle);
 
                     // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
                     // _now_. This synchronously sends the initial `Replace` diff through the pipe we
-                    // just established. Taking it also prevents the `trigger_replays` system from
-                    // running it again. if let Some(trigger) =
-                    // world.get_entity_mut(*new_signal_id).ok().and_then(|mut entity|
-                    // entity.take::<super::signal_vec::VecReplayTrigger>()) {
+                    // just established.
                     let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
                     let upstreams = upstreams.get(world);
-                    let upstreams = UpstreamIter::new(&upstreams, new_signal_id).collect::<Vec<_>>();
-                    for signal in [new_signal_id].into_iter().chain(upstreams.into_iter()) {
-                        if let Some(trigger) = world.entity_mut(*signal).take::<super::signal_vec::VecReplayTrigger>() {
-                            trigger.trigger()(world);
-                            break;
+                    let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
+                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                        let entity = *signal;
+                        if world.get::<super::signal_vec::VecReplayTrigger>(entity).is_some() {
+                            world.entity_mut(entity).insert(ReplayOnce);
+                            if trigger_replay::<super::signal_vec::VecReplayTrigger>(world, entity) {
+                                break;
+                            }
                         }
                     }
                 };
 
             // Register the manager and tie its lifecycle to the output system.
-            let manager_handle = self.map(switcher).map(manager_system_logic).register(world);
+            let manager_handle = self.map(switcher).map(manager_system).register(world);
             world.entity_mut(*output_system).add_child(**manager_handle);
             output_system
         });
@@ -1970,7 +1961,7 @@ mod tests {
     use crate::{
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
-        prelude::{SignalVecExt, clone},
+        prelude::{IntoSignalVecEither, SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
         signal_vec::{MutableVecBuilder, VecDiff},
         utils::{LazyEntity, SSs},
@@ -2538,6 +2529,8 @@ mod tests {
             // Two different data sources to switch between.
             let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
             let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            let signal_a = list_a.signal_vec().map_in(identity);
+            let signal_b = list_b.signal_vec();
 
             // A resource to control which list is active.
             #[derive(Resource, Clone, Copy, PartialEq, Debug)]
@@ -2554,9 +2547,13 @@ mod tests {
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_vec(
-                clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                    ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
-                    ListSelector:: B => list_b.signal_vec().boxed_clone(),
+                clone!((/* list_a, list_b, */ signal_a, signal_b) move |In(selector): In<ListSelector>| match selector {
+                    // can use .left/right_either or .boxed_clone
+                    ListSelector:: A => signal_a.clone().left_either(),
+                    ListSelector:: B => signal_b.clone().right_either(),
+                    // TODO: this is the more conservative case, so it should be covered by the above case of signal reuse, but ideally they would both be explicitly tested
+                    // ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                    // ListSelector:: B => list_b.signal_vec().boxed_clone(),
                 }),
             );
 
