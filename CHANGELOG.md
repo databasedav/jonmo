@@ -20,4 +20,5 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `JonmoBuilder::observe` convenience method
 - `JonmoBuilder::on_signal_with_entity` convenience method
 - deref convenience for `LazyEntity`
+- `JonmoBuilder` derives `Default`
 
