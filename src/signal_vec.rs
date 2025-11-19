@@ -2018,7 +2018,7 @@ pub trait SignalVecExt: SignalVec {
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
                         SignalBuilder::from_system(
-                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState>| {
+                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
                                 Some(
                                     query
                                         .get(processor_entity_handle.get())
@@ -6979,6 +6979,249 @@ pub(crate) mod tests {
             assert!(current_state.is_empty());
 
             // --- 9. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
+    }
+
+    #[test]
+    fn test_enumerate() {
+        {
+            // A comprehensive test for `SignalVecExt::enumerate`, covering all `VecDiff`
+            // types. Since enumerate wraps each value with an index signal, we test
+            // that the structure is correct rather than trying to evaluate the signals.
+
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+
+            use crate::signal::Source;
+            type EnumeratedItem = (Source<Option<usize>>, i32);
+
+            #[derive(Resource, Default)]
+            struct EnumOutput(Vec<VecDiff<EnumeratedItem>>);
+
+            app.init_resource::<EnumOutput>();
+
+            let source_vec = MutableVecBuilder::from([10, 20, 30]).spawn(app.world_mut());
+
+            let enumerated = source_vec.signal_vec().enumerate();
+
+            // Custom capture system that doesn't require Debug
+            let capture = |In(diffs): In<Vec<VecDiff<EnumeratedItem>>>, mut output: ResMut<EnumOutput>| {
+                output.0.extend(diffs);
+            };
+
+            let handle = enumerated.for_each(capture).register(app.world_mut());
+
+            // Helper to get and clear diffs
+            let get_diffs = |world: &mut World| -> Vec<VecDiff<EnumeratedItem>> {
+                let output = world.resource::<EnumOutput>().0.clone();
+                world.resource_mut::<EnumOutput>().0.clear();
+                output
+            };
+
+            // Track all items with their index signals throughout the test
+            let mut tracked_items: Vec<(Source<Option<usize>>, i32)>;
+
+            // Helper to verify index signals match their positions
+            let verify_indices = |world: &mut World, items: &[(Source<Option<usize>>, i32)], expected: &[(usize, i32)]| {
+                assert_eq!(items.len(), expected.len(), "Item count mismatch");
+                for (i, ((index_signal, value), (expected_index, expected_value))) in 
+                    items.iter().zip(expected.iter()).enumerate() {
+                    assert_eq!(*value, *expected_value, "Value mismatch at position {}", i);
+                    
+                    // Register and poll the index signal to get its current value
+                    let signal_handle = index_signal.clone().register(world);
+                    let index = poll_signal(world, *signal_handle)
+                        .and_then(|any| downcast_any_clone::<Option<usize>>(any))
+                        .flatten();
+                    signal_handle.cleanup(world);
+                    
+                    assert_eq!(
+                        index,
+                        Some(*expected_index),
+                        "Index signal at position {} should be Some({}), but got {:?}",
+                        i, expected_index, index
+                    );
+                }
+            };
+
+            // --- 2. Test Initial State (Replace) ---
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            match &diffs[0] {
+                VecDiff::Replace { values } => {
+                    assert_eq!(values.len(), 3, "Should have 3 items initially.");
+                    assert_eq!(values[0].1, 10, "First value should be 10.");
+                    assert_eq!(values[1].1, 20, "Second value should be 20.");
+                    assert_eq!(values[2].1, 30, "Third value should be 30.");
+                    
+                    // Verify index signals
+                    verify_indices(app.world_mut(), values, &[(0, 10), (1, 20), (2, 30)]);
+                    
+                    // Track these items
+                    tracked_items = values.to_vec();
+                }
+                _ => panic!("Expected Replace diff"),
+            }
+
+            // --- 3. Test Push ---
+            source_vec.write(app.world_mut()).push(40);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push should produce one diff.");
+            match &diffs[0] {
+                VecDiff::Push { value } => {
+                    assert_eq!(value.1, 40, "Pushed value should be 40.");
+                    // Verify the pushed item has index 3
+                    verify_indices(app.world_mut(), std::slice::from_ref(value), &[(3, 40)]);
+                    
+                    // Add to tracked items
+                    tracked_items.push(value.clone());
+                }
+                _ => panic!("Expected Push diff"),
+            }
+            
+            // Verify all existing items still have correct indices
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 20), (2, 30), (3, 40)]);
+
+            // At this point we have: [10, 20, 30, 40] at indices [0, 1, 2, 3]
+            
+            // --- 4. Test InsertAt ---
+            source_vec.write(app.world_mut()).insert(1, 15);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "InsertAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::InsertAt { index, value } => {
+                    assert_eq!(*index, 1, "Insert index should be 1.");
+                    assert_eq!(value.1, 15, "Inserted value should be 15.");
+                    // New item at index 1 should have index signal of 1
+                    verify_indices(app.world_mut(), std::slice::from_ref(value), &[(1, 15)]);
+                    
+                    // Insert into tracked items
+                    tracked_items.insert(1, value.clone());
+                }
+                _ => panic!("Expected InsertAt diff"),
+            }
+            
+            // After insert at 1, the vec is: [10@0, 15@1, 20@2, 30@3, 40@4]
+            // CRITICAL: Verify that existing items' index signals have been updated!
+            app.update(); // Allow index signals to propagate
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 15), (2, 20), (3, 30), (4, 40)]);
+
+            // --- 5. Test UpdateAt ---
+            source_vec.write(app.world_mut()).set(2, 25);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "UpdateAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::UpdateAt { index, value } => {
+                    assert_eq!(*index, 2, "Update index should be 2.");
+                    assert_eq!(value.1, 25, "Updated value should be 25.");
+                    // Updated item should keep index 2
+                    verify_indices(app.world_mut(), std::slice::from_ref(value), &[(2, 25)]);
+                    
+                    // Update tracked item
+                    tracked_items[2] = value.clone();
+                }
+                _ => panic!("Expected UpdateAt diff"),
+            }
+            
+            // Verify all items still have correct indices
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 15), (2, 25), (3, 30), (4, 40)]);
+
+            // --- 6. Test RemoveAt ---
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::RemoveAt { index } => {
+                    assert_eq!(*index, 1, "Remove index should be 1.");
+                    
+                    // Remove from tracked items
+                    tracked_items.remove(1);
+                }
+                _ => panic!("Expected RemoveAt diff"),
+            }
+            
+            // After removal, indices should be updated: [10@0, 25@1, 30@2, 40@3]
+            // CRITICAL: Verify that remaining items' index signals have been updated!
+            app.update(); // Allow index signals to propagate
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 25), (2, 30), (3, 40)]);
+
+            // --- 7. Test Move ---
+            let current_len = source_vec.read(app.world()).len();
+            if current_len > 1 {
+                let old_idx = current_len - 1;
+                let new_idx = 0;
+                source_vec.write(app.world_mut()).move_item(old_idx, new_idx);
+                app.update();
+                let diffs = get_diffs(app.world_mut());
+                assert_eq!(diffs.len(), 1, "Move should produce one diff.");
+                match &diffs[0] {
+                    VecDiff::Move { old_index, new_index } => {
+                        assert_eq!(*old_index, old_idx, "Old index should match.");
+                        assert_eq!(*new_index, new_idx, "New index should match.");
+                        
+                        // Update tracked items
+                        let item = tracked_items.remove(old_idx);
+                        tracked_items.insert(new_idx, item);
+                    }
+                    _ => panic!("Expected Move diff"),
+                }
+                // After move, indices should be updated
+                // Vec is now: [40@0, 10@1, 25@2, 30@3]
+                // CRITICAL: Verify that all items' index signals have been updated!
+                app.update(); // Allow index signals to propagate
+                verify_indices(app.world_mut(), &tracked_items, &[(0, 40), (1, 10), (2, 25), (3, 30)]);
+            }
+
+            // --- 8. Test Pop ---
+            source_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Pop should produce one diff.");
+            assert!(matches!(diffs[0], VecDiff::Pop), "Expected Pop diff.");
+            
+            // Remove from tracked items
+            tracked_items.pop();
+            // Verify remaining items still have correct indices: [40@0, 10@1, 25@2]
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 40), (1, 10), (2, 25)]);
+
+            // --- 9. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Clear should produce one diff.");
+            assert!(matches!(diffs[0], VecDiff::Clear), "Expected Clear diff.");
+            
+            // Clear tracked items
+            tracked_items.clear();
+
+            // --- 10. Test Re-population after clear ---
+            source_vec.write(app.world_mut()).push(100);
+            source_vec.write(app.world_mut()).push(200);
+            app.update();
+
+            let diffs = get_diffs(app.world_mut());
+            // Should get Push diffs for the new items
+            assert_eq!(diffs.len(), 2, "Should have 2 Push diffs.");
+            match (&diffs[0], &diffs[1]) {
+                (VecDiff::Push { value: v1 }, VecDiff::Push { value: v2 }) => {
+                    assert_eq!(v1.1, 100, "First pushed value should be 100.");
+                    assert_eq!(v2.1, 200, "Second pushed value should be 200.");
+                    // Verify indices start from 0 again after clear
+                    verify_indices(app.world_mut(), std::slice::from_ref(v1), &[(0, 100)]);
+                    verify_indices(app.world_mut(), std::slice::from_ref(v2), &[(1, 200)]);
+                }
+                _ => panic!("Expected two Push diffs"),
+            }
+
+            // --- 11. Cleanup ---
             handle.cleanup(app.world_mut());
         }
 

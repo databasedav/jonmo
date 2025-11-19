@@ -272,9 +272,11 @@ fn number_toggles(row_parent: LazyEntity) -> JonmoBuilder {
             .insert(TextFont::from_font_size(13.))
             .insert(BackgroundColor(bevy::color::palettes::basic::GRAY.into()))
             .apply(on_click(
-                clone!((row_parent) move |_: On<Pointer<Click>>, world: &mut World| {
-                    let mut entity = world.entity_mut(row_parent.get());
-                    if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
+                clone!((row_parent) move |_: On<Pointer<Click>>, mut commands: Commands| {
+                    commands.queue(clone!((row_parent) move |world: &mut World| {                       
+                        let mut entity = world.entity_mut(row_parent.get());
+                        if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
+                    }))
                 }),
             ))
             .component_signal(
