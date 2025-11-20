@@ -2,8 +2,8 @@
 //! [`SignalExt`].
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalSystem, Upstream, UpstreamIter, downcast_any_clone, lazy_signal_from_system,
-        pipe_signal, poll_signal, process_signals,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, UpstreamIter, downcast_any_clone,
+        lazy_signal_from_system, pipe_signal, poll_signal, process_signals,
     },
     signal_vec::{ReplayOnce, SignalVec, SignalVecExt, VecDiff, trigger_replay},
     utils::{LazyEntity, SSs, ancestor_map},
@@ -1213,23 +1213,25 @@ pub trait SignalExt: Signal {
             LazySignal::new(move |world: &mut World| {
                 // 1. The state entity that holds the latest value. This is the communication channel between the
                 //    dynamic inner signals and the static output signal.
-                let state_entity = world
-                    .spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None })
-                    .id();
+                let reader_entity = LazyEntity::new();
 
                 // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
                 //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
                 //    forwarder.
                 let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
-                    move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                        if let Ok(mut state) = query.get_mut(state_entity) {
+                    clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
+                        if let Ok(mut state) = query.get_mut(reader_entity.get()) {
                             state.value.take()
                         } else {
                             None
                         }
-                    },
+                    }),
                 )
                 .register(world);
+                reader_entity.set(*reader_system);
+                world
+                    .entity_mut(*reader_system)
+                    .insert(FlattenState::<<Self::Item as Signal>::Item> { value: None });
 
                 // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
                 //    signals.
@@ -1272,7 +1274,7 @@ pub trait SignalExt: Signal {
                             // E. Write this initial value directly into the state component.
                             if let Some(value) = initial_value
                                 && let Some(mut state) =
-                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity)
+                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
                             {
                                 state.value = Some(value);
                             }
@@ -1281,8 +1283,8 @@ pub trait SignalExt: Signal {
                             // signal.
                             let forwarder_handle = inner_signal.map(
                         // This first map writes the value to the state component.
-                        move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                            if let Ok(mut state) = query.get_mut(state_entity) {
+                        move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
+                            if let Ok(mut state) = query.get_mut(*reader_system) {
                                 state.value = Some(value);
                             }
                         },
@@ -1308,8 +1310,7 @@ pub trait SignalExt: Signal {
                 //    cleaned up, it will also despawn its children.
                 world
                     .entity_mut(*reader_system)
-                    .add_child(state_entity)
-                    .add_child(**manager_system);
+                    .insert(SignalHandles::from([manager_system]));
                 reader_system
             });
         Flatten {
@@ -1480,7 +1481,7 @@ pub trait SignalExt: Signal {
 
             // Register the manager and tie its lifecycle to the output system.
             let manager_handle = self.map(switcher).map(manager_system).register(world);
-            world.entity_mut(*output_system).add_child(**manager_handle);
+            world.entity_mut(*output_system).insert(SignalHandles::from([manager_handle]));
             output_system
         });
         SwitchSignalVec {

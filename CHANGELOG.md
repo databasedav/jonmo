@@ -4,6 +4,15 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+### changed
+
+- upgraded to Bevy 0.17
+
+### fixed
+
+- `.switch_signal_vec` can take signal vecs that were initialized outside the body of the passed function
+- `.flatten`-ing signal combinators don't leak helper entities
+
 # 0.3.0 (2025-11-19)
 
 ### changed
