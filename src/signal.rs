@@ -152,6 +152,25 @@ where
     }
 }
 
+/// Signal graph node which maps its upstream [`Entity`] to its [`Changed`] `C` [`Component`],
+/// see [.component_changed](SignalExt::component_changed).
+#[derive(Clone)]
+pub struct ComponentChanged<Upstream, C> {
+    signal: Map<Upstream, C>,
+}
+
+impl<Upstream, C> Signal for ComponentChanged<Upstream, C>
+where
+    Upstream: Signal<Item = Entity>,
+    C: Component,
+{
+    type Item = C;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
 /// Signal graph node with maps its upstream [`Entity`] to whether it has some [`Component`], see
 /// [`.has_component`](SignalExt::has_component).
 #[derive(Clone)]
@@ -906,6 +925,36 @@ pub trait SignalExt: Signal {
         ComponentOption {
             signal: self
                 .map(|In(entity): In<Entity>, components: Query<&C>| Some(components.get(entity).ok().cloned())),
+        }
+    }
+
+    /// Map this [`Signal`]'s output [`Entity`] to its `C` [`Component`] on frames it has [`Changed`],
+    /// terminating for the frame if it does not exist or has not changed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Component, Clone)]
+    /// struct Value(u32);
+    ///
+    /// let mut world = World::new();
+    /// let entity = world.spawn(Value(0)).id();
+    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // outputs `Value(0)` on changed frames
+    ///
+    /// let entity = world.spawn_empty().id();
+    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // terminates
+    /// ```
+    fn component_changed<C>(self) -> ComponentChanged<Self, C>
+    where
+        Self: Sized,
+        Self: Signal<Item = Entity>,
+        C: Component + Clone,
+    {
+        ComponentChanged {
+            signal: self.map(|In(entity): In<Entity>, components: Query<&C, Changed<C>>| components.get(entity).ok().cloned()),
         }
     }
 
@@ -2293,6 +2342,46 @@ mod tests {
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(false));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_component_changed() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+        let entity = app.world_mut().spawn(TestData(1)).id();
+        let signal = SignalBuilder::from_entity(entity)
+            .component_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        
+        // First update: component is newly added, counts as changed
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(1)));
+        
+        // Reset output to verify signal doesn't fire on unchanged frame
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        
+        // Second update: no change, signal should not fire
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), None, "Signal should not fire when component hasn't changed");
+        
+        // Third update: mutate component, signal should fire
+        app.world_mut().get_mut::<TestData>(entity).unwrap().0 = 2;
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(2)));
+        
+        signal.cleanup(app.world_mut());
+        
+        // Test entity without component - signal should not fire
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        let entity_without = app.world_mut().spawn_empty().id();
+        let signal = SignalBuilder::from_entity(entity_without)
+            .component_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), None, "Signal should not fire for entity without component");
         signal.cleanup(app.world_mut());
     }
 
