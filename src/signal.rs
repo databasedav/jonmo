@@ -1472,9 +1472,8 @@ pub trait SignalExt: Signal {
                         let entity = *signal;
                         if world.get::<super::signal_vec::VecReplayTrigger>(entity).is_some() {
                             world.entity_mut(entity).insert(ReplayOnce);
-                            if trigger_replay::<super::signal_vec::VecReplayTrigger>(world, entity) {
-                                break;
-                            }
+                            trigger_replay::<super::signal_vec::VecReplayTrigger>(world, entity);
+                            break;
                         }
                     }
                 };
