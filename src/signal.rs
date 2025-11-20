@@ -1545,10 +1545,10 @@ pub trait SignalExt: Signal {
             struct SwitcherQueue<T: SSs>(Vec<VecDiff<T>>);
 
             // The output system is a "poller". It runs when poked and drains its own queue.
-            let output_system_entity = LazyEntity::new();
-            let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_system_entity) {
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
+                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
                         if queue.0.is_empty() {
                             None
                         } else {
@@ -1560,11 +1560,11 @@ pub trait SignalExt: Signal {
                 }),
             )
             .register(world);
-            output_system_entity.set(*output_system);
+            output_signal_entity.set(*output_signal);
 
-            // Add the queue component to the output system's entity so it can be found.
+            // Add the queue component to the output signal's entity so it can be found.
             world
-                .entity_mut(*output_system)
+                .entity_mut(*output_signal)
                 .insert(SwitcherQueue(Vec::<VecDiff<S::Item>>::new()));
 
             // This is the core logic. It runs whenever the outer signal changes.
@@ -1592,13 +1592,13 @@ pub trait SignalExt: Signal {
                     *active_signal = Some(new_signal);
 
                     // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
-                    // signal and poke the output system.
+                    // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<VecDiff<S::Item>>>, world: &mut World| {
                         if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_system)
+                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_signal)
                         {
                             queue.0.extend(diffs);
-                            process_signals(world, [output_system], Box::new(()));
+                            process_signals(world, [output_signal], Box::new(()));
                         }
                     };
 
@@ -1623,12 +1623,12 @@ pub trait SignalExt: Signal {
                     }
                 };
 
-            // Register the manager and tie its lifecycle to the output system.
+            // Register the manager and tie its lifecycle to the output signal.
             let manager_handle = self.map(switcher).map(manager_system).register(world);
             world
-                .entity_mut(*output_system)
+                .entity_mut(*output_signal)
                 .insert(SignalHandles::from([manager_handle]));
-            output_system
+            output_signal
         });
         SwitchSignalVec {
             signal,
@@ -1677,15 +1677,15 @@ pub trait SignalExt: Signal {
         F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
-            // A private component to queue diffs for the output system.
+            // A private component to queue diffs for the output signal.
             #[derive(Component)]
             struct SwitcherQueue<K: SSs, V: SSs>(Vec<super::signal_map::MapDiff<K, V>>);
 
-            // The output system is a "poller". It runs when poked and drains its own queue.
-            let output_system_entity = LazyEntity::new();
-            let output_system = lazy_signal_from_system::<_, Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_system_entity) {
+            // The output signal is a "poller". It runs when poked and drains its own queue.
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
+                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
                         if queue.0.is_empty() {
                             None
                         } else {
@@ -1697,11 +1697,11 @@ pub trait SignalExt: Signal {
                 }),
             )
             .register(world);
-            output_system_entity.set(*output_system);
+            output_signal_entity.set(*output_signal);
 
-            // Add the queue component to the output system's entity so it can be found.
+            // Add the queue component to the output signal's entity so it can be found.
             world
-                .entity_mut(*output_system)
+                .entity_mut(*output_signal)
                 .insert(SwitcherQueue(Vec::<super::signal_map::MapDiff<S::Key, S::Value>>::new()));
 
             // This is the core logic. It runs whenever the outer signal changes.
@@ -1729,14 +1729,14 @@ pub trait SignalExt: Signal {
                     *active_signal = Some(new_signal);
 
                     // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
-                    // signal and poke the output system.
+                    // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<super::signal_map::MapDiff<S::Key, S::Value>>>,
                                                 world: &mut World| {
                         if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_system)
+                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal)
                         {
                             queue.0.extend(diffs);
-                            process_signals(world, [output_system], Box::new(()));
+                            process_signals(world, [output_signal], Box::new(()));
                         }
                     };
 
@@ -1761,12 +1761,12 @@ pub trait SignalExt: Signal {
                     }
                 };
 
-            // Register the manager and tie its lifecycle to the output system.
+            // Register the manager and tie its lifecycle to the output signal.
             let manager_handle = self.map(switcher).map(manager_system).register(world);
             world
-                .entity_mut(*output_system)
+                .entity_mut(*output_signal)
                 .insert(SignalHandles::from([manager_handle]));
-            output_system
+            output_signal
         });
         SwitchSignalMap {
             signal,

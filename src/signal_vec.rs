@@ -1317,8 +1317,7 @@ pub trait SignalVecExt: SignalVec {
     {
         fn spawn_processor<Item: Clone + SSs, S: Signal<Item = Item> + Clone + 'static>(
             world: &mut World,
-            queue_entity: Entity,
-            output_system: SignalSystem,
+            output_signal: SignalSystem,
             index: usize,
             inner_signal: S,
         ) -> (SignalHandle, SignalSystem, Item) {
@@ -1332,12 +1331,12 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!((processor_entity) move |In(value): In<Item>, world: &mut World| {
                 if let Some(item_index_comp) = world.get::<ItemIndex>(processor_entity.get()) {
                     let current_index = item_index_comp.0;
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(queue_entity) {
+                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(*output_signal) {
                         queue.0.push(VecDiff::UpdateAt {
                             index: current_index,
                             value,
                         });
-                        process_signals(world, [output_system], Box::new(()));
+                        process_signals(world, [output_signal], Box::new(()));
                     }
                 }
             });
@@ -1349,10 +1348,10 @@ pub trait SignalVecExt: SignalVec {
 
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
-            let output_system_entity = LazyEntity::new();
-            let output_system_handle = SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(output_system_entity.get()) {
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(output_signal_entity.get()) {
                         if diffs.0.is_empty() {
                             None
                         } else {
@@ -1364,7 +1363,7 @@ pub trait SignalVecExt: SignalVec {
                 }),
             )
             .register(world);
-            output_system_entity.set(**output_system_handle);
+            output_signal_entity.set(*output_signal);
 
             #[derive(Component)]
             struct ManagerState<S: Signal> {
@@ -1372,15 +1371,13 @@ pub trait SignalVecExt: SignalVec {
                 _phantom: PhantomData<S>,
             }
 
-            let output_system_handle_clone = output_system_handle.clone();
             let manager_system_logic = move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
                 let mut new_diffs = Vec::new();
                 for diff in diffs {
                     match diff {
                         VecDiff::Replace { values } => {
                             let old_processors = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.drain(..).collect::<Vec<_>>()
                             };
                             for (handle, _) in old_processors {
@@ -1390,36 +1387,24 @@ pub trait SignalVecExt: SignalVec {
                             let mut new_values = Vec::with_capacity(values.len());
                             for (i, value) in values.into_iter().enumerate() {
                                 if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                    let (handle, inner_id, initial_value) = spawn_processor(
-                                        world,
-                                        **output_system_handle_clone,
-                                        *output_system_handle_clone,
-                                        i,
-                                        signal,
-                                    );
+                                    let (handle, inner_id, initial_value) =
+                                        spawn_processor(world, output_signal, i, signal);
                                     new_processors.push((handle, inner_id));
                                     new_values.push(initial_value);
                                 }
                             }
                             {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors = new_processors;
                             }
                             new_diffs.push(VecDiff::Replace { values: new_values });
                         }
                         VecDiff::InsertAt { index, value } => {
                             if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, inner_id, initial_value) = spawn_processor(
-                                    world,
-                                    **output_system_handle_clone,
-                                    *output_system_handle_clone,
-                                    index,
-                                    signal,
-                                );
+                                let (handle, inner_id, initial_value) =
+                                    spawn_processor(world, output_signal, index, signal);
                                 let handles_to_update = {
-                                    let mut manager_state =
-                                        world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                    let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state.processors.insert(index, (handle, inner_id));
                                     manager_state
                                         .processors
@@ -1442,8 +1427,7 @@ pub trait SignalVecExt: SignalVec {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let is_same_signal = {
-                                    let manager_state =
-                                        world.get::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                    let manager_state = world.get::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state
                                         .processors
                                         .get(index)
@@ -1454,7 +1438,7 @@ pub trait SignalVecExt: SignalVec {
                                 } else {
                                     let old_handle = {
                                         let mut manager_state =
-                                            world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                            world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                         if index < manager_state.processors.len() {
                                             Some(manager_state.processors.remove(index).0)
                                         } else {
@@ -1464,16 +1448,11 @@ pub trait SignalVecExt: SignalVec {
                                     if let Some(handle) = old_handle {
                                         handle.cleanup(world);
                                     }
-                                    let (new_handle, new_id, initial_value) = spawn_processor(
-                                        world,
-                                        **output_system_handle_clone,
-                                        *output_system_handle_clone,
-                                        index,
-                                        new_inner_signal,
-                                    );
+                                    let (new_handle, new_id, initial_value) =
+                                        spawn_processor(world, output_signal, index, new_inner_signal);
                                     {
                                         let mut manager_state =
-                                            world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                            world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                         manager_state.processors.insert(index, (new_handle, new_id));
                                     }
                                     new_diffs.push(VecDiff::UpdateAt {
@@ -1485,8 +1464,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::RemoveAt { index } => {
                             let (handle, handles_to_update) = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 let (handle, _) = manager_state.processors.remove(index);
                                 let handles = manager_state
                                     .processors
@@ -1505,8 +1483,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Move { old_index, new_index } => {
                             let handles_to_update = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 let processor = manager_state.processors.remove(old_index);
                                 manager_state.processors.insert(new_index, processor);
                                 let start = old_index.min(new_index);
@@ -1527,20 +1504,14 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Push { value } => {
                             let index = {
-                                let manager_state = world.get::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let manager_state = world.get::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.len()
                             };
                             if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, inner_id, initial_value) = spawn_processor(
-                                    world,
-                                    **output_system_handle_clone,
-                                    *output_system_handle_clone,
-                                    index,
-                                    signal,
-                                );
+                                let (handle, inner_id, initial_value) =
+                                    spawn_processor(world, output_signal, index, signal);
                                 {
-                                    let mut manager_state =
-                                        world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                    let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state.processors.push((handle, inner_id));
                                 }
                                 new_diffs.push(VecDiff::Push { value: initial_value });
@@ -1548,8 +1519,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Pop => {
                             let maybe_handle = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.pop().map(|(handle, _)| handle)
                             };
                             if let Some(handle) = maybe_handle {
@@ -1559,8 +1529,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Clear => {
                             let old_processors = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.drain(..).collect::<Vec<_>>()
                             };
                             for (handle, _) in old_processors {
@@ -1571,15 +1540,15 @@ pub trait SignalVecExt: SignalVec {
                     }
                 }
                 if !new_diffs.is_empty() {
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<S::Item>>(**output_system_handle_clone) {
+                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<S::Item>>(*output_signal) {
                         queue.0.extend(new_diffs);
                     }
-                    process_signals(world, [*output_system_handle_clone], Box::new(()));
+                    process_signals(world, [output_signal], Box::new(()));
                 }
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
             world
-                .entity_mut(**output_system_handle)
+                .entity_mut(*output_signal)
                 .insert((
                     ManagerState::<S> {
                         processors: Vec::new(),
@@ -1590,7 +1559,7 @@ pub trait SignalVecExt: SignalVec {
                 .add_child(factory_system_id.entity())
                 .insert(SignalHandles::from([manager_handle]));
 
-            *output_system_handle
+            output_signal
         });
         MapSignal {
             signal,

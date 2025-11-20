@@ -226,11 +226,6 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
         },
         BorderRadius::all(Val::Px(GAP * 2.)),
     ))
-    .with_entity(|mut entity| {
-        entity.observe(|click: On<Pointer<Click>>, nodes: Query<&ComputedNode>| {
-            println!("{}", nodes.get(click.event().event_target()).unwrap().size());
-        });
-    })
     .component_signal(
         data.clone()
             .map_in(|LetterData { pressed, .. }| pressed)

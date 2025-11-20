@@ -8,6 +8,12 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - upgraded to Bevy 0.17
 
+### added
+
+- `JonmoBuilder::component_signal_from_component_changed` convenience method
+- `SignalExt::component_changed`
+- `SignalExt::switch_signal_map`
+
 ### fixed
 
 - `.switch_signal_vec` can take signal vecs that were initialized outside the body of the passed function

@@ -532,10 +532,10 @@ pub trait SignalMapExt: SignalMap {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
-            let output_system_entity = LazyEntity::new();
-            let output_system_handle = SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(output_system_entity.get())
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                    if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(output_signal_entity.get())
                     {
                         if diffs.0.is_empty() {
                             None
@@ -548,12 +548,11 @@ pub trait SignalMapExt: SignalMap {
                 }),
             )
             .register(world);
-            output_system_entity.set(**output_system_handle);
+            output_signal_entity.set(*output_signal);
 
             fn spawn_processor<K: Clone + SSs, V: Clone + SSs>(
                 world: &mut World,
-                queue_entity: Entity,
-                output_system: SignalSystem,
+                output_signal: SignalSystem,
                 key: K,
                 inner_signal: impl Signal<Item = V> + Clone + 'static,
             ) -> (SignalHandle, SignalSystem, V) {
@@ -565,12 +564,12 @@ pub trait SignalMapExt: SignalMap {
                 temp_handle.cleanup(world);
                 let processor_handle = inner_signal
                     .map(move |In(value): In<V>, world: &mut World| {
-                        if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(queue_entity) {
+                        if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(*output_signal) {
                             queue.0.push(MapDiff::Update {
                                 key: key.clone(),
                                 value,
                             });
-                            process_signals(world, [output_system], Box::new(()));
+                            process_signals(world, [output_signal], Box::new(()));
                         }
                     })
                     .register(world);
@@ -583,16 +582,13 @@ pub trait SignalMapExt: SignalMap {
                 _phantom: PhantomData<S>,
             }
 
-            let output_system_handle_clone = output_system_handle.clone();
             let manager_system_logic = move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, world: &mut World| {
                 let mut new_map_diffs = Vec::new();
                 for diff in diffs {
                     match diff {
                         MapDiff::Replace { entries } => {
                             let old_signals = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 core::mem::take(&mut state.signals)
                             };
                             for (_, (handle, _)) in old_signals {
@@ -602,19 +598,14 @@ pub trait SignalMapExt: SignalMap {
                             let mut new_entries_for_diff = Vec::with_capacity(entries.len());
                             for (key, value) in entries {
                                 if let Ok(inner_signal) = world.run_system_with(factory_system_id, value) {
-                                    let (handle, id, initial_value) = spawn_processor(
-                                        world,
-                                        **output_system_handle_clone,
-                                        *output_system_handle_clone,
-                                        key.clone(),
-                                        inner_signal,
-                                    );
+                                    let (handle, id, initial_value) =
+                                        spawn_processor(world, output_signal, key.clone(), inner_signal);
                                     new_signals.insert(key.clone(), (handle, id));
                                     new_entries_for_diff.push((key, initial_value));
                                 }
                             }
                             world
-                                .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
+                                .get_mut::<ManagerState<Self::Key, S>>(*output_signal)
                                 .unwrap()
                                 .signals = new_signals;
                             if !new_entries_for_diff.is_empty() {
@@ -625,17 +616,11 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Insert { key, value } => {
                             if let Ok(inner_signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, id, initial_value) = spawn_processor(
-                                    world,
-                                    **output_system_handle_clone,
-                                    *output_system_handle_clone,
-                                    key.clone(),
-                                    inner_signal,
-                                );
+                                let (handle, id, initial_value) =
+                                    spawn_processor(world, output_signal, key.clone(), inner_signal);
                                 let old_handle = {
-                                    let mut state = world
-                                        .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                        .unwrap();
+                                    let mut state =
+                                        world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state.signals.insert(key.clone(), (handle, id))
                                 };
                                 if let Some((old_handle, _)) = old_handle {
@@ -651,26 +636,18 @@ pub trait SignalMapExt: SignalMap {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let old_inner_id_opt = {
-                                    let state = world
-                                        .get::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                        .unwrap();
+                                    let state = world.get::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state.signals.get(&key).map(|(_, id)| *id)
                                 };
                                 if old_inner_id_opt == Some(*new_inner_id) {
                                     new_inner_id.cleanup(world);
                                     continue;
                                 }
-                                let (new_processor_handle, new_processor_id, initial_value) = spawn_processor(
-                                    world,
-                                    **output_system_handle_clone,
-                                    *output_system_handle_clone,
-                                    key.clone(),
-                                    new_inner_signal,
-                                );
+                                let (new_processor_handle, new_processor_id, initial_value) =
+                                    spawn_processor(world, output_signal, key.clone(), new_inner_signal);
                                 let old_processor_handle = {
-                                    let mut state = world
-                                        .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                        .unwrap();
+                                    let mut state =
+                                        world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state
                                         .signals
                                         .insert(key.clone(), (new_processor_handle, new_processor_id))
@@ -687,9 +664,7 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Remove { key } => {
                             let old_handle = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 state.signals.remove(&key)
                             };
                             if let Some((handle, _)) = old_handle {
@@ -699,9 +674,7 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Clear => {
                             let old_signals = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 if state.signals.is_empty() {
                                     BTreeMap::new()
                                 } else {
@@ -718,16 +691,15 @@ pub trait SignalMapExt: SignalMap {
                     }
                 }
                 if !new_map_diffs.is_empty()
-                    && let Some(mut queue) =
-                        world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(**output_system_handle_clone)
+                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal)
                 {
                     queue.0.extend(new_map_diffs);
                 }
-                process_signals(world, [*output_system_handle_clone], Box::new(()));
+                process_signals(world, [output_signal], Box::new(()));
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
             world
-                .entity_mut(**output_system_handle)
+                .entity_mut(*output_signal)
                 .insert((
                     ManagerState::<Self::Key, S> {
                         signals: BTreeMap::new(),
@@ -738,7 +710,7 @@ pub trait SignalMapExt: SignalMap {
                 .add_child(factory_system_id.entity())
                 .insert(SignalHandles::from([manager_handle]));
 
-            *output_system_handle
+            output_signal
         });
         MapValueSignal {
             signal,
