@@ -163,8 +163,8 @@ clone_trait_object!(<T> SignalVecDynClone<Item = T>);
 
 impl<T: SignalVec + Clone + 'static> SignalVecDynClone for T {}
 
-impl<O: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = O> + Send + Sync> {
-    type Item = O;
+impl<T: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = T> + Send + Sync> {
+    type Item = T;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         (*self).register_boxed_signal_vec(world)
@@ -1015,8 +1015,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Enables returning different concrete [`Signal`] types from branching logic without boxing,
-/// although note that all [`Signal`]s are boxed internally regardless.
+/// Enables returning different concrete [`SignalVec`] types from branching logic without boxing,
+/// although note that all [`SignalVec`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
 #[derive(Clone)]
@@ -1045,13 +1045,44 @@ where
     }
 }
 
-/// Blanket trait for transforming [`Signal`]s into [`SignalVecEither::Left`] or
+/// Blanket trait for transforming [`SignalVec`]s into [`SignalVecEither::Left`] or
 /// [`SignalVecEither::Right`].
-#[allow(missing_docs)]
 pub trait IntoSignalVecEither: Sized
 where
     Self: SignalVec,
 {
+    /// Wrap this [`SignalVec`] in the [`SignalVecEither::Left`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalVec`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct ShowFiltered(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(ShowFiltered(true));
+    ///
+    /// let list = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ShowFiltered>| res.0)
+    ///     .switch_signal_vec(move |In(show_filtered): In<bool>, world: &mut World| {
+    ///         if show_filtered {
+    ///             list.signal_vec()
+    ///                 .filter(|In(x): In<i32>| x % 2 == 0)
+    ///                 .left_either()
+    ///         } else {
+    ///             list.signal_vec().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalVecEither types
+    /// ```
     fn left_either<R>(self) -> SignalVecEither<Self, R>
     where
         R: SignalVec,
@@ -1059,6 +1090,37 @@ where
         SignalVecEither::Left(self)
     }
 
+    /// Wrap this [`SignalVec`] in the [`SignalVecEither::Right`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalVec`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct ListMode(u8);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(ListMode(0));
+    ///
+    /// let list_a = MutableVecBuilder::from([10, 20]).spawn(&mut world);
+    /// let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ListMode>| res.0)
+    ///     .switch_signal_vec(move |In(mode): In<u8>, world: &mut World| {
+    ///         if mode == 0 {
+    ///             list_a.signal_vec().map_in(|x: i32| x * 2).left_either()
+    ///         } else {
+    ///             list_b.signal_vec().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalVecEither types
+    /// ```
     fn right_either<L>(self) -> SignalVecEither<L, Self>
     where
         L: SignalVec,
@@ -1288,8 +1350,8 @@ pub trait SignalVecExt: SignalVec {
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
             let output_system_entity = LazyEntity::new();
-            let output_system_handle =
-                SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(clone!((output_system_entity) move |_: In<()>, world: &mut World| {
+            let output_system_handle = SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+                clone!((output_system_entity) move |_: In<()>, world: &mut World| {
                     if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(output_system_entity.get()) {
                         if diffs.0.is_empty() {
                             None
@@ -1299,8 +1361,9 @@ pub trait SignalVecExt: SignalVec {
                     } else {
                         None
                     }
-                }))
-                .register(world);
+                }),
+            )
+            .register(world);
             output_system_entity.set(**output_system_handle);
 
             #[derive(Component)]
@@ -1379,7 +1442,8 @@ pub trait SignalVecExt: SignalVec {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let is_same_signal = {
-                                    let manager_state = world.get::<ManagerState<S>>(**output_system_handle_clone).unwrap();
+                                    let manager_state =
+                                        world.get::<ManagerState<S>>(**output_system_handle_clone).unwrap();
                                     manager_state
                                         .processors
                                         .get(index)

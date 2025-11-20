@@ -430,8 +430,8 @@ impl JonmoBuilder {
     /// [`Component`] on frames it has [`Changed`] and returns a [`Signal`] that outputs an
     /// [`Option`]al `O`; this resulting [`Signal`] reactively sets this builder's [`Entity`]'s `O`
     /// [`Component`]; if the [`Signal`] outputs [`None`], the `O` [`Component`] is removed. If this
-    /// builder's [`Entity`] does not have a `C` [`Component`] or it has not [`Changed`], the [`Signal`]
-    /// chain will terminate for the frame.
+    /// builder's [`Entity`] does not have a `C` [`Component`] or it has not [`Changed`], the
+    /// [`Signal`]'s execution path will terminate for the frame.
     pub fn component_signal_from_component_changed<I, O, S, F>(self, f: F) -> Self
     where
         I: Component + Clone,
@@ -440,7 +440,8 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
     {
         self.component_signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&I, Changed<I>>| components.get(entity).ok().cloned()))
+            f(signal
+                .map(|In(entity): In<Entity>, components: Query<&I, Changed<I>>| components.get(entity).ok().cloned()))
         })
     }
 
@@ -2440,7 +2441,9 @@ mod tests {
         );
 
         // Add the SourceComponent later and verify the signal starts working.
-        app.world_mut().entity_mut(entity_no_source).insert(SourceComponent(100));
+        app.world_mut()
+            .entity_mut(entity_no_source)
+            .insert(SourceComponent(100));
         app.update();
         assert_eq!(
             app.world().get::<TargetComponent>(entity_no_source),

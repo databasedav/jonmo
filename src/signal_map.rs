@@ -2,8 +2,8 @@
 //! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalHandles, SignalSystem, downcast_any_clone, lazy_signal_from_system, pipe_signal,
-        poll_signal, process_signals, register_signal,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, downcast_any_clone, lazy_signal_from_system,
+        pipe_signal, poll_signal, process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
     signal_vec::{ReplayOnce, Replayable, SignalVec, VecDiff},
@@ -139,12 +139,22 @@ impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMap<Key = K, Value = V>
 /// An extension trait for [`SignalMap`] types that implement [`Clone`].
 ///
 /// Relevant in contexts where some function may require a [`Clone`] [`SignalMap`], but the concrete
-/// type can't be known at compile-time.
+/// type can't be known at compile-time, e.g. in a
+/// [`.switch_signal_map`](SignalExt::switch_signal_map).
 pub trait SignalMapDynClone: SignalMap + DynClone {}
 
 clone_trait_object!(<K, V> SignalMapDynClone<Key = K, Value = V>);
 
 impl<T: SignalMap + Clone + 'static> SignalMapDynClone for T {}
+
+impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMapDynClone<Key = K, Value = V> + Send + Sync> {
+    type Key = K;
+    type Value = V;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+        (*self).register_boxed_signal_map(world)
+    }
+}
 
 /// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<MapDiff>`]s of its
 /// upstream, see [.for_each](SignalMapExt::for_each).
@@ -303,6 +313,126 @@ where
         self.signal.register(world).into()
     }
 }
+
+/// Enables returning different concrete [`SignalMap`] types from branching logic without boxing,
+/// although note that all [`SignalMap`]s are boxed internally regardless.
+///
+/// Inspired by <https://github.com/rayon-rs/either>.
+#[derive(Clone)]
+#[allow(missing_docs)]
+pub enum SignalMapEither<L, R>
+where
+    L: SignalMap,
+    R: SignalMap,
+{
+    Left(L),
+    Right(R),
+}
+
+impl<K, V, L, R> SignalMap for SignalMapEither<L, R>
+where
+    L: SignalMap<Key = K, Value = V>,
+    R: SignalMap<Key = K, Value = V>,
+{
+    type Key = K;
+    type Value = V;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+        match *self {
+            SignalMapEither::Left(left) => left.register_signal_map(world),
+            SignalMapEither::Right(right) => right.register_signal_map(world),
+        }
+    }
+}
+
+/// Blanket trait for transforming [`SignalMap`]s into [`SignalMapEither::Left`] or
+/// [`SignalMapEither::Right`].
+pub trait IntoSignalMapEither: Sized
+where
+    Self: SignalMap,
+{
+    /// Wrap this [`SignalMap`] in the [`SignalMapEither::Left`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalMap`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct DoubleValues(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(DoubleValues(true));
+    ///
+    /// let map = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<DoubleValues>| res.0)
+    ///     .switch_signal_map(move |In(double): In<bool>, world: &mut World| {
+    ///         if double {
+    ///             map.signal_map()
+    ///                 .map_value(|In(v): In<i32>| v * 2)
+    ///                 .left_either()
+    ///         } else {
+    ///             map.signal_map().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalMapEither types
+    /// ```
+    fn left_either<R>(self) -> SignalMapEither<Self, R>
+    where
+        R: SignalMap,
+    {
+        SignalMapEither::Left(self)
+    }
+
+    /// Wrap this [`SignalMap`] in the [`SignalMapEither::Right`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalMap`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct MapSelector(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(MapSelector(false));
+    ///
+    /// let map_a = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
+    /// let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<MapSelector>| res.0)
+    ///     .switch_signal_map(move |In(use_a): In<bool>, world: &mut World| {
+    ///         if use_a {
+    ///             map_a
+    ///                 .signal_map()
+    ///                 .map_value(|In(v): In<i32>| v * 10)
+    ///                 .left_either()
+    ///         } else {
+    ///             map_b.signal_map().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalMapEither types
+    /// ```
+    fn right_either<L>(self) -> SignalMapEither<L, Self>
+    where
+        L: SignalMap,
+    {
+        SignalMapEither::Right(self)
+    }
+}
+
+impl<T: SignalMap> IntoSignalMapEither for T {}
 
 /// Extension trait providing combinator methods for [`SignalMap`]s.
 pub trait SignalMapExt: SignalMap {
@@ -521,8 +651,9 @@ pub trait SignalMapExt: SignalMap {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let old_inner_id_opt = {
-                                    let state =
-                                        world.get::<ManagerState<Self::Key, S>>(**output_system_handle_clone).unwrap();
+                                    let state = world
+                                        .get::<ManagerState<Self::Key, S>>(**output_system_handle_clone)
+                                        .unwrap();
                                     state.signals.get(&key).map(|(_, id)| *id)
                                 };
                                 if old_inner_id_opt == Some(*new_inner_id) {
@@ -587,7 +718,8 @@ pub trait SignalMapExt: SignalMap {
                     }
                 }
                 if !new_map_diffs.is_empty()
-                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(**output_system_handle_clone)
+                    && let Some(mut queue) =
+                        world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(**output_system_handle_clone)
                 {
                     queue.0.extend(new_map_diffs);
                 }
@@ -734,6 +866,43 @@ pub trait SignalMapExt: SignalMap {
     fn boxed(self) -> Box<dyn SignalMap<Key = Self::Key, Value = Self::Value>>
     where
         Self: Sized,
+    {
+        Box::new(self)
+    }
+
+    /// Erases the type of this [`SignalMap`], allowing it to be used in conjunction with
+    /// [`SignalMap`]s of other concrete types, particularly in cases where the consumer requires
+    /// [`Clone`], e.g. [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system(|_: In<()>| true).switch_signal_map(
+    ///     |In(condition): In<bool>, world: &mut World| {
+    ///         if condition {
+    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///                 .map_value(|In(x): In<i32>| x * 2)
+    ///                 .boxed_clone() // this is a `MapValue<Source<i32, i32>>`
+    ///         } else {
+    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///                 .map_value_signal(|In(x): In<i32>| {
+    ///                     SignalBuilder::from_system(move |_: In<()>| x * 2)
+    ///                 })
+    ///                 .boxed_clone() // this is a `MapValueSignal<Source<i32, i32>>`
+    ///         } // without the `.boxed_clone()`, the compiler would not allow this
+    ///     },
+    /// );
+    /// ```
+    fn boxed_clone(self) -> Box<dyn SignalMapDynClone<Key = Self::Key, Value = Self::Value> + Send + Sync>
+    where
+        Self: Sized + Clone,
     {
         Box::new(self)
     }
