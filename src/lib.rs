@@ -58,7 +58,10 @@ pub mod prelude {
         JonmoPlugin,
         graph::SignalHandles,
         signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
-        signal_map::{MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap, SignalMapExt},
+        signal_map::{
+            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap,
+            SignalMapEither, SignalMapExt,
+        },
         signal_vec::{
             IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
             SignalVecExt,

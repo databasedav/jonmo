@@ -102,7 +102,10 @@ impl JonmoBuilder {
     }
 
     /// Attach an [`Observer`] to this builder.
-    pub fn observe<E: Event, B: Bundle, Marker>(self, observer: impl IntoObserverSystem<E, B, Marker> + Sync) -> Self {
+    pub fn observe<E: EntityEvent, B: Bundle, Marker>(
+        self,
+        observer: impl IntoObserverSystem<E, B, Marker> + Sync,
+    ) -> Self {
         self.on_spawn(|world, entity| {
             if let Ok(mut entity) = world.get_entity_mut(entity) {
                 entity.observe(observer);
@@ -423,6 +426,25 @@ impl JonmoBuilder {
         })
     }
 
+    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
+    /// [`Component`] on frames it has [`Changed`] and returns a [`Signal`] that outputs an
+    /// [`Option`]al `O`; this resulting [`Signal`] reactively sets this builder's [`Entity`]'s `O`
+    /// [`Component`]; if the [`Signal`] outputs [`None`], the `O` [`Component`] is removed. If this
+    /// builder's [`Entity`] does not have a `C` [`Component`] or it has not [`Changed`], the
+    /// [`Signal`]'s execution path will terminate for the frame.
+    pub fn component_signal_from_component_changed<I, O, S, F>(self, f: F) -> Self
+    where
+        I: Component + Clone,
+        O: Component,
+        S: Signal<Item = Option<O>> + SSs,
+        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
+    {
+        self.component_signal_from_entity(|signal| {
+            f(signal
+                .map(|In(entity): In<Entity>, components: Query<&I, Changed<I>>| components.get(entity).ok().cloned()))
+        })
+    }
+
     /// Declare a static child.
     pub fn child(self, child: impl Into<JonmoBuilder>) -> Self {
         let block = self.child_block_populations.lock().unwrap().len();
@@ -688,6 +710,7 @@ mod tests {
 
     /// Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
+        cleanup();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app
@@ -2335,6 +2358,144 @@ mod tests {
         // The test passes if the app doesn't panic on subsequent updates, proving
         // the signal isn't trying to access a despawned entity.
         app.update();
+    }
+
+    #[test]
+    fn test_component_signal_from_component_changed() {
+        // --- 1. Setup ---
+        let mut app = create_test_app();
+
+        // The component that acts as the data source for the signal.
+        #[derive(Component, Clone, Debug, PartialEq)]
+        struct SourceComponent(i32);
+
+        // The component that will be reactively managed by the signal's output.
+        #[derive(Component, Clone, Debug, PartialEq)]
+        struct TargetComponent(String);
+
+        // The factory closure that defines the signal logic.
+        // It receives a signal of the `SourceComponent` (only on changed frames)
+        // and transforms its value into an `Option<TargetComponent>`.
+        let signal_factory = |source_signal: crate::signal::Map<crate::signal::Source<Entity>, SourceComponent>| {
+            source_signal
+                // Map the source value to the target component's value.
+                .map_in(|source: SourceComponent| TargetComponent(format!("Value is {}", source.0)))
+                // The final signal must produce an `Option`.
+                .map_in(Some)
+        };
+
+        // --- 2. Test Initial State & Reactivity on Changed Frames ---
+        let builder1 = JonmoBuilder::new()
+            .insert(SourceComponent(10))
+            .component_signal_from_component_changed(signal_factory);
+
+        let entity1 = builder1.spawn(app.world_mut());
+
+        // Frame 1: The `SourceComponent` is newly added, which counts as `Changed`.
+        // The signal should fire and insert the `TargetComponent`.
+        app.update();
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity1),
+            Some(&TargetComponent("Value is 10".to_string())),
+            "TargetComponent should be inserted on initial spawn."
+        );
+
+        // Frame 2: No change to `SourceComponent`. The signal should not fire.
+        // Remove the TargetComponent to verify it doesn't get re-added.
+        app.world_mut().entity_mut(entity1).remove::<TargetComponent>();
+        app.update();
+        assert!(
+            app.world().get::<TargetComponent>(entity1).is_none(),
+            "TargetComponent should not be re-inserted on an unchanged frame."
+        );
+
+        // Frame 3: Mutate the `SourceComponent`. The signal should fire and update the
+        // `TargetComponent`.
+        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 20;
+        app.update();
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity1),
+            Some(&TargetComponent("Value is 20".to_string())),
+            "TargetComponent should be updated after SourceComponent changes."
+        );
+
+        // Frame 4: Mutate again to verify continued reactivity.
+        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 30;
+        app.update();
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity1),
+            Some(&TargetComponent("Value is 30".to_string())),
+            "TargetComponent should be updated on subsequent changes."
+        );
+
+        // --- 3. Test Failure Case: No SourceComponent ---
+        // Spawn an entity with the signal but without the `SourceComponent`.
+        // The signal chain should terminate gracefully and not insert the `TargetComponent`.
+        let builder_no_source = JonmoBuilder::new().component_signal_from_component_changed(signal_factory);
+        let entity_no_source = builder_no_source.spawn(app.world_mut());
+
+        app.update();
+        assert!(
+            app.world().get::<TargetComponent>(entity_no_source).is_none(),
+            "TargetComponent should not be inserted if SourceComponent is missing."
+        );
+
+        // Add the SourceComponent later and verify the signal starts working.
+        app.world_mut()
+            .entity_mut(entity_no_source)
+            .insert(SourceComponent(100));
+        app.update();
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity_no_source),
+            Some(&TargetComponent("Value is 100".to_string())),
+            "TargetComponent should be inserted after SourceComponent is added."
+        );
+
+        // --- 4. Test Multi-Entity Independence ---
+        let builder2 = JonmoBuilder::new()
+            .insert(SourceComponent(200))
+            .component_signal_from_component_changed(signal_factory);
+        let entity2 = builder2.spawn(app.world_mut());
+
+        // Frame: Update entity2 (on spawn) and entity1 (manual change).
+        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 40;
+        app.update();
+
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity1),
+            Some(&TargetComponent("Value is 40".to_string())),
+            "Entity 1 failed to update in multi-entity test."
+        );
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity2),
+            Some(&TargetComponent("Value is 200".to_string())),
+            "Entity 2 failed to initialize in multi-entity test."
+        );
+
+        // --- 5. Test Automatic Cleanup ---
+        app.world_mut().entity_mut(entity1).despawn();
+        app.update(); // Process despawn command.
+
+        // Mutate the `SourceComponent` of the remaining entities.
+        app.world_mut().get_mut::<SourceComponent>(entity2).unwrap().0 = 300;
+        app.world_mut().get_mut::<SourceComponent>(entity_no_source).unwrap().0 = 150;
+        app.update();
+
+        // The test passes if the app doesn't panic. We also verify the state.
+        assert!(
+            app.world().get_entity(entity1).is_err(),
+            "Despawned entity should not exist."
+        );
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity2),
+            Some(&TargetComponent("Value is 300".to_string())),
+            "Entity 2 failed to update after entity1 was despawned."
+        );
+        assert_eq!(
+            app.world().get::<TargetComponent>(entity_no_source),
+            Some(&TargetComponent("Value is 150".to_string())),
+            "Entity no_source failed to update after entity1 was despawned."
+        );
     }
 
     #[test]

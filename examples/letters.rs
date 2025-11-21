@@ -10,21 +10,34 @@ use bevy_platform::collections::HashMap;
 use bevy::{prelude::*, window::WindowResolution};
 use jonmo::prelude::*;
 
+const SAVE_CHARS: &str = "abcdefgh";
+
 fn main() {
     let mut app = App::new();
-    let letters = MutableBTreeMapBuilder::from(
-        ROWS.iter()
-            .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
-            .collect::<BTreeMap<_, _>>(),
-    )
-    .spawn(app.world_mut());
+
+    let save_states: HashMap<_, _> = SAVE_CHARS
+        .chars()
+        .map(|save_char| {
+            (
+                save_char,
+                MutableBTreeMapBuilder::from(
+                    ROWS.iter()
+                        .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+                .spawn(app.world_mut()),
+            )
+        })
+        .collect();
+
     app.add_plugins(examples_plugin)
-        .insert_resource(Letters(letters.clone()))
+        .insert_resource(SaveStates(save_states))
+        .insert_resource(ActiveSave('a'))
         .add_systems(
             Startup,
             (
-                move |world: &mut World| {
-                    ui_root(letters.clone()).spawn(world);
+                |world: &mut World| {
+                    ui_root().spawn(world);
                 },
                 camera,
             ),
@@ -42,11 +55,20 @@ struct LetterData {
 }
 
 #[derive(Resource, Clone)]
-struct Letters(MutableBTreeMap<char, LetterData>);
+struct SaveStates(HashMap<char, MutableBTreeMap<char, LetterData>>);
+
+#[derive(Resource, Clone, Copy, PartialEq)]
+struct ActiveSave(char);
+
+fn get_active_map(save_states: &SaveStates, active_save: ActiveSave) -> MutableBTreeMap<char, LetterData> {
+    save_states.0.get(&active_save.0).unwrap().clone()
+}
 
 const LETTER_SIZE: f32 = 60.;
 
-fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
+fn ui_root() -> JonmoBuilder {
+    let active_save_signal = SignalBuilder::from_resource::<ActiveSave>().dedupe();
+
     JonmoBuilder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -57,7 +79,7 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
         JonmoBuilder::from(Node {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(GAP * 2.),
-            padding: UiRect::all(Val::Px(GAP * 2.)),
+            padding: UiRect::all(Val::Px(GAP * 4.)),
             width: Val::Px(WindowResolution::default().physical_width() as f32),
             justify_content: JustifyContent::Center,
             ..default()
@@ -65,19 +87,30 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
         .child(
             JonmoBuilder::from(Node {
                 align_self: AlignSelf::Center,
-                justify_content: JustifyContent::FlexEnd,
+                justify_content: JustifyContent::SpaceBetween,
                 width: Val::Percent(100.),
-                // height: Val::Px(100.),
-                padding: UiRect::all(Val::Px(GAP * 2.)),
                 ..default()
             })
+            .child(
+                JonmoBuilder::from(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(GAP * 2.),
+                    ..default()
+                })
+                .children(SAVE_CHARS.chars().map(clone!((active_save_signal) move |save_char| {
+                    save_card(save_char, active_save_signal.clone())
+                }))),
+            )
             .child(
                 text_node()
                     .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                     .with_component::<Node>(|mut node| node.height = Val::Px(100.))
                     .component_signal(
-                        letters
-                            .signal_vec_entries()
+                        active_save_signal
+                            .clone()
+                            .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+                                get_active_map(&save_states, active_save).signal_vec_entries()
+                            })
                             .map_in(|(_, LetterData { count, .. })| count)
                             .sum()
                             .dedupe()
@@ -87,14 +120,23 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                     ),
             ),
         )
-        .children(ROWS.into_iter().map(move |row| {
+        .children(ROWS.into_iter().map(clone!((active_save_signal) move |row| {
             JonmoBuilder::from(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(GAP * 2.),
                 ..default()
             })
             .children(row.chars().map(
-                clone!((letters) move |l| letter(l, letters.signal_map().key(l).map_in(Option::unwrap_or_default))),
+                clone!((active_save_signal) move |l| {
+                    let letter_data = active_save_signal
+                        .clone()
+                        .switch_signal_map(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+                            get_active_map(&save_states, active_save).signal_map()
+                        })
+                        .key(l)
+                        .map_in(Option::unwrap_or_default);
+                    letter(l, letter_data)
+                }),
             ))
             .child(
                 JonmoBuilder::from(Node {
@@ -108,9 +150,12 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                     text_node()
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .component_signal(
-                            letters
-                                .signal_vec_entries()
-                                .filter(|In((letter, _))| row.contains(letter))
+                            active_save_signal
+                                .clone()
+                                .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+                                    get_active_map(&save_states, active_save).signal_vec_entries()
+                                })
+                                .filter(move |In((letter, _))| row.contains(letter))
                                 .map_in(|(_, LetterData { count, .. })| count)
                                 .sum()
                                 .dedupe()
@@ -120,17 +165,52 @@ fn ui_root(letters: MutableBTreeMap<char, LetterData>) -> JonmoBuilder {
                         ),
                 ),
             )
-        })),
+        }))),
     )
 }
 
 const GAP: f32 = 5.;
 
+fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> JonmoBuilder {
+    JonmoBuilder::from((
+        Node {
+            width: Val::Px(100.),
+            height: Val::Px(100.),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(GAP * 2.)),
+            ..default()
+        },
+        BorderRadius::all(Val::Px(GAP * 2.)),
+    ))
+    .with_entity(move |mut entity| {
+        entity.observe(move |_click: On<Pointer<Click>>, mut active_save: ResMut<ActiveSave>| {
+            active_save.0 = save_char;
+        });
+    })
+    .component_signal(
+        active_save_signal
+            .map_in(move |ActiveSave(active_char)| {
+                if active_char == save_char {
+                    BackgroundColor(BLUE)
+                } else {
+                    BackgroundColor(PINK)
+                }
+            })
+            .map_in(Some),
+    )
+    .child(text_node().insert((
+        Text(save_char.to_string()),
+        TextColor(Color::WHITE),
+        TextFont::from_font_size(LETTER_SIZE),
+    )))
+}
+
 fn text_node() -> JonmoBuilder {
     JonmoBuilder::from((
         Node::default(),
         TextColor(Color::WHITE),
-        TextLayout::new_with_justify(JustifyText::Center),
+        TextLayout::new_with_justify(Justify::Center),
         BorderRadius::all(Val::Px(GAP)),
     ))
 }
@@ -146,11 +226,6 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
         },
         BorderRadius::all(Val::Px(GAP * 2.)),
     ))
-    .with_entity(|mut entity| {
-        entity.observe(|click: Trigger<Pointer<Click>>, nodes: Query<&ComputedNode>| {
-            println!("{}", nodes.get(click.target()).unwrap().size());
-        });
-    })
     .component_signal(
         data.clone()
             .map_in(|LetterData { pressed, .. }| pressed)
@@ -181,9 +256,11 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBu
 
 fn listen(
     keys: ResMut<ButtonInput<KeyCode>>,
-    letters: Res<Letters>,
+    save_states: Res<SaveStates>,
+    active_save: Res<ActiveSave>,
     mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<char, LetterData>>,
 ) {
+    let current_map = get_active_map(&save_states, *active_save);
     let map = HashMap::from([
         (KeyCode::KeyA, 'a'),
         (KeyCode::KeyB, 'b'),
@@ -214,7 +291,7 @@ fn listen(
     ]);
     for (key, char) in map.iter() {
         if keys.just_pressed(*key) {
-            let mut guard = letters.0.write(&mut mutable_btree_map_datas);
+            let mut guard = current_map.write(&mut mutable_btree_map_datas);
             guard.insert(
                 *char,
                 LetterData {
@@ -223,7 +300,7 @@ fn listen(
                 },
             );
         } else if keys.just_released(*key) {
-            let mut guard = letters.0.write(&mut mutable_btree_map_datas);
+            let mut guard = current_map.write(&mut mutable_btree_map_datas);
             guard.insert(
                 *char,
                 LetterData {

@@ -2,14 +2,15 @@
 //! [`SignalExt`].
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalSystem, Upstream, UpstreamIter, downcast_any_clone, lazy_signal_from_system,
-        pipe_signal, poll_signal, process_signals,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, UpstreamIter, downcast_any_clone,
+        lazy_signal_from_system, pipe_signal, poll_signal, process_signals,
     },
-    signal_vec::{Replayable, SignalVec, SignalVecExt, VecDiff},
+    signal_map::{SignalMap, SignalMapExt},
+    signal_vec::{ReplayOnce, SignalVec, SignalVecExt, VecDiff, trigger_replay},
     utils::{LazyEntity, SSs, ancestor_map},
 };
 use crate::prelude::clone;
-use bevy_ecs::{prelude::*, system::SystemState};
+use bevy_ecs::{entity_disabling::Internal, prelude::*, system::SystemState};
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         use bevy_log::prelude::*;
@@ -146,6 +147,25 @@ where
     C: Component,
 {
     type Item = Option<C>;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
+/// Signal graph node which maps its upstream [`Entity`] to its [`Changed`] `C` [`Component`],
+/// see [.component_changed](SignalExt::component_changed).
+#[derive(Clone)]
+pub struct ComponentChanged<Upstream, C> {
+    signal: Map<Upstream, C>,
+}
+
+impl<Upstream, C> Signal for ComponentChanged<Upstream, C>
+where
+    Upstream: Signal<Item = Entity>,
+    C: Component,
+{
+    type Item = C;
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world)
@@ -396,12 +416,38 @@ impl<Upstream, Switched> SignalVec for SwitchSignalVec<Upstream, Switched>
 where
     Upstream: Signal,
     Switched: SignalVec,
-    Upstream::Item: 'static,
     Switched::Item: Clone + SSs,
 {
     type Item = Switched::Item;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
+/// Signal graph node which maps its upstream to a [`SignalMap`], see
+/// [`.switch_signal_map`](SignalExt::switch_signal_map).
+#[derive(Clone)]
+pub struct SwitchSignalMap<Upstream, Switched>
+where
+    Upstream: Signal,
+    Switched: SignalMap,
+{
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> (Upstream, Switched)>,
+}
+
+impl<Upstream, Switched> SignalMap for SwitchSignalMap<Upstream, Switched>
+where
+    Upstream: Signal,
+    Switched: SignalMap,
+    Switched::Key: Clone + SSs,
+    Switched::Value: Clone + SSs,
+{
+    type Key = Switched::Key;
+    type Value = Switched::Value;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
 }
@@ -746,11 +792,42 @@ where
 
 /// Blanket trait for transforming [`Signal`]s into [`SignalEither::Left`] or
 /// [`SignalEither::Right`].
-#[allow(missing_docs)]
 pub trait IntoSignalEither: Sized
 where
     Self: Signal,
 {
+    /// Wrap this [`Signal`] in the [`SignalEither::Left`] variant.
+    ///
+    /// Useful for conditional branching where different [`Signal`] types need to be returned
+    /// from the same function or closure, particularly with combinators like
+    /// [`.switch`](SignalExt::switch) or [`.flatten`](SignalExt::flatten).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct UseSquare(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(UseSquare(true));
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<UseSquare>| res.0)
+    ///     .map(move |In(use_square): In<bool>| {
+    ///         if use_square {
+    ///             SignalBuilder::from_system(|_: In<()>| 10)
+    ///                 .map(|In(x): In<i32>| x * x)
+    ///                 .left_either()
+    ///         } else {
+    ///             SignalBuilder::from_system(|_: In<()>| 42).right_either()
+    ///         }
+    ///     })
+    ///     .flatten();
+    /// // Both branches produce compatible SignalEither types despite having different
+    /// // concrete Signal types (Map vs Source)
+    /// ```
     fn left_either<R>(self) -> SignalEither<Self, R>
     where
         R: Signal,
@@ -758,6 +835,37 @@ where
         SignalEither::Left(self)
     }
 
+    /// Wrap this [`Signal`] in the [`SignalEither::Right`] variant.
+    ///
+    /// Useful for conditional branching where different [`Signal`] types need to be returned
+    /// from the same function or closure, particularly with combinators like
+    /// [`.switch`](SignalExt::switch) or [`.flatten`](SignalExt::flatten).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct Mode(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(Mode(false));
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<Mode>| res.0)
+    ///     .map(move |In(mode): In<bool>| {
+    ///         if mode {
+    ///             SignalBuilder::from_system(|_: In<()>| "A").left_either()
+    ///         } else {
+    ///             SignalBuilder::from_system(|_: In<()>| "B")
+    ///                 .filter(|In(x): In<&str>| x.len() > 0)
+    ///                 .right_either()
+    ///         }
+    ///     })
+    ///     .flatten();
+    /// // Both branches are compatible via SignalEither despite different types
+    /// ```
     fn right_either<L>(self) -> SignalEither<L, Self>
     where
         L: Signal,
@@ -906,6 +1014,37 @@ pub trait SignalExt: Signal {
         ComponentOption {
             signal: self
                 .map(|In(entity): In<Entity>, components: Query<&C>| Some(components.get(entity).ok().cloned())),
+        }
+    }
+
+    /// Map this [`Signal`]'s output [`Entity`] to its `C` [`Component`] on frames it has
+    /// [`Changed`], terminating for the frame if it does not exist or has not [`Changed`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Component, Clone)]
+    /// struct Value(u32);
+    ///
+    /// let mut world = World::new();
+    /// let entity = world.spawn(Value(0)).id();
+    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // outputs `Value(0)` on changed frames
+    ///
+    /// let entity = world.spawn_empty().id();
+    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // terminates
+    /// ```
+    fn component_changed<C>(self) -> ComponentChanged<Self, C>
+    where
+        Self: Sized,
+        Self: Signal<Item = Entity>,
+        C: Component + Clone,
+    {
+        ComponentChanged {
+            signal: self
+                .map(|In(entity): In<Entity>, components: Query<&C, Changed<C>>| components.get(entity).ok().cloned()),
         }
     }
 
@@ -1209,109 +1348,116 @@ pub trait SignalExt: Signal {
         Self::Item: Signal + Clone + 'static,
         <Self::Item as Signal>::Item: Clone + Send + Sync,
     {
-        let signal =
-            LazySignal::new(move |world: &mut World| {
-                // 1. The state entity that holds the latest value. This is the communication channel between the
-                //    dynamic inner signals and the static output signal.
-                let state_entity = world
-                    .spawn(FlattenState::<<Self::Item as Signal>::Item> { value: None })
-                    .id();
+        let signal = LazySignal::new(move |world: &mut World| {
+            // 1. The state entity that holds the latest value. This is the communication channel between the
+            //    dynamic inner signals and the static output signal.
+            let reader_entity = LazyEntity::new();
 
-                // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
-                //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
-                //    forwarder.
-                let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
-                    move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                        if let Ok(mut state) = query.get_mut(state_entity) {
+            // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
+            //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
+            //    forwarder.
+            let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
+                    clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
+                        if let Ok(mut state) = query.get_mut(reader_entity.get()) {
                             state.value.take()
                         } else {
                             None
                         }
+                    }),
+                )
+                .register(world);
+            reader_entity.set(*reader_system);
+            world
+                .entity_mut(*reader_system)
+                .insert(FlattenState::<<Self::Item as Signal>::Item> { value: None });
+
+            // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
+            //    signals.
+            let manager_system = self
+                .map(
+                    // This closure contains the core logic for switching subscriptions.
+                    move |In(inner_signal): In<Self::Item>,
+                          world: &mut World,
+                          mut active_forwarder: Local<Option<SignalHandle>>,
+                          mut active_signal_id: Local<Option<SignalSystem>>| {
+                        // A. Get the canonical ID of the newly emitted inner signal. `register` is
+                        // idempotent; it just increments the ref-count if the system exists.
+                        let new_signal_id = inner_signal.clone().register(world);
+
+                        // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
+                        if Some(*new_signal_id) == *active_signal_id {
+                            // The signal is the same. Do nothing. IMPORTANT: We must cleanup the handle from
+                            // our `.register()` call above to balance the reference count, otherwise it will
+                            // leak.
+                            new_signal_id.cleanup(world);
+                            return;
+                        }
+
+                        // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
+                        if let Some(old_handle) = active_forwarder.take() {
+                            old_handle.cleanup(world);
+                        }
+
+                        // The old signal ID handle is implicitly dropped when overwritten.
+                        // ================== The Core Setup Logic for the NEW Signal ==================
+                        // D. Get the initial value of the new inner signal, synchronously. This is done
+                        // by creating a temporary one-shot signal.
+                        let temp_handle = inner_signal.clone().first().register(world);
+                        let initial_value = poll_signal(world, *temp_handle)
+                            .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
+
+                        // The temporary handle must be cleaned up immediately.
+                        temp_handle.cleanup(world);
+
+                        // E. Write this initial value directly into the state component.
+                        if let Some(value) = initial_value
+                            && let Some(mut state) =
+                                world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
+                        {
+                            state.value = Some(value);
+                        }
+
+                        // F. Set up a persistent forwarder for all _subsequent_ updates from the new
+                        // signal.
+                        let forwarder_handle = inner_signal
+                            .map(
+                                // This first map writes the value to the state component.
+                                move |In(value),
+                                      mut query: Query<
+                                    &mut FlattenState<<Self::Item as Signal>::Item>,
+                                    Allow<Internal>,
+                                >| {
+                                    if let Ok(mut state) = query.get_mut(*reader_system) {
+                                        state.value = Some(value);
+                                    }
+                                },
+                            )
+                            .map(
+                                // This second map triggers the reader to run immediately after the state is
+                                // written.
+                                move |_, world: &mut World| {
+                                    process_signals(world, [reader_system], Box::new(()));
+                                },
+                            )
+                            .register(world);
+
+                        // G. Store the new forwarder's handle and the new signal's ID for the next frame.
+                        *active_forwarder = Some(forwarder_handle);
+                        *active_signal_id = Some(*new_signal_id);
+
+                        // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
+                        process_signals(world, [reader_system], Box::new(()));
                     },
                 )
                 .register(world);
 
-                // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
-                //    signals.
-                let manager_system = self
-                    .map(
-                        // This closure contains the core logic for switching subscriptions.
-                        move |In(inner_signal): In<Self::Item>,
-                              world: &mut World,
-                              mut active_forwarder: Local<Option<SignalHandle>>,
-                              mut active_signal_id: Local<Option<SignalSystem>>| {
-                            // A. Get the canonical ID of the newly emitted inner signal. `register` is
-                            // idempotent; it just increments the ref-count if the system exists.
-                            let new_signal_id = inner_signal.clone().register(world);
-
-                            // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
-                            if Some(*new_signal_id) == *active_signal_id {
-                                // The signal is the same. Do nothing. IMPORTANT: We must cleanup the handle from
-                                // our `.register()` call above to balance the reference count, otherwise it will
-                                // leak.
-                                new_signal_id.cleanup(world);
-                                return;
-                            }
-
-                            // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
-                            if let Some(old_handle) = active_forwarder.take() {
-                                old_handle.cleanup(world);
-                            }
-
-                            // The old signal ID handle is implicitly dropped when overwritten.
-                            // ================== The Core Setup Logic for the NEW Signal ==================
-                            // D. Get the initial value of the new inner signal, synchronously. This is done
-                            // by creating a temporary one-shot signal.
-                            let temp_handle = inner_signal.clone().first().register(world);
-                            let initial_value = poll_signal(world, *temp_handle)
-                                .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
-
-                            // The temporary handle must be cleaned up immediately.
-                            temp_handle.cleanup(world);
-
-                            // E. Write this initial value directly into the state component.
-                            if let Some(value) = initial_value
-                                && let Some(mut state) =
-                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(state_entity)
-                            {
-                                state.value = Some(value);
-                            }
-
-                            // F. Set up a persistent forwarder for all _subsequent_ updates from the new
-                            // signal.
-                            let forwarder_handle = inner_signal.map(
-                        // This first map writes the value to the state component.
-                        move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
-                            if let Ok(mut state) = query.get_mut(state_entity) {
-                                state.value = Some(value);
-                            }
-                        },
-                    ).map(
-                        // This second map triggers the reader to run immediately after the state is
-                        // written.
-                        move |_, world: &mut World| {
-                            process_signals(world, [reader_system], Box::new(()));
-                        },
-                    ).register(world);
-
-                            // G. Store the new forwarder's handle and the new signal's ID for the next frame.
-                            *active_forwarder = Some(forwarder_handle);
-                            *active_signal_id = Some(*new_signal_id);
-
-                            // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
-                            process_signals(world, [reader_system], Box::new(()));
-                        },
-                    )
-                    .register(world);
-
-                // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final output) is
-                //    cleaned up, it will also despawn its children.
-                world
-                    .entity_mut(*reader_system)
-                    .add_child(state_entity)
-                    .add_child(**manager_system);
-                reader_system
-            });
+            // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final output) is
+            //    cleaned up, it will also despawn its children.
+            world
+                .entity_mut(*reader_system)
+                .insert(SignalHandles::from([manager_system]));
+            reader_system
+        });
         Flatten {
             signal,
             _marker: PhantomData,
@@ -1389,8 +1535,7 @@ pub trait SignalExt: Signal {
     fn switch_signal_vec<S, F, M>(self, switcher: F) -> SwitchSignalVec<Self, S>
     where
         Self: Sized,
-        Self::Item: 'static,
-        S: SignalVec + Clone + 'static,
+        S: SignalVec + Clone,
         S::Item: Clone + SSs,
         F: IntoSystem<In<Self::Item>, S, M> + SSs,
     {
@@ -1400,10 +1545,10 @@ pub trait SignalExt: Signal {
             struct SwitcherQueue<T: SSs>(Vec<VecDiff<T>>);
 
             // The output system is a "poller". It runs when poked and drains its own queue.
-            let output_system_entity = LazyEntity::new();
-            let output_system = lazy_signal_from_system::<_, Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_system_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_system_entity) {
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
+                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
                         if queue.0.is_empty() {
                             None
                         } else {
@@ -1415,28 +1560,27 @@ pub trait SignalExt: Signal {
                 }),
             )
             .register(world);
-            output_system_entity.set(*output_system);
+            output_signal_entity.set(*output_signal);
 
-            // Add the queue component to the output system's entity so it can be found.
+            // Add the queue component to the output signal's entity so it can be found.
             world
-                .entity_mut(*output_system)
+                .entity_mut(*output_signal)
                 .insert(SwitcherQueue(Vec::<VecDiff<S::Item>>::new()));
 
             // This is the core logic. It runs whenever the outer signal changes.
-            let manager_system_logic =
+            let manager_system =
                 move |In(inner_signal_vec): In<S>,
                       world: &mut World,
                       mut active_forwarder: Local<Option<SignalHandle>>,
-                      mut active_memo_handle: Local<Option<SignalHandle>>,
-                      mut active_signal_id: Local<Option<SignalSystem>>| {
+                      mut active_signal: Local<Option<SignalSystem>>| {
                     // A. Get the canonical ID by registering. We need this for memoization.
-                    let new_signal_id_handle = inner_signal_vec.clone().register_signal_vec(world);
-                    let new_signal_id = *new_signal_id_handle;
+                    let new_signal_handle = inner_signal_vec.clone().register_signal_vec(world);
+                    let new_signal = *new_signal_handle;
 
                     // B. MEMOIZATION: If the signal hasn't changed, do nothing.
-                    if Some(new_signal_id) == *active_signal_id {
+                    if Some(new_signal) == *active_signal {
                         // Balance the ref count for this temporary handle.
-                        new_signal_id_handle.cleanup(world);
+                        new_signal_handle.cleanup(world);
                         return;
                     }
 
@@ -1445,19 +1589,16 @@ pub trait SignalExt: Signal {
                     if let Some(old_handle) = active_forwarder.take() {
                         old_handle.cleanup(world);
                     }
-                    if let Some(old_memo_handle) = active_memo_handle.take() {
-                        old_memo_handle.cleanup(world);
-                    }
-                    *active_signal_id = Some(new_signal_id);
+                    *active_signal = Some(new_signal);
 
                     // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
-                    // signal and poke the output system.
+                    // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<VecDiff<S::Item>>>, world: &mut World| {
                         if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_system)
+                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_signal)
                         {
                             queue.0.extend(diffs);
-                            process_signals(world, [output_system], Box::new(()));
+                            process_signals(world, [output_signal], Box::new(()));
                         }
                     };
 
@@ -1465,31 +1606,169 @@ pub trait SignalExt: Signal {
                     // forwarder's handle and the new memoization handle.
                     let new_forwarder_handle = inner_signal_vec.for_each(forwarder_logic).register(world);
                     *active_forwarder = Some(new_forwarder_handle);
-                    *active_memo_handle = Some(new_signal_id_handle);
 
                     // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
                     // _now_. This synchronously sends the initial `Replace` diff through the pipe we
-                    // just established. Taking it also prevents the `trigger_replays` system from
-                    // running it again. if let Some(trigger) =
-                    // world.get_entity_mut(*new_signal_id).ok().and_then(|mut entity|
-                    // entity.take::<super::signal_vec::VecReplayTrigger>()) {
-                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
+                    // just established.
+                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
                     let upstreams = upstreams.get(world);
-                    let upstreams = UpstreamIter::new(&upstreams, new_signal_id).collect::<Vec<_>>();
-                    for signal in [new_signal_id].into_iter().chain(upstreams.into_iter()) {
-                        if let Some(trigger) = world.entity_mut(*signal).take::<super::signal_vec::VecReplayTrigger>() {
-                            trigger.trigger()(world);
+                    let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
+                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                        let entity = *signal;
+                        if world.get::<super::signal_vec::VecReplayTrigger>(entity).is_some() {
+                            world.entity_mut(entity).insert(ReplayOnce);
+                            trigger_replay::<super::signal_vec::VecReplayTrigger>(world, entity);
                             break;
                         }
                     }
                 };
 
-            // Register the manager and tie its lifecycle to the output system.
-            let manager_handle = self.map(switcher).map(manager_system_logic).register(world);
-            world.entity_mut(*output_system).add_child(**manager_handle);
-            output_system
+            // Register the manager and tie its lifecycle to the output signal.
+            let manager_handle = self.map(switcher).map(manager_system).register(world);
+            world
+                .entity_mut(*output_signal)
+                .insert(SignalHandles::from([manager_handle]));
+            output_signal
         });
         SwitchSignalVec {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Maps this [`Signal`]'s output to a [`SignalMap`], switching to its output. Useful when the
+    /// reactive map target changes depending on some other state.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource, Clone, PartialEq)]
+    /// struct Toggle(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(Toggle(false));
+    ///
+    /// let signal = SignalBuilder::from_resource::<Toggle>()
+    ///     .dedupe()
+    ///     .switch_signal_map(move |In(toggle): In<Toggle>, world: &mut World| {
+    ///         if toggle.0 {
+    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///         } else {
+    ///             MutableBTreeMapBuilder::from([(10, 20)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///         }
+    ///     });
+    /// // `signal` outputs `SignalMap -> {10: 20}`
+    /// world.resource_mut::<Toggle>().0 = true;
+    /// // `signal` outputs `SignalMap -> {1: 2, 3: 4}`
+    /// ```
+    fn switch_signal_map<S, F, M>(self, switcher: F) -> SwitchSignalMap<Self, S>
+    where
+        Self: Sized,
+        S: SignalMap + Clone,
+        S::Key: Clone + SSs,
+        S::Value: Clone + SSs,
+        F: IntoSystem<In<Self::Item>, S, M> + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            // A private component to queue diffs for the output signal.
+            #[derive(Component)]
+            struct SwitcherQueue<K: SSs, V: SSs>(Vec<super::signal_map::MapDiff<K, V>>);
+
+            // The output signal is a "poller". It runs when poked and drains its own queue.
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
+                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
+                        if queue.0.is_empty() {
+                            None
+                        } else {
+                            Some(core::mem::take(&mut queue.0))
+                        }
+                    } else {
+                        None
+                    }
+                }),
+            )
+            .register(world);
+            output_signal_entity.set(*output_signal);
+
+            // Add the queue component to the output signal's entity so it can be found.
+            world
+                .entity_mut(*output_signal)
+                .insert(SwitcherQueue(Vec::<super::signal_map::MapDiff<S::Key, S::Value>>::new()));
+
+            // This is the core logic. It runs whenever the outer signal changes.
+            let manager_system =
+                move |In(inner_signal_map): In<S>,
+                      world: &mut World,
+                      mut active_forwarder: Local<Option<SignalHandle>>,
+                      mut active_signal: Local<Option<SignalSystem>>| {
+                    // A. Get the canonical ID by registering. We need this for memoization.
+                    let new_signal_handle = inner_signal_map.clone().register_signal_map(world);
+                    let new_signal = *new_signal_handle;
+
+                    // B. MEMOIZATION: If the signal hasn't changed, do nothing.
+                    if Some(new_signal) == *active_signal {
+                        // Balance the ref count for this temporary handle.
+                        new_signal_handle.cleanup(world);
+                        return;
+                    }
+
+                    // C. TEARDOWN: The signal is new. Clean up the old forwarder and the old
+                    // memoization handle.
+                    if let Some(old_handle) = active_forwarder.take() {
+                        old_handle.cleanup(world);
+                    }
+                    *active_signal = Some(new_signal);
+
+                    // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
+                    // signal and poke the output signal.
+                    let forwarder_logic = move |In(diffs): In<Vec<super::signal_map::MapDiff<S::Key, S::Value>>>,
+                                                world: &mut World| {
+                        if !diffs.is_empty()
+                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal)
+                        {
+                            queue.0.extend(diffs);
+                            process_signals(world, [output_signal], Box::new(()));
+                        }
+                    };
+
+                    // E. PERSIST: Register the new forwarder to listen for diffs, and store both the
+                    // forwarder's handle and the new memoization handle.
+                    let new_forwarder_handle = inner_signal_map.for_each(forwarder_logic).register(world);
+                    *active_forwarder = Some(new_forwarder_handle);
+
+                    // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
+                    // _now_. This synchronously sends the initial `Replace` diff through the pipe we
+                    // just established.
+                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
+                    let upstreams = upstreams.get(world);
+                    let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
+                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                        let entity = *signal;
+                        if world.get::<super::signal_map::MapReplayTrigger>(entity).is_some() {
+                            world.entity_mut(entity).insert(ReplayOnce);
+                            trigger_replay::<super::signal_map::MapReplayTrigger>(world, entity);
+                            break;
+                        }
+                    }
+                };
+
+            // Register the manager and tie its lifecycle to the output signal.
+            let manager_handle = self.map(switcher).map(manager_system).register(world);
+            world
+                .entity_mut(*output_signal)
+                .insert(SignalHandles::from([manager_handle]));
+            output_signal
+        });
+        SwitchSignalMap {
             signal,
             _marker: PhantomData,
         }
@@ -1527,7 +1806,7 @@ pub trait SignalExt: Signal {
                             Some(item)
                         }
                         Some(timer) => {
-                            if timer.tick(time.delta()).finished() {
+                            if timer.tick(time.delta()).is_finished() {
                                 timer.reset();
                                 Some(item)
                             } else {
@@ -1966,7 +2245,7 @@ mod tests {
     use crate::{
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
-        prelude::{SignalVecExt, clone},
+        prelude::{IntoSignalVecEither, SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
         signal_vec::{MutableVecBuilder, VecDiff},
         utils::{LazyEntity, SSs},
@@ -2302,6 +2581,54 @@ mod tests {
     }
 
     #[test]
+    fn test_component_changed() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+        let entity = app.world_mut().spawn(TestData(1)).id();
+        let signal = SignalBuilder::from_entity(entity)
+            .component_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+
+        // First update: component is newly added, counts as changed
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(1)));
+
+        // Reset output to verify signal doesn't fire on unchanged frame
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+
+        // Second update: no change, signal should not fire
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Signal should not fire when component hasn't changed"
+        );
+
+        // Third update: mutate component, signal should fire
+        app.world_mut().get_mut::<TestData>(entity).unwrap().0 = 2;
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(2)));
+
+        signal.cleanup(app.world_mut());
+
+        // Test entity without component - signal should not fire
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        let entity_without = app.world_mut().spawn_empty().id();
+        let signal = SignalBuilder::from_entity(entity_without)
+            .component_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Signal should not fire for entity without component"
+        );
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn test_dedupe() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
@@ -2534,6 +2861,8 @@ mod tests {
             // Two different data sources to switch between.
             let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
             let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            let signal_a = list_a.signal_vec().map_in(identity);
+            let signal_b = list_b.signal_vec();
 
             // A resource to control which list is active.
             #[derive(Resource, Clone, Copy, PartialEq, Debug)]
@@ -2550,9 +2879,13 @@ mod tests {
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_vec(
-                clone!((list_a, list_b) move |In(selector): In<ListSelector>| match selector {
-                    ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
-                    ListSelector:: B => list_b.signal_vec().boxed_clone(),
+                clone!((/* list_a, list_b, */ signal_a, signal_b) move |In(selector): In<ListSelector>| match selector {
+                    // can use .left/right_either or .boxed_clone
+                    ListSelector:: A => signal_a.clone().left_either(),
+                    ListSelector:: B => signal_b.clone().right_either(),
+                    // TODO: this is the more conservative case, so it should be covered by the above case of signal reuse, but ideally they would both be explicitly tested
+                    // ListSelector:: A => list_a.signal_vec().map_in(identity).boxed_clone(),
+                    // ListSelector:: B => list_b.signal_vec().boxed_clone(),
                 }),
             );
 
@@ -2643,6 +2976,146 @@ mod tests {
         }
 
         crate::signal_vec::tests::cleanup(true);
+    }
+
+    #[test]
+    fn test_switch_signal_map() {
+        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMapBuilder, SignalMapExt};
+
+        #[derive(Resource, Default, core::fmt::Debug)]
+        struct SignalMapOutput<K, V>(Vec<MapDiff<K, V>>)
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug;
+
+        fn capture_map_output<K, V>(In(diffs): In<Vec<MapDiff<K, V>>>, mut output: ResMut<SignalMapOutput<K, V>>)
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug,
+        {
+            output.0.extend(diffs);
+        }
+
+        fn get_and_clear_map_output<K, V>(world: &mut World) -> Vec<MapDiff<K, V>>
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug,
+        {
+            world
+                .get_resource_mut::<SignalMapOutput<K, V>>()
+                .map(|mut res| core::mem::take(&mut res.0))
+                .unwrap_or_default()
+        }
+
+        {
+            // --- Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalMapOutput<i32, i32>>();
+
+            // Two different data sources to switch between.
+            let map_a = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(app.world_mut());
+            let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(app.world_mut());
+            let signal_a = map_a.signal_map().map_value(|In(x): In<i32>| x);
+            let signal_b = map_b.signal_map();
+
+            // A resource to control which map is active.
+            #[derive(Resource, Clone, Copy, PartialEq, Debug)]
+            enum MapSelector {
+                A,
+                B,
+            }
+
+            app.insert_resource(MapSelector::A);
+
+            // The control signal reads the resource.
+            let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
+
+            // The signal chain under test.
+            let switched_signal = control_signal.dedupe().switch_signal_map(
+                clone!((signal_a, signal_b) move |In(selector): In<MapSelector>| match selector {
+                    // can use .left/right_either or .boxed_clone
+                    MapSelector::A => signal_a.clone().left_either(),
+                    MapSelector::B => signal_b.clone().right_either(),
+                }),
+            );
+
+            // Register the final signal to a capture system.
+            let handle = switched_signal.for_each(capture_map_output).register(app.world_mut());
+
+            // --- Test 1: Initial State --- The first update should select Map A and emit
+            // its initial state.
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 10), (2, 20)]),
+                "Initial state should be a Replace with Map A's contents."
+            );
+
+            // --- Test 2: Forwarding Diffs from Active Map (A) --- A mutation to Map A
+            // should be forwarded.
+            map_a.write(app.world_mut()).insert(3, 30);
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Insert to active map should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Insert { key: 3, value: 30 }),
+                "Should forward Insert diff from Map A."
+            );
+
+            // --- Test 3: The Switch to Map B --- Change the selector and update. This
+            // should trigger a switch.
+            *app.world_mut().resource_mut::<MapSelector>() = MapSelector::B;
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching maps should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 100), (2, 200), (3, 300)]),
+                "Switch should emit a Replace with Map B's contents."
+            );
+
+            // --- Test 4: Ignoring Diffs from Old Map (A) --- A mutation to the now-inactive
+            // Map A should be ignored.
+            map_a.write(app.world_mut()).insert(4, 99);
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert!(diffs.is_empty(), "Should ignore diffs from the old, inactive map.");
+
+            // --- Test 5: Forwarding Diffs from New Active Map (B) --- A mutation to Map B
+            // should now be forwarded. remove key 1
+            map_b.write(app.world_mut()).remove(&1);
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Remove from new active map should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Remove { key: 1 }),
+                "Should forward Remove diff from Map B."
+            );
+
+            // --- Test 6: Memoization (No-Op Switch) --- "Switching" to the already active
+            // map should produce no diffs.
+            *app.world_mut().resource_mut::<MapSelector>() = MapSelector::B;
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Re-selecting the same map should produce no diffs due to memoization."
+            );
+
+            // --- Test 7: Switch Back to Map A --- Switching back should give us the current
+            // state of Map A.
+            *app.world_mut().resource_mut::<MapSelector>() = MapSelector::A;
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 10), (2, 20), (3, 30), (4, 99)]),
+                "Switching back should Replace with the current state of Map A."
+            );
+            handle.cleanup(app.world_mut());
+        }
+
+        crate::signal_map::tests::cleanup(true);
     }
 
     #[test]

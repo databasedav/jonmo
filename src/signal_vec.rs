@@ -2,15 +2,15 @@
 //! [`Vec`] mutations, see [`MutableVec`] and [`SignalVecExt`].
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system, pipe_signal,
-        poll_signal, process_signals, register_signal,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system,
+        pipe_signal, poll_signal, process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
     utils::{LazyEntity, SSs},
 };
 use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
+use bevy_ecs::{change_detection::Mut, entity_disabling::Internal, prelude::*, system::SystemId};
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -163,8 +163,8 @@ clone_trait_object!(<T> SignalVecDynClone<Item = T>);
 
 impl<T: SignalVec + Clone + 'static> SignalVecDynClone for T {}
 
-impl<O: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = O> + Send + Sync> {
-    type Item = O;
+impl<T: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = T> + Send + Sync> {
+    type Item = T;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         (*self).register_boxed_signal_vec(world)
@@ -477,11 +477,11 @@ fn spawn_filter_signal<T: Clone + SSs>(
         let self_entity = *entity;
 
         // The processor might run after its parent has been cleaned up.
-        let Ok(signal_index_comp) = world.query::<&FilterSignalIndex>().get(world, self_entity) else {
+        let Ok(signal_index_comp) = world.query_filtered::<&FilterSignalIndex, Allow<Internal>>().get(world, self_entity) else {
             return;
         };
         let item_index = signal_index_comp.0;
-        let Ok(mut filter_signal_data) = world.query::<&mut FilterSignalData<T>>().get_mut(world, parent) else {
+        let Ok(mut filter_signal_data) = world.query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>().get_mut(world, parent) else {
             return;
         };
 
@@ -1015,8 +1015,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Enables returning different concrete [`Signal`] types from branching logic without boxing,
-/// although note that all [`Signal`]s are boxed internally regardless.
+/// Enables returning different concrete [`SignalVec`] types from branching logic without boxing,
+/// although note that all [`SignalVec`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
 #[derive(Clone)]
@@ -1045,13 +1045,44 @@ where
     }
 }
 
-/// Blanket trait for transforming [`Signal`]s into [`SignalVecEither::Left`] or
+/// Blanket trait for transforming [`SignalVec`]s into [`SignalVecEither::Left`] or
 /// [`SignalVecEither::Right`].
-#[allow(missing_docs)]
 pub trait IntoSignalVecEither: Sized
 where
     Self: SignalVec,
 {
+    /// Wrap this [`SignalVec`] in the [`SignalVecEither::Left`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalVec`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct ShowFiltered(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(ShowFiltered(true));
+    ///
+    /// let list = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ShowFiltered>| res.0)
+    ///     .switch_signal_vec(move |In(show_filtered): In<bool>, world: &mut World| {
+    ///         if show_filtered {
+    ///             list.signal_vec()
+    ///                 .filter(|In(x): In<i32>| x % 2 == 0)
+    ///                 .left_either()
+    ///         } else {
+    ///             list.signal_vec().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalVecEither types
+    /// ```
     fn left_either<R>(self) -> SignalVecEither<Self, R>
     where
         R: SignalVec,
@@ -1059,6 +1090,37 @@ where
         SignalVecEither::Left(self)
     }
 
+    /// Wrap this [`SignalVec`] in the [`SignalVecEither::Right`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalVec`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct ListMode(u8);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(ListMode(0));
+    ///
+    /// let list_a = MutableVecBuilder::from([10, 20]).spawn(&mut world);
+    /// let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ListMode>| res.0)
+    ///     .switch_signal_vec(move |In(mode): In<u8>, world: &mut World| {
+    ///         if mode == 0 {
+    ///             list_a.signal_vec().map_in(|x: i32| x * 2).left_either()
+    ///         } else {
+    ///             list_b.signal_vec().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalVecEither types
+    /// ```
     fn right_either<L>(self) -> SignalVecEither<L, Self>
     where
         L: SignalVec,
@@ -1255,8 +1317,7 @@ pub trait SignalVecExt: SignalVec {
     {
         fn spawn_processor<Item: Clone + SSs, S: Signal<Item = Item> + Clone + 'static>(
             world: &mut World,
-            queue_entity: Entity,
-            output_system: SignalSystem,
+            output_signal: SignalSystem,
             index: usize,
             inner_signal: S,
         ) -> (SignalHandle, SignalSystem, Item) {
@@ -1270,12 +1331,12 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!((processor_entity) move |In(value): In<Item>, world: &mut World| {
                 if let Some(item_index_comp) = world.get::<ItemIndex>(processor_entity.get()) {
                     let current_index = item_index_comp.0;
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(queue_entity) {
+                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(*output_signal) {
                         queue.0.push(VecDiff::UpdateAt {
                             index: current_index,
                             value,
                         });
-                        process_signals(world, [output_system], Box::new(()));
+                        process_signals(world, [output_signal], Box::new(()));
                     }
                 }
             });
@@ -1287,10 +1348,10 @@ pub trait SignalVecExt: SignalVec {
 
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
-            let state_and_queue_entity = world.spawn_empty().id();
-            let output_system_handle =
-                SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(state_and_queue_entity) {
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(output_signal_entity.get()) {
                         if diffs.0.is_empty() {
                             None
                         } else {
@@ -1299,8 +1360,10 @@ pub trait SignalVecExt: SignalVec {
                     } else {
                         None
                     }
-                })
-                .register(world);
+                }),
+            )
+            .register(world);
+            output_signal_entity.set(*output_signal);
 
             #[derive(Component)]
             struct ManagerState<S: Signal> {
@@ -1308,15 +1371,13 @@ pub trait SignalVecExt: SignalVec {
                 _phantom: PhantomData<S>,
             }
 
-            let output_system_handle_clone = output_system_handle.clone();
             let manager_system_logic = move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
                 let mut new_diffs = Vec::new();
                 for diff in diffs {
                     match diff {
                         VecDiff::Replace { values } => {
                             let old_processors = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.drain(..).collect::<Vec<_>>()
                             };
                             for (handle, _) in old_processors {
@@ -1326,36 +1387,24 @@ pub trait SignalVecExt: SignalVec {
                             let mut new_values = Vec::with_capacity(values.len());
                             for (i, value) in values.into_iter().enumerate() {
                                 if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                    let (handle, inner_id, initial_value) = spawn_processor(
-                                        world,
-                                        state_and_queue_entity,
-                                        *output_system_handle_clone,
-                                        i,
-                                        signal,
-                                    );
+                                    let (handle, inner_id, initial_value) =
+                                        spawn_processor(world, output_signal, i, signal);
                                     new_processors.push((handle, inner_id));
                                     new_values.push(initial_value);
                                 }
                             }
                             {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors = new_processors;
                             }
                             new_diffs.push(VecDiff::Replace { values: new_values });
                         }
                         VecDiff::InsertAt { index, value } => {
                             if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, inner_id, initial_value) = spawn_processor(
-                                    world,
-                                    state_and_queue_entity,
-                                    *output_system_handle_clone,
-                                    index,
-                                    signal,
-                                );
+                                let (handle, inner_id, initial_value) =
+                                    spawn_processor(world, output_signal, index, signal);
                                 let handles_to_update = {
-                                    let mut manager_state =
-                                        world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                    let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state.processors.insert(index, (handle, inner_id));
                                     manager_state
                                         .processors
@@ -1378,7 +1427,7 @@ pub trait SignalVecExt: SignalVec {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let is_same_signal = {
-                                    let manager_state = world.get::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                    let manager_state = world.get::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state
                                         .processors
                                         .get(index)
@@ -1389,7 +1438,7 @@ pub trait SignalVecExt: SignalVec {
                                 } else {
                                     let old_handle = {
                                         let mut manager_state =
-                                            world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                            world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                         if index < manager_state.processors.len() {
                                             Some(manager_state.processors.remove(index).0)
                                         } else {
@@ -1399,16 +1448,11 @@ pub trait SignalVecExt: SignalVec {
                                     if let Some(handle) = old_handle {
                                         handle.cleanup(world);
                                     }
-                                    let (new_handle, new_id, initial_value) = spawn_processor(
-                                        world,
-                                        state_and_queue_entity,
-                                        *output_system_handle_clone,
-                                        index,
-                                        new_inner_signal,
-                                    );
+                                    let (new_handle, new_id, initial_value) =
+                                        spawn_processor(world, output_signal, index, new_inner_signal);
                                     {
                                         let mut manager_state =
-                                            world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                            world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                         manager_state.processors.insert(index, (new_handle, new_id));
                                     }
                                     new_diffs.push(VecDiff::UpdateAt {
@@ -1420,8 +1464,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::RemoveAt { index } => {
                             let (handle, handles_to_update) = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 let (handle, _) = manager_state.processors.remove(index);
                                 let handles = manager_state
                                     .processors
@@ -1440,8 +1483,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Move { old_index, new_index } => {
                             let handles_to_update = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 let processor = manager_state.processors.remove(old_index);
                                 manager_state.processors.insert(new_index, processor);
                                 let start = old_index.min(new_index);
@@ -1462,20 +1504,14 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Push { value } => {
                             let index = {
-                                let manager_state = world.get::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let manager_state = world.get::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.len()
                             };
                             if let Ok(signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, inner_id, initial_value) = spawn_processor(
-                                    world,
-                                    state_and_queue_entity,
-                                    *output_system_handle_clone,
-                                    index,
-                                    signal,
-                                );
+                                let (handle, inner_id, initial_value) =
+                                    spawn_processor(world, output_signal, index, signal);
                                 {
-                                    let mut manager_state =
-                                        world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                    let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                     manager_state.processors.push((handle, inner_id));
                                 }
                                 new_diffs.push(VecDiff::Push { value: initial_value });
@@ -1483,8 +1519,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Pop => {
                             let maybe_handle = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.pop().map(|(handle, _)| handle)
                             };
                             if let Some(handle) = maybe_handle {
@@ -1494,8 +1529,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                         VecDiff::Clear => {
                             let old_processors = {
-                                let mut manager_state =
-                                    world.get_mut::<ManagerState<S>>(state_and_queue_entity).unwrap();
+                                let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
                                 manager_state.processors.drain(..).collect::<Vec<_>>()
                             };
                             for (handle, _) in old_processors {
@@ -1506,15 +1540,15 @@ pub trait SignalVecExt: SignalVec {
                     }
                 }
                 if !new_diffs.is_empty() {
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<S::Item>>(state_and_queue_entity) {
+                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<S::Item>>(*output_signal) {
                         queue.0.extend(new_diffs);
                     }
-                    process_signals(world, [*output_system_handle_clone], Box::new(()));
+                    process_signals(world, [output_signal], Box::new(()));
                 }
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
             world
-                .entity_mut(state_and_queue_entity)
+                .entity_mut(*output_signal)
                 .insert((
                     ManagerState::<S> {
                         processors: Vec::new(),
@@ -1522,10 +1556,10 @@ pub trait SignalVecExt: SignalVec {
                     },
                     QueuedVecDiffs::<S::Item>(vec![]),
                 ))
-                .add_child(**manager_handle)
                 .add_child(factory_system_id.entity())
-                .add_child(**output_system_handle);
-            *output_system_handle
+                .insert(SignalHandles::from([manager_handle]));
+
+            output_signal
         });
         MapSignal {
             signal,
@@ -2018,7 +2052,7 @@ pub trait SignalVecExt: SignalVec {
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
                         SignalBuilder::from_system(
-                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState>| {
+                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
                                 Some(
                                     query
                                         .get(processor_entity_handle.get())
@@ -2623,7 +2657,7 @@ pub trait SignalVecExt: SignalVec {
                 SignalBuilder::from_system(
                     clone!(
                         (state_entity_handle) move |_: In<()>,
-                        query: Query<&IntersperseState<Self::Item>>| {
+                        query: Query<&IntersperseState<Self::Item>, Allow<Internal>>| {
                             Some(
                                 query
                                     .get(state_entity_handle.get())
@@ -3760,10 +3794,10 @@ impl<T> MutableVec<T> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
-                if !*has_run {
-                    *has_run = true;
-                    let initial_vec = self_.read(&*world).to_vec();
+            let replay_entity = LazyEntity::new();
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_vec_datas: Query<&MutableVecData<T>>| {
+                if replay_onces.contains(*replay_entity) {
+                    let initial_vec = self_.read(&mutable_vec_datas).to_vec();
                     if !initial_vec.is_empty() {
                         Some(vec![VecDiff::Replace { values: initial_vec }])
                     } else {
@@ -3772,14 +3806,14 @@ impl<T> MutableVec<T> {
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
 
-            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system_logic);
+            let replay_signal = register_signal::<_, Vec<VecDiff<T>>, _, _, _>(world, replay_system);
+            replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
             });
 
-            let mut replay_entity = world.entity_mut(*replay_signal);
-            replay_entity.insert(VecReplayTrigger(trigger));
+            world.entity_mut(*replay_signal).insert((VecReplayTrigger(trigger), ReplayOnce));
 
             pipe_signal(world, broadcaster_system, replay_signal);
             replay_signal
@@ -3916,31 +3950,44 @@ impl<T: Clone> Clone for QueuedVecDiffs<T> {
 }
 
 pub(crate) trait Replayable {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync>;
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync);
 }
 
 #[derive(Component)]
-pub(crate) struct VecReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+pub(crate) struct ReplayOnce;
+
+#[derive(Component)]
+pub(crate) struct VecReplayTrigger(Box<dyn Fn(&mut World) + Send + Sync>);
 
 impl Replayable for VecReplayTrigger {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
-        self.0
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync) {
+        &self.0
+    }
+}
+
+pub(crate) fn trigger_replay<ReplayTrigger: Component + Replayable>(world: &mut World, entity: Entity) -> bool {
+    if let Some(trigger_component) = world
+        .get_entity_mut(entity)
+        .ok()
+        .and_then(|mut entity| entity.take::<ReplayTrigger>())
+    {
+        trigger_component.trigger()(world);
+        let mut entity = world.entity_mut(entity);
+        entity.remove::<ReplayOnce>();
+        entity.insert(trigger_component);
+        true
+    } else {
+        false
     }
 }
 
 pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
     let triggers: Vec<Entity> = world
-        .query_filtered::<Entity, With<ReplayTrigger>>()
+        .query_filtered::<Entity, (With<ReplayOnce>, Allow<Internal>)>()
         .iter(world)
         .collect();
-    for trigger_entity in triggers {
-        if let Some(trigger_component) = world
-            .get_entity_mut(trigger_entity)
-            .ok()
-            .and_then(|mut e| e.take::<ReplayTrigger>())
-        {
-            trigger_component.trigger()(world);
-        }
+    for entity in triggers {
+        trigger_replay::<ReplayTrigger>(world, entity);
     }
 }
 
@@ -4010,6 +4057,7 @@ pub(crate) mod tests {
     struct SignalVecOutput<T: Clone + fmt::Debug>(Vec<VecDiff<T>>);
 
     fn create_test_app() -> App {
+        cleanup(true);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app
@@ -6965,6 +7013,261 @@ pub(crate) mod tests {
             assert!(current_state.is_empty());
 
             // --- 9. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true)
+    }
+
+    #[test]
+    fn test_enumerate() {
+        {
+            // A comprehensive test for `SignalVecExt::enumerate`, covering all `VecDiff`
+            // types. Since enumerate wraps each value with an index signal, we test
+            // that the structure is correct rather than trying to evaluate the signals.
+
+            // --- 1. Setup ---
+            let mut app = create_test_app();
+
+            use crate::signal::Source;
+            type EnumeratedItem = (Source<Option<usize>>, i32);
+
+            #[derive(Resource, Default)]
+            struct EnumOutput(Vec<VecDiff<EnumeratedItem>>);
+
+            app.init_resource::<EnumOutput>();
+
+            let source_vec = MutableVecBuilder::from([10, 20, 30]).spawn(app.world_mut());
+
+            let enumerated = source_vec.signal_vec().enumerate();
+
+            // Custom capture system that doesn't require Debug
+            let capture = |In(diffs): In<Vec<VecDiff<EnumeratedItem>>>, mut output: ResMut<EnumOutput>| {
+                output.0.extend(diffs);
+            };
+
+            let handle = enumerated.for_each(capture).register(app.world_mut());
+
+            // Helper to get and clear diffs
+            let get_diffs = |world: &mut World| -> Vec<VecDiff<EnumeratedItem>> {
+                let output = world.resource::<EnumOutput>().0.clone();
+                world.resource_mut::<EnumOutput>().0.clear();
+                output
+            };
+
+            // Track all items with their index signals throughout the test
+            let mut tracked_items: Vec<(Source<Option<usize>>, i32)>;
+
+            // Helper to verify index signals match their positions
+            let verify_indices =
+                |world: &mut World, items: &[(Source<Option<usize>>, i32)], expected: &[(usize, i32)]| {
+                    assert_eq!(items.len(), expected.len(), "Item count mismatch");
+                    for (i, ((index_signal, value), (expected_index, expected_value))) in
+                        items.iter().zip(expected.iter()).enumerate()
+                    {
+                        assert_eq!(*value, *expected_value, "Value mismatch at position {}", i);
+
+                        // Register and poll the index signal to get its current value
+                        let signal_handle = index_signal.clone().register(world);
+                        let index = poll_signal(world, *signal_handle)
+                            .and_then(downcast_any_clone::<Option<usize>>)
+                            .flatten();
+                        signal_handle.cleanup(world);
+
+                        assert_eq!(
+                            index,
+                            Some(*expected_index),
+                            "Index signal at position {} should be Some({}), but got {:?}",
+                            i,
+                            expected_index,
+                            index
+                        );
+                    }
+                };
+
+            // --- 2. Test Initial State (Replace) ---
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Initial update should produce one Replace diff.");
+            match &diffs[0] {
+                VecDiff::Replace { values } => {
+                    assert_eq!(values.len(), 3, "Should have 3 items initially.");
+                    assert_eq!(values[0].1, 10, "First value should be 10.");
+                    assert_eq!(values[1].1, 20, "Second value should be 20.");
+                    assert_eq!(values[2].1, 30, "Third value should be 30.");
+
+                    // Verify index signals
+                    verify_indices(app.world_mut(), values, &[(0, 10), (1, 20), (2, 30)]);
+
+                    // Track these items
+                    tracked_items = values.to_vec();
+                }
+                _ => panic!("Expected Replace diff"),
+            }
+
+            // --- 3. Test Push ---
+            source_vec.write(app.world_mut()).push(40);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push should produce one diff.");
+            match &diffs[0] {
+                VecDiff::Push { value } => {
+                    assert_eq!(value.1, 40, "Pushed value should be 40.");
+                    // Verify the pushed item has index 3
+                    verify_indices(app.world_mut(), core::slice::from_ref(value), &[(3, 40)]);
+
+                    // Add to tracked items
+                    tracked_items.push(value.clone());
+                }
+                _ => panic!("Expected Push diff"),
+            }
+
+            // Verify all existing items still have correct indices
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 20), (2, 30), (3, 40)]);
+
+            // At this point we have: [10, 20, 30, 40] at indices [0, 1, 2, 3]
+
+            // --- 4. Test InsertAt ---
+            source_vec.write(app.world_mut()).insert(1, 15);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "InsertAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::InsertAt { index, value } => {
+                    assert_eq!(*index, 1, "Insert index should be 1.");
+                    assert_eq!(value.1, 15, "Inserted value should be 15.");
+                    // New item at index 1 should have index signal of 1
+                    verify_indices(app.world_mut(), core::slice::from_ref(value), &[(1, 15)]);
+
+                    // Insert into tracked items
+                    tracked_items.insert(1, value.clone());
+                }
+                _ => panic!("Expected InsertAt diff"),
+            }
+
+            // After insert at 1, the vec is: [10@0, 15@1, 20@2, 30@3, 40@4]
+            // CRITICAL: Verify that existing items' index signals have been updated!
+            app.update(); // Allow index signals to propagate
+            verify_indices(
+                app.world_mut(),
+                &tracked_items,
+                &[(0, 10), (1, 15), (2, 20), (3, 30), (4, 40)],
+            );
+
+            // --- 5. Test UpdateAt ---
+            source_vec.write(app.world_mut()).set(2, 25);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "UpdateAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::UpdateAt { index, value } => {
+                    assert_eq!(*index, 2, "Update index should be 2.");
+                    assert_eq!(value.1, 25, "Updated value should be 25.");
+                    // Updated item should keep index 2
+                    verify_indices(app.world_mut(), core::slice::from_ref(value), &[(2, 25)]);
+
+                    // Update tracked item
+                    tracked_items[2] = value.clone();
+                }
+                _ => panic!("Expected UpdateAt diff"),
+            }
+
+            // Verify all items still have correct indices
+            verify_indices(
+                app.world_mut(),
+                &tracked_items,
+                &[(0, 10), (1, 15), (2, 25), (3, 30), (4, 40)],
+            );
+
+            // --- 6. Test RemoveAt ---
+            source_vec.write(app.world_mut()).remove(1);
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "RemoveAt should produce one diff.");
+            match &diffs[0] {
+                VecDiff::RemoveAt { index } => {
+                    assert_eq!(*index, 1, "Remove index should be 1.");
+
+                    // Remove from tracked items
+                    tracked_items.remove(1);
+                }
+                _ => panic!("Expected RemoveAt diff"),
+            }
+
+            // After removal, indices should be updated: [10@0, 25@1, 30@2, 40@3]
+            // CRITICAL: Verify that remaining items' index signals have been updated!
+            app.update(); // Allow index signals to propagate
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 10), (1, 25), (2, 30), (3, 40)]);
+
+            // --- 7. Test Move ---
+            let current_len = source_vec.read(app.world()).len();
+            if current_len > 1 {
+                let old_idx = current_len - 1;
+                let new_idx = 0;
+                source_vec.write(app.world_mut()).move_item(old_idx, new_idx);
+                app.update();
+                let diffs = get_diffs(app.world_mut());
+                assert_eq!(diffs.len(), 1, "Move should produce one diff.");
+                match &diffs[0] {
+                    VecDiff::Move { old_index, new_index } => {
+                        assert_eq!(*old_index, old_idx, "Old index should match.");
+                        assert_eq!(*new_index, new_idx, "New index should match.");
+
+                        // Update tracked items
+                        let item = tracked_items.remove(old_idx);
+                        tracked_items.insert(new_idx, item);
+                    }
+                    _ => panic!("Expected Move diff"),
+                }
+                // After move, indices should be updated
+                // Vec is now: [40@0, 10@1, 25@2, 30@3]
+                // CRITICAL: Verify that all items' index signals have been updated!
+                app.update(); // Allow index signals to propagate
+                verify_indices(app.world_mut(), &tracked_items, &[(0, 40), (1, 10), (2, 25), (3, 30)]);
+            }
+
+            // --- 8. Test Pop ---
+            source_vec.write(app.world_mut()).pop();
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Pop should produce one diff.");
+            assert!(matches!(diffs[0], VecDiff::Pop), "Expected Pop diff.");
+
+            // Remove from tracked items
+            tracked_items.pop();
+            // Verify remaining items still have correct indices: [40@0, 10@1, 25@2]
+            verify_indices(app.world_mut(), &tracked_items, &[(0, 40), (1, 10), (2, 25)]);
+
+            // --- 9. Test Clear ---
+            source_vec.write(app.world_mut()).clear();
+            app.update();
+            let diffs = get_diffs(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Clear should produce one diff.");
+            assert!(matches!(diffs[0], VecDiff::Clear), "Expected Clear diff.");
+
+            // Clear tracked items
+            tracked_items.clear();
+
+            // --- 10. Test Re-population after clear ---
+            source_vec.write(app.world_mut()).push(100);
+            source_vec.write(app.world_mut()).push(200);
+            app.update();
+
+            let diffs = get_diffs(app.world_mut());
+            // Should get Push diffs for the new items
+            assert_eq!(diffs.len(), 2, "Should have 2 Push diffs.");
+            match (&diffs[0], &diffs[1]) {
+                (VecDiff::Push { value: v1 }, VecDiff::Push { value: v2 }) => {
+                    assert_eq!(v1.1, 100, "First pushed value should be 100.");
+                    assert_eq!(v2.1, 200, "Second pushed value should be 200.");
+                    // Verify indices start from 0 again after clear
+                    verify_indices(app.world_mut(), core::slice::from_ref(v1), &[(0, 100)]);
+                    verify_indices(app.world_mut(), core::slice::from_ref(v2), &[(1, 200)]);
+                }
+                _ => panic!("Expected two Push diffs"),
+            }
+
+            // --- 11. Cleanup ---
             handle.cleanup(app.world_mut());
         }
 

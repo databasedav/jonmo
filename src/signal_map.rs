@@ -2,16 +2,16 @@
 //! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalSystem, downcast_any_clone, lazy_signal_from_system, pipe_signal, poll_signal,
-        process_signals, register_signal,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, downcast_any_clone, lazy_signal_from_system,
+        pipe_signal, poll_signal, process_signals, register_signal,
     },
     signal::{Signal, SignalBuilder, SignalExt},
-    signal_vec::{Replayable, SignalVec, VecDiff},
+    signal_vec::{ReplayOnce, Replayable, SignalVec, VecDiff},
     utils::{LazyEntity, SSs},
 };
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
-use bevy_ecs::prelude::*;
+use bevy_ecs::{entity_disabling::Internal, prelude::*};
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -139,12 +139,22 @@ impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMap<Key = K, Value = V>
 /// An extension trait for [`SignalMap`] types that implement [`Clone`].
 ///
 /// Relevant in contexts where some function may require a [`Clone`] [`SignalMap`], but the concrete
-/// type can't be known at compile-time.
+/// type can't be known at compile-time, e.g. in a
+/// [`.switch_signal_map`](SignalExt::switch_signal_map).
 pub trait SignalMapDynClone: SignalMap + DynClone {}
 
 clone_trait_object!(<K, V> SignalMapDynClone<Key = K, Value = V>);
 
 impl<T: SignalMap + Clone + 'static> SignalMapDynClone for T {}
+
+impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMapDynClone<Key = K, Value = V> + Send + Sync> {
+    type Key = K;
+    type Value = V;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+        (*self).register_boxed_signal_map(world)
+    }
+}
 
 /// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<MapDiff>`]s of its
 /// upstream, see [.for_each](SignalMapExt::for_each).
@@ -304,6 +314,126 @@ where
     }
 }
 
+/// Enables returning different concrete [`SignalMap`] types from branching logic without boxing,
+/// although note that all [`SignalMap`]s are boxed internally regardless.
+///
+/// Inspired by <https://github.com/rayon-rs/either>.
+#[derive(Clone)]
+#[allow(missing_docs)]
+pub enum SignalMapEither<L, R>
+where
+    L: SignalMap,
+    R: SignalMap,
+{
+    Left(L),
+    Right(R),
+}
+
+impl<K, V, L, R> SignalMap for SignalMapEither<L, R>
+where
+    L: SignalMap<Key = K, Value = V>,
+    R: SignalMap<Key = K, Value = V>,
+{
+    type Key = K;
+    type Value = V;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+        match *self {
+            SignalMapEither::Left(left) => left.register_signal_map(world),
+            SignalMapEither::Right(right) => right.register_signal_map(world),
+        }
+    }
+}
+
+/// Blanket trait for transforming [`SignalMap`]s into [`SignalMapEither::Left`] or
+/// [`SignalMapEither::Right`].
+pub trait IntoSignalMapEither: Sized
+where
+    Self: SignalMap,
+{
+    /// Wrap this [`SignalMap`] in the [`SignalMapEither::Left`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalMap`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct DoubleValues(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(DoubleValues(true));
+    ///
+    /// let map = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<DoubleValues>| res.0)
+    ///     .switch_signal_map(move |In(double): In<bool>, world: &mut World| {
+    ///         if double {
+    ///             map.signal_map()
+    ///                 .map_value(|In(v): In<i32>| v * 2)
+    ///                 .left_either()
+    ///         } else {
+    ///             map.signal_map().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalMapEither types
+    /// ```
+    fn left_either<R>(self) -> SignalMapEither<Self, R>
+    where
+        R: SignalMap,
+    {
+        SignalMapEither::Left(self)
+    }
+
+    /// Wrap this [`SignalMap`] in the [`SignalMapEither::Right`] variant.
+    ///
+    /// Useful for conditional branching where different [`SignalMap`] types need to be returned
+    /// from the same function or closure, particularly with
+    /// [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource)]
+    /// struct MapSelector(bool);
+    ///
+    /// let mut world = World::new();
+    /// world.insert_resource(MapSelector(false));
+    ///
+    /// let map_a = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
+    /// let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(&mut world);
+    ///
+    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<MapSelector>| res.0)
+    ///     .switch_signal_map(move |In(use_a): In<bool>, world: &mut World| {
+    ///         if use_a {
+    ///             map_a
+    ///                 .signal_map()
+    ///                 .map_value(|In(v): In<i32>| v * 10)
+    ///                 .left_either()
+    ///         } else {
+    ///             map_b.signal_map().right_either()
+    ///         }
+    ///     });
+    /// // both branches produce compatible SignalMapEither types
+    /// ```
+    fn right_either<L>(self) -> SignalMapEither<L, Self>
+    where
+        L: SignalMap,
+    {
+        SignalMapEither::Right(self)
+    }
+}
+
+impl<T: SignalMap> IntoSignalMapEither for T {}
+
 /// Extension trait providing combinator methods for [`SignalMap`]s.
 pub trait SignalMapExt: SignalMap {
     /// Pass the "raw" [`Vec<MapDiff<Self::Key, Self::Value>>`] output of this [`SignalMap`] to a
@@ -402,10 +532,10 @@ pub trait SignalMapExt: SignalMap {
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
-            let state_and_queue_entity = world.spawn_empty().id();
-            let output_system_handle = SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
-                move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
+            let output_signal_entity = LazyEntity::new();
+            let output_signal = *SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                    if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(output_signal_entity.get())
                     {
                         if diffs.0.is_empty() {
                             None
@@ -415,14 +545,14 @@ pub trait SignalMapExt: SignalMap {
                     } else {
                         None
                     }
-                },
+                }),
             )
             .register(world);
+            output_signal_entity.set(*output_signal);
 
             fn spawn_processor<K: Clone + SSs, V: Clone + SSs>(
                 world: &mut World,
-                queue_entity: Entity,
-                output_system: SignalSystem,
+                output_signal: SignalSystem,
                 key: K,
                 inner_signal: impl Signal<Item = V> + Clone + 'static,
             ) -> (SignalHandle, SignalSystem, V) {
@@ -434,12 +564,12 @@ pub trait SignalMapExt: SignalMap {
                 temp_handle.cleanup(world);
                 let processor_handle = inner_signal
                     .map(move |In(value): In<V>, world: &mut World| {
-                        if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(queue_entity) {
+                        if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(*output_signal) {
                             queue.0.push(MapDiff::Update {
                                 key: key.clone(),
                                 value,
                             });
-                            process_signals(world, [output_system], Box::new(()));
+                            process_signals(world, [output_signal], Box::new(()));
                         }
                     })
                     .register(world);
@@ -452,16 +582,13 @@ pub trait SignalMapExt: SignalMap {
                 _phantom: PhantomData<S>,
             }
 
-            let output_system_handle_clone = output_system_handle.clone();
             let manager_system_logic = move |In(diffs): In<Vec<MapDiff<Self::Key, Self::Value>>>, world: &mut World| {
                 let mut new_map_diffs = Vec::new();
                 for diff in diffs {
                     match diff {
                         MapDiff::Replace { entries } => {
                             let old_signals = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 core::mem::take(&mut state.signals)
                             };
                             for (_, (handle, _)) in old_signals {
@@ -471,19 +598,14 @@ pub trait SignalMapExt: SignalMap {
                             let mut new_entries_for_diff = Vec::with_capacity(entries.len());
                             for (key, value) in entries {
                                 if let Ok(inner_signal) = world.run_system_with(factory_system_id, value) {
-                                    let (handle, id, initial_value) = spawn_processor(
-                                        world,
-                                        state_and_queue_entity,
-                                        *output_system_handle_clone,
-                                        key.clone(),
-                                        inner_signal,
-                                    );
+                                    let (handle, id, initial_value) =
+                                        spawn_processor(world, output_signal, key.clone(), inner_signal);
                                     new_signals.insert(key.clone(), (handle, id));
                                     new_entries_for_diff.push((key, initial_value));
                                 }
                             }
                             world
-                                .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
+                                .get_mut::<ManagerState<Self::Key, S>>(*output_signal)
                                 .unwrap()
                                 .signals = new_signals;
                             if !new_entries_for_diff.is_empty() {
@@ -494,17 +616,11 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Insert { key, value } => {
                             if let Ok(inner_signal) = world.run_system_with(factory_system_id, value) {
-                                let (handle, id, initial_value) = spawn_processor(
-                                    world,
-                                    state_and_queue_entity,
-                                    *output_system_handle_clone,
-                                    key.clone(),
-                                    inner_signal,
-                                );
+                                let (handle, id, initial_value) =
+                                    spawn_processor(world, output_signal, key.clone(), inner_signal);
                                 let old_handle = {
-                                    let mut state = world
-                                        .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
-                                        .unwrap();
+                                    let mut state =
+                                        world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state.signals.insert(key.clone(), (handle, id))
                                 };
                                 if let Some((old_handle, _)) = old_handle {
@@ -520,25 +636,18 @@ pub trait SignalMapExt: SignalMap {
                             if let Ok(new_inner_signal) = world.run_system_with(factory_system_id, value) {
                                 let new_inner_id = new_inner_signal.clone().register(world);
                                 let old_inner_id_opt = {
-                                    let state =
-                                        world.get::<ManagerState<Self::Key, S>>(state_and_queue_entity).unwrap();
+                                    let state = world.get::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state.signals.get(&key).map(|(_, id)| *id)
                                 };
                                 if old_inner_id_opt == Some(*new_inner_id) {
                                     new_inner_id.cleanup(world);
                                     continue;
                                 }
-                                let (new_processor_handle, new_processor_id, initial_value) = spawn_processor(
-                                    world,
-                                    state_and_queue_entity,
-                                    *output_system_handle_clone,
-                                    key.clone(),
-                                    new_inner_signal,
-                                );
+                                let (new_processor_handle, new_processor_id, initial_value) =
+                                    spawn_processor(world, output_signal, key.clone(), new_inner_signal);
                                 let old_processor_handle = {
-                                    let mut state = world
-                                        .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
-                                        .unwrap();
+                                    let mut state =
+                                        world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                     state
                                         .signals
                                         .insert(key.clone(), (new_processor_handle, new_processor_id))
@@ -555,9 +664,7 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Remove { key } => {
                             let old_handle = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 state.signals.remove(&key)
                             };
                             if let Some((handle, _)) = old_handle {
@@ -567,9 +674,7 @@ pub trait SignalMapExt: SignalMap {
                         }
                         MapDiff::Clear => {
                             let old_signals = {
-                                let mut state = world
-                                    .get_mut::<ManagerState<Self::Key, S>>(state_and_queue_entity)
-                                    .unwrap();
+                                let mut state = world.get_mut::<ManagerState<Self::Key, S>>(*output_signal).unwrap();
                                 if state.signals.is_empty() {
                                     BTreeMap::new()
                                 } else {
@@ -586,15 +691,15 @@ pub trait SignalMapExt: SignalMap {
                     }
                 }
                 if !new_map_diffs.is_empty()
-                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(state_and_queue_entity)
+                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal)
                 {
                     queue.0.extend(new_map_diffs);
                 }
-                process_signals(world, [*output_system_handle_clone], Box::new(()));
+                process_signals(world, [output_signal], Box::new(()));
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
             world
-                .entity_mut(state_and_queue_entity)
+                .entity_mut(*output_signal)
                 .insert((
                     ManagerState::<Self::Key, S> {
                         signals: BTreeMap::new(),
@@ -602,10 +707,10 @@ pub trait SignalMapExt: SignalMap {
                     },
                     QueuedMapDiffs::<Self::Key, S::Item>(vec![]),
                 ))
-                .add_child(**manager_handle)
                 .add_child(factory_system_id.entity())
-                .add_child(**output_system_handle);
-            *output_system_handle
+                .insert(SignalHandles::from([manager_handle]));
+
+            output_signal
         });
         MapValueSignal {
             signal,
@@ -733,6 +838,43 @@ pub trait SignalMapExt: SignalMap {
     fn boxed(self) -> Box<dyn SignalMap<Key = Self::Key, Value = Self::Value>>
     where
         Self: Sized,
+    {
+        Box::new(self)
+    }
+
+    /// Erases the type of this [`SignalMap`], allowing it to be used in conjunction with
+    /// [`SignalMap`]s of other concrete types, particularly in cases where the consumer requires
+    /// [`Clone`], e.g. [`.switch_signal_map`](SignalExt::switch_signal_map).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system(|_: In<()>| true).switch_signal_map(
+    ///     |In(condition): In<bool>, world: &mut World| {
+    ///         if condition {
+    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///                 .map_value(|In(x): In<i32>| x * 2)
+    ///                 .boxed_clone() // this is a `MapValue<Source<i32, i32>>`
+    ///         } else {
+    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///                 .spawn(world)
+    ///                 .signal_map()
+    ///                 .map_value_signal(|In(x): In<i32>| {
+    ///                     SignalBuilder::from_system(move |_: In<()>| x * 2)
+    ///                 })
+    ///                 .boxed_clone() // this is a `MapValueSignal<Source<i32, i32>>`
+    ///         } // without the `.boxed_clone()`, the compiler would not allow this
+    ///     },
+    /// );
+    /// ```
+    fn boxed_clone(self) -> Box<dyn SignalMapDynClone<Key = Self::Key, Value = Self::Value> + Send + Sync>
+    where
+        Self: Sized + Clone,
     {
         Box::new(self)
     }
@@ -903,11 +1045,11 @@ where
 }
 
 #[derive(Component)]
-pub(crate) struct MapReplayTrigger(Box<dyn FnOnce(&mut World) + Send + Sync>);
+pub(crate) struct MapReplayTrigger(Box<dyn Fn(&mut World) + Send + Sync>);
 
 impl Replayable for MapReplayTrigger {
-    fn trigger(self) -> Box<dyn FnOnce(&mut World) + Send + Sync> {
-        self.0
+    fn trigger(&self) -> &(dyn Fn(&mut World) + Send + Sync) {
+        &self.0
     }
 }
 
@@ -979,10 +1121,10 @@ impl<K, V> MutableBTreeMap<K, V> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
-            let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World, mut has_run: Local<bool>| {
-                if !*has_run {
-                    *has_run = true;
-                    let initial_map = self_.read(&*world);
+            let replay_entity = LazyEntity::new();
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+                if replay_onces.contains(*replay_entity) {
+                    let initial_map = self_.read(&mutable_btree_map_datas);
                     if !initial_map.is_empty() {
                         Some(vec![MapDiff::Replace { entries: initial_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
                     } else {
@@ -990,15 +1132,14 @@ impl<K, V> MutableBTreeMap<K, V> {
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
-
-            let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system_logic);
+            let replay_signal = register_signal::<_, Vec<MapDiff<K, V>>, _, _, _>(world, replay_system);
+            replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
                 process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
             });
 
-            let mut replay_entity = world.entity_mut(*replay_signal);
-            replay_entity.insert(MapReplayTrigger(trigger));
+            world.entity_mut(*replay_signal).insert((MapReplayTrigger(trigger), ReplayOnce));
 
             pipe_signal(world, broadcaster_system, replay_signal);
             replay_signal
@@ -1306,6 +1447,7 @@ pub(crate) mod tests {
 
     // Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
+        cleanup(true);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin));
         app
