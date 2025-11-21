@@ -114,11 +114,9 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         BorderRadius::MAX,
         BackgroundColor(color),
     ))
-    // `.with_entity()` provides a convenient hook to run code on this builder's `EntityWorldMut`, e.g. for setting up
-    // observers
-    .with_entity(move |mut entity| {
-        entity.observe(move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
-            if matches!(on.button, PointerButton::Primary) {
+    // Attach observers to the entity
+    .observe(move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+        if matches!(on.button, PointerButton::Primary) {
                 // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
                 // state-holding entity.
                 if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {
@@ -127,8 +125,7 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
                     // automatically trigger a UI update at the end of the frame.
                     **counter += step;
                 }
-            }
-        });
+        }
     })
     .child(JonmoBuilder::from((Text::from(label), TextFont::from_font_size(25.))))
 }

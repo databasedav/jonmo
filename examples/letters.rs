@@ -183,10 +183,8 @@ fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave>
         },
         BorderRadius::all(Val::Px(GAP * 2.)),
     ))
-    .with_entity(move |mut entity| {
-        entity.observe(move |_click: On<Pointer<Click>>, mut active_save: ResMut<ActiveSave>| {
-            active_save.0 = save_char;
-        });
+    .observe(move |_click: On<Pointer<Click>>, mut active_save: ResMut<ActiveSave>| {
+        active_save.0 = save_char;
     })
     .component_signal(
         active_save_signal
