@@ -1,4 +1,4 @@
-//! Simple key press counter, showcasing map reactivity.
+//! Key press counter with swappable save states, showcasing map reactivity.
 mod utils;
 use utils::*;
 
@@ -87,7 +87,6 @@ fn ui_root() -> JonmoBuilder {
         .child(
             JonmoBuilder::from(Node {
                 align_self: AlignSelf::Center,
-                justify_content: JustifyContent::SpaceBetween,
                 width: Val::Percent(100.),
                 ..default()
             })
@@ -102,22 +101,25 @@ fn ui_root() -> JonmoBuilder {
                 }))),
             )
             .child(
-                text_node()
-                    .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
-                    .with_component::<Node>(|mut node| node.height = Val::Px(100.))
-                    .component_signal(
-                        active_save_signal
-                            .clone()
-                            .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
-                                get_active_map(&save_states, active_save).signal_vec_entries()
-                            })
-                            .map_in(|(_, LetterData { count, .. })| count)
-                            .sum()
-                            .dedupe()
-                            .map_in_ref(ToString::to_string)
-                            .map_in(Text)
-                            .map_in(Some),
-                    ),
+                sum_container()
+                .child(
+                    text_node()
+                        .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
+                        .with_component::<Node>(|mut node| node.height = Val::Px(100.))
+                        .component_signal(
+                            active_save_signal
+                                .clone()
+                                .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+                                    get_active_map(&save_states, active_save).signal_vec_entries()
+                                })
+                                .map_in(|(_, LetterData { count, .. })| count)
+                                .sum()
+                                .dedupe()
+                                .map_in_ref(ToString::to_string)
+                                .map_in(Text)
+                                .map_in(Some),
+                        )
+                ),
             ),
         )
         .children(ROWS.into_iter().map(clone!((active_save_signal) move |row| {
@@ -139,13 +141,7 @@ fn ui_root() -> JonmoBuilder {
                 }),
             ))
             .child(
-                JonmoBuilder::from(Node {
-                    align_self: AlignSelf::Center,
-                    justify_content: JustifyContent::FlexEnd,
-                    flex_grow: 1.,
-                    padding: UiRect::all(Val::Px(GAP * 2.)),
-                    ..default()
-                })
+                sum_container()
                 .child(
                     text_node()
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
@@ -170,6 +166,16 @@ fn ui_root() -> JonmoBuilder {
 }
 
 const GAP: f32 = 5.;
+
+fn sum_container() -> JonmoBuilder {
+    JonmoBuilder::from(Node {
+        align_self: AlignSelf::Center,
+        justify_content: JustifyContent::FlexEnd,
+        flex_grow: 1.,
+        padding: UiRect::all(Val::Px(GAP * 2.)),
+        ..default()
+    })
+}
 
 fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> JonmoBuilder {
     JonmoBuilder::from((
