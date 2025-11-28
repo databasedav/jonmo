@@ -169,7 +169,7 @@ pub(crate) fn examples_plugin(app: &mut App) {
             }),
             ..default()
         }),
-        JonmoPlugin,
+        JonmoPlugin::default(),
         #[cfg(feature = "debug")]
         DebugUiPlugin,
     ))

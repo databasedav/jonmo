@@ -10,6 +10,31 @@ def position(iterable, predicate):
             return i
     return None
 
+# Remove comments but keep the first line of the top module comment
+first_module_comment_line = None
+in_module_comment = False
+filtered_lines = []
+
+for i, line in enumerate(lines):
+    # Check if it's a module comment line
+    if line.strip().startswith('//!'):
+        if first_module_comment_line is None:
+            # This is the first line of the module comment, keep it
+            first_module_comment_line = line
+            filtered_lines.append(line)
+            in_module_comment = True
+        # Skip all other module comment lines
+        continue
+    # Check if it's a regular comment line
+    elif line.strip().startswith('//'):
+        # Skip regular comment lines
+        continue
+    else:
+        # Not a comment line, keep it
+        filtered_lines.append(line)
+
+lines = filtered_lines
+
 mod_utils_line = position(lines, lambda line: line.startswith('mod utils'))
 lines = lines[:mod_utils_line] + lines[mod_utils_line + 3:]
 

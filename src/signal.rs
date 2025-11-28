@@ -2270,7 +2270,7 @@ mod tests {
 
     fn create_test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, JonmoPlugin));
+        app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
         app.register_type::<TestData>();
         app
     }
@@ -3121,7 +3121,7 @@ mod tests {
     #[test]
     fn test_throttle() {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins.build().disable::<TimePlugin>(), JonmoPlugin));
+        app.add_plugins((MinimalPlugins.build().disable::<TimePlugin>(), JonmoPlugin::default()));
         app.init_resource::<Time>(); // manually managing time for the test
         app.init_resource::<SignalOutput<i32>>();
 
