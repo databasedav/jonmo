@@ -3760,14 +3760,18 @@ impl<T> MutableVec<T> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
+            let was_initially_empty = self_.read(&*world).is_empty();
+
             let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, world: &mut World, mut has_run: Local<bool>| {
                 if !*has_run {
                     *has_run = true;
-                    let initial_vec = self_.read(&*world).to_vec();
-                    if !initial_vec.is_empty() {
+                    if !was_initially_empty {
+                        let initial_vec = self_.read(&*world).to_vec();
                         Some(vec![VecDiff::Replace { values: initial_vec }])
-                    } else {
+                    } else if upstream_diffs.is_empty() {
                         None
+                    } else {
+                        Some(upstream_diffs)
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
@@ -4195,6 +4199,90 @@ pub(crate) mod tests {
         }
 
         cleanup(true)
+    }
+
+    #[test]
+    fn test_empty_vec_first_push() {
+        {
+            // Test that when a MutableVec starts empty and we push to it,
+            // we only get one Push diff (not a duplicate with Replace)
+
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
+
+            // Start with an empty vec
+            let source_vec = MutableVec::from(app.world_mut());
+
+            // Create a signal_vec and register it
+            let signal = source_vec.signal_vec();
+            let handle = signal.for_each(capture_signal_vec_output).register(app.world_mut());
+
+            // Push the first element
+            source_vec.write(app.world_mut()).push(42);
+            app.update();
+
+            // Should get exactly one Push diff, not [Replace, Push]
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Expected exactly one diff for first push to empty vec");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push { value: 42 },
+                "Expected a Push diff, not a Replace"
+            );
+
+            // Push another element to verify normal operation continues
+            source_vec.write(app.world_mut()).push(99);
+            app.update();
+
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Push { value: 99 });
+
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true);
+    }
+
+    #[test]
+    fn test_nonempty_vec_initial_replace() {
+        {
+            // Test that when a MutableVec starts with values,
+            // we get an initial Replace diff
+
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
+
+            // Start with a vec containing initial values
+            let source_vec = MutableVecBuilder::from([1, 2, 3]).spawn(app.world_mut());
+
+            // Create a signal_vec and register it
+            let signal = source_vec.signal_vec();
+            let handle = signal.for_each(capture_signal_vec_output).register(app.world_mut());
+
+            // First update should produce a Replace with initial values
+            app.update();
+
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Expected exactly one diff for initial state");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace { values: vec![1, 2, 3] },
+                "Expected a Replace diff with initial values"
+            );
+
+            // Push another element to verify normal operation continues
+            source_vec.write(app.world_mut()).push(4);
+            app.update();
+
+            let diffs = get_and_clear_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0], VecDiff::Push { value: 4 });
+
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true);
     }
 
     #[test]

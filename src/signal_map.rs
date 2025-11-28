@@ -979,14 +979,18 @@ impl<K, V> MutableBTreeMap<K, V> {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
 
+            let was_initially_empty = self_.read(&*world).is_empty();
+
             let replay_system_logic = clone!((self_) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, world: &mut World, mut has_run: Local<bool>| {
                 if !*has_run {
                     *has_run = true;
-                    let initial_map = self_.read(&*world);
-                    if !initial_map.is_empty() {
+                    if !was_initially_empty {
+                        let initial_map = self_.read(&*world);
                         Some(vec![MapDiff::Replace { entries: initial_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
-                    } else {
+                    } else if upstream_diffs.is_empty() {
                         None
+                    } else {
+                        Some(upstream_diffs)
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
@@ -2025,6 +2029,113 @@ pub(crate) mod tests {
             assert!(current_entries.is_empty());
 
             // --- 8. Cleanup ---
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true);
+    }
+
+    #[test]
+    fn test_empty_map_first_insert() {
+        {
+            // Test that when a MutableBTreeMap starts empty and we insert into it,
+            // we only get one Insert diff (not a duplicate with Replace)
+
+            let mut app = create_test_app();
+            app.init_resource::<SignalMapOutput<String, i32>>();
+
+            // Start with an empty map
+            let source_map = MutableBTreeMap::from(app.world_mut());
+
+            // Create a signal_map and register it
+            let signal = source_map.signal_map();
+            let handle = signal.for_each(capture_map_output).register(app.world_mut());
+
+            // Insert the first entry
+            source_map.write(app.world_mut()).insert("a".to_string(), 42);
+            app.update();
+
+            // Should get exactly one Insert diff, not [Replace, Insert]
+            let diffs = get_and_clear_map_output::<String, i32>(app.world_mut());
+            assert_eq!(
+                diffs.len(),
+                1,
+                "Expected exactly one diff for first insert to empty map"
+            );
+            assert_eq!(
+                diffs[0],
+                MapDiff::Insert {
+                    key: "a".to_string(),
+                    value: 42
+                },
+                "Expected an Insert diff, not a Replace"
+            );
+
+            // Insert another entry to verify normal operation continues
+            source_map.write(app.world_mut()).insert("b".to_string(), 99);
+            app.update();
+
+            let diffs = get_and_clear_map_output::<String, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                MapDiff::Insert {
+                    key: "b".to_string(),
+                    value: 99
+                }
+            );
+
+            handle.cleanup(app.world_mut());
+        }
+
+        cleanup(true);
+    }
+
+    #[test]
+    fn test_nonempty_map_initial_replace() {
+        {
+            // Test that when a MutableBTreeMap starts with entries,
+            // we get an initial Replace diff
+
+            let mut app = create_test_app();
+            app.init_resource::<SignalMapOutput<String, i32>>();
+
+            // Start with a map containing initial entries
+            let source_map =
+                MutableBTreeMapBuilder::from([("x".to_string(), 1), ("y".to_string(), 2), ("z".to_string(), 3)])
+                    .spawn(app.world_mut());
+
+            // Create a signal_map and register it
+            let signal = source_map.signal_map();
+            let handle = signal.for_each(capture_map_output).register(app.world_mut());
+
+            // First update should produce a Replace with initial entries
+            app.update();
+
+            let diffs = get_and_clear_map_output::<String, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Expected exactly one diff for initial state");
+            assert_eq!(
+                diffs[0],
+                MapDiff::Replace {
+                    entries: vec![("x".to_string(), 1), ("y".to_string(), 2), ("z".to_string(), 3),]
+                },
+                "Expected a Replace diff with initial entries"
+            );
+
+            // Insert another entry to verify normal operation continues
+            source_map.write(app.world_mut()).insert("w".to_string(), 4);
+            app.update();
+
+            let diffs = get_and_clear_map_output::<String, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(
+                diffs[0],
+                MapDiff::Insert {
+                    key: "w".to_string(),
+                    value: 4
+                }
+            );
+
             handle.cleanup(app.world_mut());
         }
 

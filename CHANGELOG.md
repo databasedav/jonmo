@@ -4,6 +4,12 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+# 0.3.1 (2025-11-27)
+
+### fixed
+
+- initially empty `MutableVec`s and `MutableBTreeMap`s won't double emit their first additions
+
 # 0.3.0 (2025-11-19)
 
 ### changed
