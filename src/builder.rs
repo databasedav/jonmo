@@ -712,7 +712,7 @@ mod tests {
     fn create_test_app() -> App {
         cleanup();
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, JonmoPlugin));
+        app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
         app
     }
 
