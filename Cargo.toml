@@ -1,6 +1,6 @@
 [package]
 name = "jonmo"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 categories = ["asynchronous", "gui", "game-development"]
 description = "ergonomic Bevy-native reactivity powered by FRP signals"
