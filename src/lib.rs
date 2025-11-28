@@ -9,7 +9,10 @@
 extern crate alloc;
 
 use bevy_app::prelude::*;
-use bevy_ecs::prelude::*;
+use bevy_ecs::{
+    prelude::*,
+    schedule::{InternedScheduleLabel, ScheduleLabel},
+};
 
 #[cfg(feature = "builder")]
 pub mod builder;
@@ -21,8 +24,67 @@ pub mod signal_vec;
 pub mod utils;
 
 /// Includes the systems required for [jonmo](crate) to function.
-#[derive(Default)]
-pub struct JonmoPlugin;
+///
+/// # Example
+///
+/// ```rust
+/// use bevy_app::prelude::*;
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{SignalProcessing, prelude::*};
+///
+/// let mut app = App::new();
+/// // Use default configuration (runs in Last schedule)
+/// app.add_plugins(JonmoPlugin::default());
+///
+/// let mut app = App::new();
+/// // Or customize the schedule
+/// app.add_plugins(JonmoPlugin::new().in_schedule(PostUpdate));
+///
+/// // Add ordering constraints using configure_sets
+/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// # struct SystemSet1;
+///
+/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// # struct SystemSet2;
+///
+/// app.configure_sets(
+///     PostUpdate,
+///     SignalProcessing.before(SystemSet1).before(SystemSet2),
+/// );
+/// ```
+pub struct JonmoPlugin {
+    schedule: InternedScheduleLabel,
+}
+
+impl Default for JonmoPlugin {
+    fn default() -> Self {
+        Self {
+            schedule: Last.intern(),
+        }
+    }
+}
+
+impl JonmoPlugin {
+    /// Create a new `JonmoPlugin` with signal processing running in the `Last` schedule.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Specify which schedule the signal processing systems should run in.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use bevy_app::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// JonmoPlugin::new().in_schedule(Update);
+    /// ```
+    pub fn in_schedule(mut self, schedule: impl ScheduleLabel) -> Self {
+        self.schedule = schedule.intern();
+        self
+    }
+}
 
 /// [`SystemSet`] that can be used to schedule systems around signal processing.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,7 +93,7 @@ pub struct SignalProcessing;
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-            Last,
+            self.schedule,
             (
                 (
                     signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
