@@ -66,10 +66,10 @@ fn ui_root() -> JonmoBuilder {
         })
         .insert(Counter(0))
         // --- Fulfilling the Promise ---
-        // `.entity_sync()` connects the `LazyEntity` to the actual entity that this `JonmoBuilder` spawns. Now calling
+        // `.lazy_entity()` connects the `LazyEntity` to the actual entity that this `JonmoBuilder` spawns. Now calling
         // `counter_holder.get()` from other deferred contexts, e.g. in the bodies of signal systems, will return the
         // `Entity` ID of this row node.
-        .entity_sync(counter_holder.clone())
+        .lazy_entity(counter_holder.clone())
         .child(counter_button(counter_holder.clone(), PINK, "-", -1))
         .child(
             JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
@@ -116,15 +116,13 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
     ))
     // Attach observers to the entity
     .observe(move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
-        if matches!(on.button, PointerButton::Primary) {
-            // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
-            // state-holding entity.
-            if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {
-                // --- State Mutation ---
-                // Because our text display has a signal that reads this component, this change will
-                // automatically trigger a UI update at the end of the frame.
-                **counter += step;
-            }
+        // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
+        // state-holding entity.
+        if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {
+            // --- State Mutation ---
+            // Because our text display has a signal that reads this component, this change will
+            // automatically trigger a UI update at the end of the frame.
+            **counter += step;
         }
     })
     .child(JonmoBuilder::from((Text::from(label), TextFont::from_font_size(25.))))

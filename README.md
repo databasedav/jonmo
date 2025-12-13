@@ -70,7 +70,7 @@ fn ui_root() -> JonmoBuilder {
             ..default()
         })
         .insert(Counter(0))
-        .entity_sync(counter_holder.clone())
+        .lazy_entity(counter_holder.clone())
         .child(counter_button(counter_holder.clone(), PINK, "-", -1))
         .child(
             JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))

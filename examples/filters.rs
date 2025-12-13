@@ -397,7 +397,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
         random_shape_filters(),
     ))
     .apply(maybe_insert_random_sorted)
-    .entity_sync(row_parent.clone())
+    .lazy_entity(row_parent.clone())
     .child(
         button("-", -3.)
             .component_signal(index.map_in(|index| index.map(Index)))
