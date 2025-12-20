@@ -98,11 +98,9 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         BorderRadius::MAX,
         BackgroundColor(color),
     ))
-    .observe(move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
-        if matches!(on.button, PointerButton::Primary) {
-            if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {
-                **counter += step;
-            }
+    .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+        if let Ok(mut counter) = counters.get_mut(*counter_holder) {
+            **counter += step;
         }
     })
     .child(JonmoBuilder::from((Text::from(label), TextFont::from_font_size(25.))))

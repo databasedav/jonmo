@@ -115,10 +115,10 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         BackgroundColor(color),
     ))
     // Attach observers to the entity
-    .observe(move |on: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+    .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
         // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
         // state-holding entity.
-        if let Ok(mut counter) = counters.get_mut(counter_holder.get()) {
+        if let Ok(mut counter) = counters.get_mut(*counter_holder) {
             // --- State Mutation ---
             // Because our text display has a signal that reads this component, this change will
             // automatically trigger a UI update at the end of the frame.

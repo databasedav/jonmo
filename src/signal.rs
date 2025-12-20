@@ -798,7 +798,7 @@ impl SignalBuilder {
 /// let none_signal = signal::option::<Source<i32>>(None);
 /// // outputs None
 /// ```
-pub fn option<S>(value: Option<S>) -> SignalEither<Map<S, Option<S::Item>>, Source<Option<S::Item>>>
+pub fn option<S: Clone>(value: Option<S>) -> impl Signal<Item = Option<S::Item>> + Clone
 where
     S: Signal,
     S::Item: Clone + SSs,
@@ -2757,10 +2757,69 @@ macro_rules! distinct {
     };
 }
 
+/// Creates a [`Signal`] that outputs the sum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output numeric types that implement `Add`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+///
+/// let sum_signal = signal::sum!(s1, s2, s3); // outputs `6`
+/// ```
+#[macro_export]
+macro_rules! sum {
+    // Single argument case
+    ($s1:expr $(,)?) => {
+        $s1
+    };
+    // Entry point
+    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::sum!(@combine $s1, $s2 $(, $rest)*)
+            .map(|In(val @ $crate::sum!(@pattern $s1, $s2 $(, $rest)*))|
+                $crate::sum!(@add val, $s1, $s2 $(, $rest)*)
+            )
+    };
+
+    // Combine chain
+    (@combine $first:expr, $second:expr) => {
+        $first.combine($second)
+    };
+    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
+        $crate::sum!(@combine $first.combine($second), $($rest),+)
+    };
+
+    // Pattern generator
+    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
+        $crate::sum!(@pattern_helper (_, _) $(, $rest)*)
+    };
+    (@pattern_helper $acc:tt $(,)?) => { $acc };
+    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
+        $crate::sum!(@pattern_helper ($acc, _) $(, $tail)*)
+    };
+
+    // Add logic
+    // Base case: 2 signals
+    (@add $val:expr, $a:expr, $b:expr) => {
+        $val.0 + $val.1
+    };
+    // Recursive case: 3+ signals
+    (@add $val:expr, $head:expr, $($tail:expr),+) => {
+        $val.1 + $crate::sum!(@add $val.0, $($tail),+)
+    };
+}
+
 pub use and;
 pub use distinct;
 pub use eq;
 pub use or;
+pub use sum;
 
 #[cfg(test)]
 mod tests {
@@ -4703,6 +4762,35 @@ mod tests {
         distinct_signal.map(capture_output::<bool>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
+    }
+
+    #[test]
+    fn test_signal_sum() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test sum with 2 signals
+        let sum_signal = crate::signal::sum!(s1, s2);
+        sum_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(3));
+
+        // Test sum with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+        
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+        
+        let sum_signal = crate::signal::sum!(s1, s2, s3, s4);
+        sum_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(10));
     }
 
     #[test]

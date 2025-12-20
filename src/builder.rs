@@ -95,6 +95,7 @@ impl JonmoBuilder {
         })
     }
 
+    /// Attach registered [`SignalHandle`]s to this entity for automatic cleanup on despawn.
     pub fn hold_signals(self, handles: impl IntoIterator<Item = SignalHandle> + SSs) -> Self {
         self.on_spawn(|world, entity| {
             for handle in handles.into_iter() {
