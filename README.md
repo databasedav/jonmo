@@ -2,7 +2,7 @@
 
 [![Crates.io Version](https://img.shields.io/crates/v/jonmo?style=for-the-badge)](https://crates.io/crates/jonmo)
 [![Docs.rs](https://img.shields.io/docsrs/jonmo?style=for-the-badge)](https://docs.rs/jonmo)
-[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-released%20version-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
+[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-0.17-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
 
 ```text
 in bengali, jonmo means "birth"
@@ -147,7 +147,7 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
 |bevy|jonmo|
 |-|-|
-|0.17|0.4|
+|0.17|0.5|
 |0.16|0.3|
 |0.15|0.1|
 
