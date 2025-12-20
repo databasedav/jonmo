@@ -7,6 +7,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### changed
 
 - `.entity_sync` renamed to `.lazy_entity`
+- `SignalExt::combine` always `.clone`s its latest upstream outputs no longer `.take`s its stored upstream outputs, instead 
 
 ### added
 

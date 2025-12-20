@@ -1323,10 +1323,7 @@ pub trait SignalExt: Signal {
 
     /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their
     /// outputs. The resulting [`Signal`] will only output a value when both input [`Signal`]s have
-    /// outputted a value since the last resulting output, e.g. if on frame 1, this [`Signal`]
-    /// outputs `1` and the other [`Signal`] outputs `None`, the resulting [`Signal`] will have no
-    /// output, but then if on frame 2, this [`Signal`] outputs `None` and the other [`Signal`]
-    /// outputs 2, then the resulting [`Signal`] will output `(1, 2)`.
+    /// outputted a value.
     ///
     /// # Example
     ///
@@ -4851,9 +4848,7 @@ mod tests {
 
         // Test product with 2 signals
         let product_signal = crate::signal::product!(s1, s2);
-        product_signal
-            .map(capture_output::<i32>)
-            .register(app.world_mut());
+        product_signal.map(capture_output::<i32>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(6));
 
@@ -4867,9 +4862,7 @@ mod tests {
         let s4 = SignalBuilder::from_system(|_: In<()>| 4);
 
         let product_signal = crate::signal::product!(s1, s2, s3, s4);
-        product_signal
-            .map(capture_output::<i32>)
-            .register(app.world_mut());
+        product_signal.map(capture_output::<i32>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(24));
     }
