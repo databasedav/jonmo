@@ -128,7 +128,7 @@ pub mod prelude {
             IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
             SignalVecExt,
         },
-        utils::{LazyEntity, clone, deref_copied, deref_cloned},
+        utils::{LazyEntity, clone, deref_cloned, deref_copied},
     };
     #[doc(no_inline)]
     pub use apply::{Also, Apply};

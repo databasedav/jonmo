@@ -35,11 +35,16 @@ fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
 #[component(on_remove = on_despawn_hook)]
 struct OnDespawnCallbacks(Vec<Box<dyn FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static>>);
 
-fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
+fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
+where
+    I: IntoIterator<Item = SignalHandle>,
+{
     if let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut handles) = entity.get_mut::<SignalHandles>()
+        && let Some(mut existing_handles) = entity.get_mut::<SignalHandles>()
     {
-        handles.add(handle);
+        for handle in handles {
+            existing_handles.add(handle);
+        }
     }
 }
 
@@ -97,11 +102,7 @@ impl JonmoBuilder {
 
     /// Attach registered [`SignalHandle`]s to this entity for automatic cleanup on despawn.
     pub fn hold_signals(self, handles: impl IntoIterator<Item = SignalHandle> + SSs) -> Self {
-        self.on_spawn(|world, entity| {
-            for handle in handles.into_iter() {
-                add_handle(world, entity, handle);
-            }
-        })
+        self.on_spawn(move |world, entity| add_handles(world, entity, handles))
     }
 
     /// Run a function with this builder's [`EntityWorldMut`].
@@ -174,7 +175,7 @@ impl JonmoBuilder {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle =
                 Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -216,7 +217,7 @@ impl JonmoBuilder {
                 }),
                 world,
             );
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -232,7 +233,7 @@ impl JonmoBuilder {
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle = Signal::register_signal(f(SignalBuilder::from_entity(entity)), world);
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -542,7 +543,7 @@ impl JonmoBuilder {
                 }
             };
             let handle = child_option.map(system).register(world);
-            add_handle(world, parent, handle);
+            add_handles(world, parent, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -711,7 +712,7 @@ impl JonmoBuilder {
                 }
             };
             let handle = children_signal_vec.for_each(system).register(world);
-            add_handle(world, parent, handle);
+            add_handles(world, parent, [handle]);
         };
         self.on_spawn(on_spawn)
     }

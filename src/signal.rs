@@ -781,7 +781,8 @@ impl SignalBuilder {
 ///
 /// This is mostly useful with [`.switch`](SignalExt::switch) or [`.flatten`](SignalExt::flatten).
 ///
-/// If the value is `None` then it behaves like [`SignalBuilder::always`], it just returns `None`.
+/// If the value is `None` then it emits `None` once and then terminates (implemented as
+/// `SignalBuilder::always(None).first()`).
 ///
 /// If the value is `Some(signal)` then it will return the result of the signal,
 /// except wrapped in `Some`.
@@ -792,20 +793,28 @@ impl SignalBuilder {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let some_signal = signal::option(Some(SignalBuilder::from_system(|_: In<()>| 42)));
-/// // outputs Some(42)
+/// #[derive(Resource, Clone, PartialEq)]
+/// struct Enabled(bool);
 ///
-/// let none_signal = signal::option::<Source<i32>>(None);
-/// // outputs None
+/// let mut world = World::new();
+/// world.insert_resource(Enabled(false));
+///
+/// // Turn `Signal<Item = Option<Signal<Item = T>>>` into `Signal<Item = Option<T>>`.
+/// let maybe_value = SignalBuilder::from_resource::<Enabled>()
+///     .dedupe()
+///     .map_in(|enabled: Enabled| enabled.0)
+///     .map_true_in(|| SignalBuilder::from_system(|_: In<()>| 42))
+///     .map_in(signal::option)
+///     .flatten();
 /// ```
-pub fn option<S: Clone>(value: Option<S>) -> impl Signal<Item = Option<S::Item>> + Clone
+pub fn option<S>(value: Option<S>) -> impl Signal<Item = Option<S::Item>> + Clone
 where
-    S: Signal,
+    S: Signal + Clone,
     S::Item: Clone + SSs,
 {
     match value {
-        Some(signal) => signal.map_in(|x| Some(x)).left_either(),
-        None => SignalBuilder::always(None).right_either(),
+        Some(signal) => signal.map_in(Some).left_either(),
+        None => SignalBuilder::always(None).first().right_either(),
     }
 }
 
@@ -1918,8 +1927,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Maps this [`Signal`] to some closure depending on its [`bool`] output, without requiring
-    /// the closure to be a [`System`].
+    /// Maps this [`Signal`] to some [`FnMut`] depending on its [`bool`] output.
     ///
     /// # Example
     ///
@@ -1933,7 +1941,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_bool_in(|| "true", || "false"); // outputs `"true"`, `"false"`, `"true"`, `"false"`, ...
+    /// .map_bool_in(|| 1, || 0); // outputs `1`, `0`, `1`, `0`, ...
     /// ```
     fn map_bool_in<O, IOO, TF, FF>(self, mut true_fn: TF, mut false_fn: FF) -> MapBool<Self, O>
     where
@@ -2006,7 +2014,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`true`], output the result of some closure, otherwise
+    /// If this [`Signal`] outputs [`true`], output the result of some [`FnMut`], otherwise
     /// terminate for the frame.
     ///
     /// # Example
@@ -2092,7 +2100,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`false`], output the result of some closure, otherwise
+    /// If this [`Signal`] outputs [`false`], output the result of some [`FnMut`], otherwise
     /// terminate for the frame.
     ///
     /// # Example
@@ -2184,6 +2192,47 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// Maps this [`Signal`] to some [`FnMut`] depending on its [`Option`] output.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
+    ///     }
+    /// })
+    /// .map_option_in(|state: bool| state, || false); // outputs `true`, `false`, `true`, `false`, ...
+    /// ```
+    fn map_option_in<I, O, IOO, SF, NF>(self, mut some_fn: SF, mut none_fn: NF) -> MapOption<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = Option<I>>,
+        I: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        SF: FnMut(I) -> IOO + SSs,
+        NF: FnMut() -> IOO + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(move |In(item): In<Self::Item>| match item {
+                    Some(value) => some_fn(value).into(),
+                    None => none_fn().into(),
+                })
+                .register(world);
+            signal
+        });
+        MapOption {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// If this [`Signal`] outputs [`Some`], output the result of some [`System`] which takes [`In`]
     /// the [`Some`] value, otherwise terminate for the frame.
     ///
@@ -2222,6 +2271,46 @@ pub trait SignalExt: Signal {
 
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(some_system.entity());
+            signal
+        });
+        MapSome {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    /// If this [`Signal`] outputs [`Some`], output the result of some [`FnMut`] which takes [`In`]
+    /// the [`Some`] value, otherwise terminate for the frame.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
+    ///        *state = if state.is_some() { None } else { Some(true) };
+    ///        *state
+    ///     }
+    /// })
+    /// .map_some_in(|state: bool| state); // outputs `true`, terminates, outputs `true`, terminates, ...
+    /// ```
+    fn map_some_in<I, O, F>(self, mut function: F) -> MapSome<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = Option<I>>,
+        I: 'static,
+        O: Clone + 'static,
+        F: FnMut(I) -> O + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<Option<O>, _, _, _>(move |In(item): In<Self::Item>| match item {
+                    Some(value) => Some(Some(function(value))),
+                    None => Some(None),
+                })
+                .register(world);
             signal
         });
         MapSome {
@@ -2274,89 +2363,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Maps this [`Signal`] to some closure depending on its [`Option`] output, without requiring
-    /// the closures to be [`System`]s.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use bevy_ecs::prelude::*;
-    /// use jonmo::prelude::*;
-    ///
-    /// SignalBuilder::from_system({
-    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
-    ///         *state = if state.is_some() { None } else { Some(true) };
-    ///         *state
-    ///     }
-    /// })
-    /// .map_option_in(|state: bool| state, || false); // outputs `true`, `false`, `true`, `false`, ...
-    /// ```
-    fn map_option_in<I, O, IOO, SF, NF>(self, mut some_fn: SF, mut none_fn: NF) -> MapOption<Self, O>
-    where
-        Self: Sized,
-        Self: Signal<Item = Option<I>>,
-        I: 'static,
-        O: Clone + 'static,
-        IOO: Into<Option<O>> + 'static,
-        SF: FnMut(I) -> IOO + SSs,
-        NF: FnMut() -> IOO + SSs,
-    {
-        let signal = LazySignal::new(move |world: &mut World| {
-            let SignalHandle(signal) = self
-                .map::<O, _, _, _>(move |In(item): In<Self::Item>| match item {
-                    Some(value) => some_fn(value).into(),
-                    None => none_fn().into(),
-                })
-                .register(world);
-            signal
-        });
-        MapOption {
-            signal,
-            _marker: PhantomData,
-        }
-    }
-
-    /// If this [`Signal`] outputs [`Some`], output the result of some closure which takes
-    /// the [`Some`] value, otherwise terminate for the frame.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use bevy_ecs::prelude::*;
-    /// use jonmo::prelude::*;
-    ///
-    /// SignalBuilder::from_system({
-    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
-    ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        *state
-    ///     }
-    /// })
-    /// .map_some_in(|state: bool| state); // outputs `true`, terminates, outputs `true`, terminates, ...
-    /// ```
-    fn map_some_in<I, O, F>(self, mut function: F) -> MapSome<Self, O>
-    where
-        Self: Sized,
-        Self: Signal<Item = Option<I>>,
-        I: 'static,
-        O: Clone + 'static,
-        F: FnMut(I) -> O + SSs,
-    {
-        let signal = LazySignal::new(move |world: &mut World| {
-            let SignalHandle(signal) = self
-                .map::<Option<O>, _, _, _>(move |In(item): In<Self::Item>| match item {
-                    Some(value) => Some(Some(function(value))),
-                    None => Some(None),
-                })
-                .register(world);
-            signal
-        });
-        MapSome {
-            signal,
-            _marker: PhantomData,
-        }
-    }
-
-    /// If this [`Signal`] outputs [`None`], output the result of some closure, otherwise
+    /// If this [`Signal`] outputs [`None`], output the result of some [`FnMut`], otherwise
     /// terminate for the frame.
     ///
     /// # Example
@@ -4781,12 +4788,12 @@ mod tests {
         // Test sum with 4 signals
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
-        
+
         let s1 = SignalBuilder::from_system(|_: In<()>| 1);
         let s2 = SignalBuilder::from_system(|_: In<()>| 2);
         let s3 = SignalBuilder::from_system(|_: In<()>| 3);
         let s4 = SignalBuilder::from_system(|_: In<()>| 4);
-        
+
         let sum_signal = crate::signal::sum!(s1, s2, s3, s4);
         sum_signal.map(capture_output::<i32>).register(app.world_mut());
         app.update();

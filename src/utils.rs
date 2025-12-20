@@ -49,14 +49,19 @@ pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&Chi
     move |In(entity): In<Entity>, child_ofs: Query<&ChildOf>| get_ancestor(&child_ofs, entity, generations)
 }
 
-pub fn deref_copied<T: Deref>(x: T) -> T::Target where <T as Deref>::Target: Copy {
+pub fn deref_copied<T: Deref>(x: T) -> T::Target
+where
+    <T as Deref>::Target: Copy,
+{
     *x.deref()
 }
 
-pub fn deref_cloned<T: Deref>(x: T) -> T::Target where <T as Deref>::Target: Clone {
+pub fn deref_cloned<T: Deref>(x: T) -> T::Target
+where
+    <T as Deref>::Target: Clone,
+{
     x.deref().clone()
 }
-
 
 /// Convenience trait for [`Send`] + [`Sync`] + 'static.
 pub trait SSs: Send + Sync + 'static {}
