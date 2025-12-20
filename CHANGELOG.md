@@ -4,6 +4,8 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+# 0.6.0-rc.1 (2025-12-19)
+
 ### changed
 
 - upgraded to bevy 0.18-rc.1
