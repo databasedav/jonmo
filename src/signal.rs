@@ -667,6 +667,23 @@ impl SignalBuilder {
         }
     }
 
+    /// Creates a [`Source`] signal from an [`FnMut`].
+    pub fn from_function<O, F>(mut f: F) -> Source<O>
+    where
+        O: Clone + SSs,
+        F: FnMut() -> O + SSs,
+    {
+        Self::from_system(move |_: In<()>| Some(f()))
+    }
+
+    /// Creates a [`Source`] signal that always outputs a constant value.
+    pub fn always<O>(value: O) -> Source<O>
+    where
+        O: Clone + SSs,
+    {
+        Self::from_system(move |_: In<()>| Some(value.clone()))
+    }
+
     /// Creates a [`Source`] signal from an [`Entity`].
     pub fn from_entity(entity: Entity) -> Source<Entity> {
         Self::from_system(move |_: In<()>| entity)
@@ -757,6 +774,47 @@ impl SignalBuilder {
         R: Resource + Clone,
     {
         Self::from_system(move |_: In<()>, resource: Option<Res<R>>| Some(resource.as_deref().cloned()))
+    }
+}
+
+/// Converts an `Option<Signal<A>>` into a `Signal<Option<A>>`.
+///
+/// This is mostly useful with [`.switch`](SignalExt::switch) or [`.flatten`](SignalExt::flatten).
+///
+/// If the value is `None` then it emits `None` once and then terminates (implemented as
+/// `SignalBuilder::always(None).first()`).
+///
+/// If the value is `Some(signal)` then it will return the result of the signal,
+/// except wrapped in `Some`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// #[derive(Resource, Clone, PartialEq)]
+/// struct Enabled(bool);
+///
+/// let mut world = World::new();
+/// world.insert_resource(Enabled(false));
+///
+/// // Turn `Signal<Item = Option<Signal<Item = T>>>` into `Signal<Item = Option<T>>`.
+/// let maybe_value = SignalBuilder::from_resource::<Enabled>()
+///     .dedupe()
+///     .map_in(|enabled: Enabled| enabled.0)
+///     .map_true_in(|| SignalBuilder::from_system(|_: In<()>| 42))
+///     .map_in(signal::option)
+///     .flatten();
+/// ```
+pub fn option<S>(value: Option<S>) -> impl Signal<Item = Option<S::Item>> + Clone
+where
+    S: Signal + Clone,
+    S::Item: Clone + SSs,
+{
+    match value {
+        Some(signal) => signal.map_in(Some).left_either(),
+        None => SignalBuilder::always(None).first().right_either(),
     }
 }
 
@@ -1071,7 +1129,7 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Self: Signal<Item = Entity>,
-        C: Component + Clone,
+        C: Component,
     {
         HasComponent {
             signal: self.map(|In(entity): In<Entity>, components: Query<&C>| components.contains(entity)),
@@ -1265,10 +1323,7 @@ pub trait SignalExt: Signal {
 
     /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their
     /// outputs. The resulting [`Signal`] will only output a value when both input [`Signal`]s have
-    /// outputted a value since the last resulting output, e.g. if on frame 1, this [`Signal`]
-    /// outputs `1` and the other [`Signal`] outputs `None`, the resulting [`Signal`] will have no
-    /// output, but then if on frame 2, this [`Signal`] outputs `None` and the other [`Signal`]
-    /// outputs 2, then the resulting [`Signal`] will output `(1, 2)`.
+    /// outputted a value.
     ///
     /// # Example
     ///
@@ -1301,7 +1356,7 @@ pub trait SignalExt: Signal {
                     *right_cache = right_option;
                 }
                 if left_cache.is_some() && right_cache.is_some() {
-                    left_cache.take().zip(right_cache.take())
+                    left_cache.clone().zip(right_cache.clone())
                 } else {
                     None
                 }
@@ -1869,6 +1924,47 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// Maps this [`Signal`] to some [`FnMut`] depending on its [`bool`] output.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<bool>| {
+    ///         *state = !*state;
+    ///         *state
+    ///     }
+    /// })
+    /// .map_bool_in(|| 1, || 0); // outputs `1`, `0`, `1`, `0`, ...
+    /// ```
+    fn map_bool_in<O, IOO, TF, FF>(self, mut true_fn: TF, mut false_fn: FF) -> MapBool<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = bool>,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        TF: FnMut() -> IOO + SSs,
+        FF: FnMut() -> IOO + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(
+                    move |In(item): In<Self::Item>| {
+                        if item { true_fn().into() } else { false_fn().into() }
+                    },
+                )
+                .register(world);
+            signal
+        });
+        MapBool {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// If this [`Signal`] outputs [`true`], output the result of some [`System`], otherwise
     /// terminate for the frame.
     ///
@@ -1915,6 +2011,46 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// If this [`Signal`] outputs [`true`], output the result of some [`FnMut`], otherwise
+    /// terminate for the frame.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<bool>| {
+    ///         *state = !*state;
+    ///         *state
+    ///     }
+    /// })
+    /// .map_true_in(|| 1); // outputs `1`, terminates, outputs `1`, terminates, ...
+    /// ```
+    fn map_true_in<O, F>(self, mut function: F) -> MapTrue<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = bool>,
+        O: Clone + 'static,
+        F: FnMut() -> O + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<Option<O>, _, _, _>(
+                    move |In(item): In<Self::Item>| {
+                        if item { Some(Some(function())) } else { Some(None) }
+                    },
+                )
+                .register(world);
+            signal
+        });
+        MapTrue {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// If this [`Signal`] outputs [`false`], output the result of some [`System`], otherwise
     /// terminate for the frame.
     ///
@@ -1953,6 +2089,46 @@ pub trait SignalExt: Signal {
 
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(false_system.entity());
+            signal
+        });
+        MapFalse {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    /// If this [`Signal`] outputs [`false`], output the result of some [`FnMut`], otherwise
+    /// terminate for the frame.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<bool>| {
+    ///         *state = !*state;
+    ///         *state
+    ///     }
+    /// })
+    /// .map_false_in(|| 1); // terminates, outputs `1`, terminates, outputs `1`, ...
+    /// ```
+    fn map_false_in<O, F>(self, mut function: F) -> MapFalse<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = bool>,
+        O: Clone + 'static,
+        F: FnMut() -> O + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<Option<O>, _, _, _>(
+                    move |In(item): In<Self::Item>| {
+                        if !item { Some(Some(function())) } else { Some(None) }
+                    },
+                )
+                .register(world);
             signal
         });
         MapFalse {
@@ -2013,6 +2189,47 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// Maps this [`Signal`] to some [`FnMut`] depending on its [`Option`] output.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
+    ///     }
+    /// })
+    /// .map_option_in(|state: bool| state, || false); // outputs `true`, `false`, `true`, `false`, ...
+    /// ```
+    fn map_option_in<I, O, IOO, SF, NF>(self, mut some_fn: SF, mut none_fn: NF) -> MapOption<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = Option<I>>,
+        I: 'static,
+        O: Clone + 'static,
+        IOO: Into<Option<O>> + 'static,
+        SF: FnMut(I) -> IOO + SSs,
+        NF: FnMut() -> IOO + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<O, _, _, _>(move |In(item): In<Self::Item>| match item {
+                    Some(value) => some_fn(value).into(),
+                    None => none_fn().into(),
+                })
+                .register(world);
+            signal
+        });
+        MapOption {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// If this [`Signal`] outputs [`Some`], output the result of some [`System`] which takes [`In`]
     /// the [`Some`] value, otherwise terminate for the frame.
     ///
@@ -2059,6 +2276,46 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// If this [`Signal`] outputs [`Some`], output the result of some [`FnMut`] which takes [`In`]
+    /// the [`Some`] value, otherwise terminate for the frame.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
+    ///        *state = if state.is_some() { None } else { Some(true) };
+    ///        *state
+    ///     }
+    /// })
+    /// .map_some_in(|state: bool| state); // outputs `true`, terminates, outputs `true`, terminates, ...
+    /// ```
+    fn map_some_in<I, O, F>(self, mut function: F) -> MapSome<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = Option<I>>,
+        I: 'static,
+        O: Clone + 'static,
+        F: FnMut(I) -> O + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<Option<O>, _, _, _>(move |In(item): In<Self::Item>| match item {
+                    Some(value) => Some(Some(function(value))),
+                    None => Some(None),
+                })
+                .register(world);
+            signal
+        });
+        MapSome {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// If this [`Signal`] outputs [`None`], output the result of some [`System`], otherwise
     /// terminate for the frame.
     ///
@@ -2095,6 +2352,46 @@ pub trait SignalExt: Signal {
 
             // just attach the system to the lifetime of the signal
             world.entity_mut(*signal).add_child(none_system.entity());
+            signal
+        });
+        MapNone {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
+    /// If this [`Signal`] outputs [`None`], output the result of some [`FnMut`], otherwise
+    /// terminate for the frame.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<Option<bool>>| {
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
+    ///     }
+    /// })
+    /// .map_none_in(|| false); // terminates, outputs `false`, terminates, outputs `false`, ...
+    /// ```
+    fn map_none_in<I, O, F>(self, mut function: F) -> MapNone<Self, O>
+    where
+        Self: Sized,
+        Self: Signal<Item = Option<I>>,
+        I: 'static,
+        O: Clone + 'static,
+        F: FnMut() -> O + SSs,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let SignalHandle(signal) = self
+                .map::<Option<O>, _, _, _>(move |In(item): In<Self::Item>| match item {
+                    Some(_) => Some(None),
+                    None => Some(Some(function())),
+                })
+                .register(world);
             signal
         });
         MapNone {
@@ -2151,6 +2448,7 @@ pub trait SignalExt: Signal {
 
     // TODO: why won't doctest compile ?
     #[cfg(feature = "tracing")]
+    #[track_caller]
     /// Adds debug logging to this [`Signal`]'s ouptut.
     ///
     /// # Example
@@ -2239,6 +2537,334 @@ pub trait SignalExt: Signal {
 }
 
 impl<T: ?Sized> SignalExt for T where T: Signal {}
+
+/// Creates a [`Signal`] that outputs `true` if all input [`Signal`]s are equal, and `false`
+/// otherwise.
+///
+/// Accepts 2 or more [`Signal`]s.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 1);
+///
+/// let eq_signal = signal::eq!(s1, s2, s3); // outputs `true`
+/// ```
+#[macro_export]
+macro_rules! eq {
+    // Entry point
+    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::eq!(@check val, $s1, $s2 $(, $rest)*)
+        })
+    };
+
+    // Check logic
+    // Base case: 2 signals
+    (@check $val:expr, $a:expr, $b:expr) => {
+        $val.0 == $val.1
+    };
+    // Recursive case: 3+ signals
+    (@check $val:expr, $head:expr, $($tail:expr),+) => {
+        $val.1 == $val.0.1 && $crate::eq!(@check $val.0, $($tail),+)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_combine_and_map {
+    // Single argument case
+    ($s1:expr $(,)?; |$val:ident| $body:block) => {
+        $s1.map(|In($val)| $body)
+    };
+    // Entry point
+    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?; |$val:ident| $body:block) => {
+        $crate::__signal_combine_and_map!(@combine $s1, $s2 $(, $rest)*)
+            .map(|In($val @ $crate::__signal_combine_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
+    };
+
+    // Combine chain
+    (@combine $first:expr, $second:expr) => {
+        $first.combine($second)
+    };
+    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
+        $crate::__signal_combine_and_map!(@combine $first.combine($second), $($rest),+)
+    };
+
+    // Pattern generator (nested tuple of `_` matching the combine nesting)
+    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
+        $crate::__signal_combine_and_map!(@pattern_helper (_, _) $(, $rest)*)
+    };
+    (@pattern_helper $acc:tt $(,)?) => { $acc };
+    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
+        $crate::__signal_combine_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
+    };
+}
+
+/// Creates a [`Signal`] that outputs `true` if all input [`Signal`]s are `true`.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output `bool`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| true);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| true);
+///
+/// let all_signal = signal::all!(s1, s2); // outputs `true`
+/// ```
+#[macro_export]
+macro_rules! all {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(&&; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs `true` if any input [`Signal`] is `true`.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output `bool`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| true);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| false);
+///
+/// let any_signal = signal::any!(s1, s2); // outputs `true`
+/// ```
+#[macro_export]
+macro_rules! any {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(||; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs `true` if all input [`Signal`]s are distinct (pairwise
+/// unequal).
+///
+/// Accepts 2 or more [`Signal`]s.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+///
+/// let distinct_signal = signal::distinct!(s1, s2, s3); // outputs `true`
+/// ```
+#[macro_export]
+macro_rules! distinct {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_pairwise_all!(__signal_distinct_pair; $($args),+)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_distinct_pair {
+    ($a:expr, $b:expr) => {
+        $crate::eq!($a.clone(), $b.clone()).not()
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_pairwise_all {
+    // Base case: 2 args
+    ($pair:ident; $a:expr, $b:expr $(,)?) => {
+        $crate::$pair!($a, $b)
+    };
+
+    // Recursive case: 3+ args
+    ($pair:ident; $head:expr, $next:expr, $($tail:expr),+ $(,)?) => {
+        $crate::all!(
+            $crate::__signal_pairwise_all!(@with_head $pair; $head, $next, $($tail),+),
+            $crate::__signal_pairwise_all!($pair; $next, $($tail),+)
+        )
+    };
+
+    // Compare a fixed head against all remaining elements
+    (@with_head $pair:ident; $head:expr, $last:expr $(,)?) => {
+        $crate::$pair!($head, $last)
+    };
+    (@with_head $pair:ident; $head:expr, $next:expr, $($tail:expr),+ $(,)?) => {
+        $crate::all!(
+            $crate::$pair!($head, $next),
+            $crate::__signal_pairwise_all!(@with_head $pair; $head, $($tail),+)
+        )
+    };
+}
+
+/// Creates a [`Signal`] that outputs the sum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output numeric types that implement `Add`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+///
+/// let sum_signal = signal::sum!(s1, s2, s3); // outputs `6`
+/// ```
+#[macro_export]
+macro_rules! sum {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(+; $($args),+)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_reduce_binop {
+    // Single argument case
+    ($op:tt; $s1:expr $(,)?) => {
+        $s1
+    };
+    // Entry point
+    ($op:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::__signal_reduce_binop!(@apply $op, val, $s1, $s2 $(, $rest)*)
+        })
+    };
+
+    // Apply logic
+    // Base case: 2 signals
+    (@apply $op:tt, $val:expr, $a:expr, $b:expr) => {
+        $val.0 $op $val.1
+    };
+    // Recursive case: 3+ signals
+    (@apply $op:tt, $val:expr, $head:expr, $($tail:expr),+) => {
+        $val.1 $op $crate::__signal_reduce_binop!(@apply $op, $val.0, $($tail),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the product of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output numeric types that implement `Mul`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 3);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 4);
+///
+/// let product_signal = signal::product!(s1, s2, s3); // outputs `24`
+/// ```
+#[macro_export]
+macro_rules! product {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(*; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the minimum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output types that implement
+/// [`PartialOrd`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+///
+/// let min_signal = signal::min!(s1, s2, s3); // outputs `2`
+/// ```
+#[macro_export]
+macro_rules! min {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_cmp!(<; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the maximum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output types that implement
+/// [`PartialOrd`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+///
+/// let max_signal = signal::max!(s1, s2, s3); // outputs `7`
+/// ```
+#[macro_export]
+macro_rules! max {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_cmp!(>; $($args),+)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_reduce_cmp {
+    // Single argument case
+    ($cmp:tt; $s1:expr $(,)?) => {
+        $s1
+    };
+    // Entry point
+    ($cmp:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::__signal_reduce_cmp!(@select $cmp, val, $s1, $s2 $(, $rest)*)
+        })
+    };
+
+    // Selection logic
+    // Base case: 2 signals
+    (@select $cmp:tt, $val:expr, $a:expr, $b:expr) => {
+        if $val.0 $cmp $val.1 { $val.0 } else { $val.1 }
+    };
+    // Recursive case: 3+ signals
+    (@select $cmp:tt, $val:expr, $head:expr, $($tail:expr),+) => {
+        {
+            let rhs = $crate::__signal_reduce_cmp!(@select $cmp, $val.0, $($tail),+);
+            if $val.1 $cmp rhs { $val.1 } else { rhs }
+        }
+    };
+}
+
+pub use all;
+pub use any;
+pub use distinct;
+pub use eq;
+pub use max;
+pub use min;
+pub use product;
+pub use sum;
 
 #[cfg(test)]
 mod tests {
@@ -3780,6 +4406,107 @@ mod tests {
     }
 
     #[test]
+    fn test_signal_option() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<Option<i32>>>();
+
+        // Test Some variant - signal wrapped in Some
+        let some_signal = crate::signal::option(Some(SignalBuilder::from_system(|_: In<()>| 42)))
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<i32>>(app.world()),
+            Some(Some(42)),
+            "signal::option(Some(signal)) should output Some(value)"
+        );
+        some_signal.cleanup(app.world_mut());
+
+        // Test None variant - constant None
+        app.world_mut().resource_mut::<SignalOutput<Option<i32>>>().0 = None;
+        let none_signal = crate::signal::option(None::<crate::signal::Source<i32>>)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<i32>>(app.world()),
+            Some(None),
+            "signal::option(None) should output None"
+        );
+        none_signal.cleanup(app.world_mut());
+
+        // Test with dynamic signal
+        app.world_mut().resource_mut::<SignalOutput<Option<i32>>>().0 = None;
+        let counter = Arc::new(Mutex::new(0));
+        let dynamic_signal =
+            crate::signal::option(Some(SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
+                let mut c = counter.lock().unwrap();
+                *c += 1;
+                *c
+            }))))
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<Option<i32>>(app.world()), Some(Some(1)));
+        app.update();
+        assert_eq!(get_output::<Option<i32>>(app.world()), Some(Some(2)));
+        app.update();
+        assert_eq!(get_output::<Option<i32>>(app.world()), Some(Some(3)));
+        dynamic_signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_signal_option_with_switch() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<Option<i32>>>();
+
+        // Test switching between Some and None based on a condition
+        let condition = Arc::new(Mutex::new(true));
+        let signal = SignalBuilder::from_system(clone!((condition) move |_: In<()>| {
+            *condition.lock().unwrap()
+        }))
+        .map(move |In(use_signal): In<bool>| {
+            if use_signal {
+                crate::signal::option(Some(SignalBuilder::from_system(|_: In<()>| 42)))
+            } else {
+                crate::signal::option(None)
+            }
+        })
+        .flatten()
+        .map(capture_output)
+        .register(app.world_mut());
+
+        // First update: condition is true, should output Some(42)
+        app.update();
+        assert_eq!(
+            get_output::<Option<i32>>(app.world()),
+            Some(Some(42)),
+            "Should output Some(42) when condition is true"
+        );
+
+        // Change condition to false
+        *condition.lock().unwrap() = false;
+        app.update();
+        assert_eq!(
+            get_output::<Option<i32>>(app.world()),
+            Some(None),
+            "Should output None when condition is false"
+        );
+
+        // Change back to true
+        *condition.lock().unwrap() = true;
+        app.update();
+        assert_eq!(
+            get_output::<Option<i32>>(app.world()),
+            Some(Some(42)),
+            "Should output Some(42) when condition is true again"
+        );
+
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn simple_signal_lazy_outlives_handle() {
         let mut app = create_test_app();
         let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
@@ -3987,5 +4714,425 @@ mod tests {
         // RegCount = 0. Holder's LS.state_refs = 1. Holder IS removed. despawned.
         handle2.cleanup(app.world_mut());
         assert!(app.world().get_entity(system_entity).is_err());
+    }
+
+    #[test]
+    fn test_signal_eq() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<bool>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test equality
+        let eq_signal = crate::signal::eq!(s1.clone(), s2.clone(), s3.clone());
+        eq_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
+
+        // Test inequality
+        let neq_signal = crate::signal::eq!(s1.clone(), s2.clone(), s4.clone());
+        neq_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
+    }
+
+    #[test]
+    fn test_signal_and() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<bool>::default());
+
+        let t = SignalBuilder::from_system(|_: In<()>| true);
+        let f = SignalBuilder::from_system(|_: In<()>| false);
+
+        // Test AND (all true)
+        let all_signal = crate::signal::all!(t.clone(), t.clone(), t.clone());
+        all_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
+
+        // Test AND (one false)
+        let all_signal = crate::signal::all!(t.clone(), f.clone(), t.clone());
+        all_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
+    }
+
+    #[test]
+    fn test_signal_or() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<bool>::default());
+
+        let t = SignalBuilder::from_system(|_: In<()>| true);
+        let f = SignalBuilder::from_system(|_: In<()>| false);
+
+        // Test OR (all false)
+        let any_signal = crate::signal::any!(f.clone(), f.clone(), f.clone());
+        any_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
+
+        // Test OR (one true)
+        let any_signal = crate::signal::any!(f.clone(), t.clone(), f.clone());
+        any_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
+    }
+
+    #[test]
+    fn test_signal_distinct() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<bool>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        // Test distinct (all different)
+        let distinct_signal = crate::signal::distinct!(s1.clone(), s2.clone(), s3.clone());
+        distinct_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
+
+        // Test distinct (some equal)
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<bool>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        let distinct_signal = crate::signal::distinct!(s1.clone(), s2.clone(), s1.clone());
+        distinct_signal.map(capture_output::<bool>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
+    }
+
+    #[test]
+    fn test_signal_sum() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test sum with 2 signals
+        let sum_signal = crate::signal::sum!(s1, s2);
+        sum_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(3));
+
+        // Test sum with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+
+        let sum_signal = crate::signal::sum!(s1, s2, s3, s4);
+        sum_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(10));
+    }
+
+    #[test]
+    fn test_signal_product() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        // Test product with 2 signals
+        let product_signal = crate::signal::product!(s1, s2);
+        product_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(6));
+
+        // Test product with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+
+        let product_signal = crate::signal::product!(s1, s2, s3, s4);
+        product_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(24));
+    }
+
+    #[test]
+    fn test_signal_min() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test min with 2 signals
+        let min_signal = crate::signal::min!(s1, s2);
+        min_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(2));
+
+        // Test min with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        let min_signal = crate::signal::min!(s1, s2, s3, s4);
+        min_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(2));
+    }
+
+    #[test]
+    fn test_signal_max() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test max with 2 signals
+        let max_signal = crate::signal::max!(s1, s2);
+        max_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(5));
+
+        // Test max with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        let max_signal = crate::signal::max!(s1, s2, s3, s4);
+        max_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(10));
+    }
+
+    #[test]
+    fn test_map_bool_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<&'static str>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<bool>| {
+                *state = !*state;
+                *state
+            }
+        })
+        .map_bool_in(|| "true", || "false")
+        .map(capture_output::<&'static str>);
+
+        signal.register(app.world_mut());
+
+        // First update: state toggles to true
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<&'static str>>().0, Some("true"));
+
+        // Second update: state toggles to false
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<&'static str>>().0, Some("false"));
+
+        // Third update: state toggles to true
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<&'static str>>().0, Some("true"));
+    }
+
+    #[test]
+    fn test_map_bool_in_with_optional_termination() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<bool>| {
+                *state = !*state;
+                *state
+            }
+        })
+        .map_bool_in(
+            || Some(1), // true returns Some(1)
+            || None,    // false terminates
+        )
+        .map(capture_output::<i32>);
+
+        signal.register(app.world_mut());
+
+        // First update: state toggles to true, outputs 1
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(1));
+
+        // Second update: state toggles to false, terminates (None)
+        app.world_mut().resource_mut::<SignalOutput<i32>>().0 = None;
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, None);
+
+        // Third update: state toggles to true, outputs 1 again
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(1));
+    }
+
+    #[test]
+    fn test_map_true_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<Option<i32>>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<bool>| {
+                *state = !*state;
+                *state
+            }
+        })
+        .map_true_in(|| 42);
+
+        signal.map(capture_output::<Option<i32>>).register(app.world_mut());
+
+        // First update: state toggles to true, outputs Some(42)
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(42)));
+
+        // Second update: state toggles to false, outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
+
+        // Third update: state toggles to true, outputs Some(42) again
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(42)));
+    }
+
+    #[test]
+    fn test_map_false_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<Option<i32>>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<bool>| {
+                *state = !*state;
+                *state
+            }
+        })
+        .map_false_in(|| 99);
+
+        signal.map(capture_output::<Option<i32>>).register(app.world_mut());
+
+        // First update: state toggles to true, outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
+
+        // Second update: state toggles to false, outputs Some(99)
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(99)));
+
+        // Third update: state toggles to true, outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
+    }
+
+    #[test]
+    fn test_map_option_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<Option<i32>>| {
+                *state = match *state {
+                    None => Some(10),
+                    Some(10) => Some(20),
+                    Some(20) => None,
+                    Some(_) => Some(10),
+                };
+                *state
+            }
+        })
+        .map_option_in(|value: i32| value * 2, || -1);
+
+        signal.map(capture_output::<i32>).register(app.world_mut());
+
+        // First update: state is Some(10), outputs 20
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(20));
+
+        // Second update: state is Some(20), outputs 40
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(40));
+
+        // Third update: state is None, outputs -1
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(-1));
+
+        // Fourth update: state is Some(10), outputs 20
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(20));
+    }
+
+    #[test]
+    fn test_map_some_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<Option<i32>>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<Option<i32>>| {
+                *state = if state.is_some() { None } else { Some(42) };
+                *state
+            }
+        })
+        .map_some_in(|value: i32| value * 3);
+
+        signal.map(capture_output::<Option<i32>>).register(app.world_mut());
+
+        // First update: state is Some(42), outputs Some(126)
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(126)));
+
+        // Second update: state is None, outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
+
+        // Third update: state is Some(42), outputs Some(126) again
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(126)));
+    }
+
+    #[test]
+    fn test_map_none_in() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<Option<i32>>::default());
+
+        let signal = SignalBuilder::from_system({
+            move |_: In<()>, mut state: Local<Option<i32>>| {
+                *state = if state.is_some() { None } else { Some(100) };
+                *state
+            }
+        })
+        .map_none_in(|| 999);
+
+        signal.map(capture_output::<Option<i32>>).register(app.world_mut());
+
+        // First update: state is Some(100), outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
+
+        // Second update: state is None, outputs Some(999)
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(Some(999)));
+
+        // Third update: state is Some(100), outputs None
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<Option<i32>>>().0, Some(None));
     }
 }

@@ -7,19 +7,44 @@ use super::{
 };
 use bevy_ecs::{
     component::Mutable,
+    lifecycle::HookContext,
     prelude::*,
     system::{IntoObserverSystem, RunSystemOnce},
+    world::DeferredWorld,
 };
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
 };
 
-fn add_handle(world: &mut World, entity: Entity, handle: SignalHandle) {
+fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
+    let entity = ctx.entity;
+    let fs = world
+        .get_mut::<OnDespawnCallbacks>(entity)
+        .unwrap()
+        .0
+        .drain(..)
+        .collect::<Vec<_>>();
+    for f in fs {
+        f(&mut world, entity);
+    }
+}
+
+#[allow(clippy::type_complexity)]
+#[derive(Component)]
+#[component(on_remove = on_despawn_hook)]
+struct OnDespawnCallbacks(Vec<Box<dyn FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static>>);
+
+fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
+where
+    I: IntoIterator<Item = SignalHandle>,
+{
     if let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut handles) = entity.get_mut::<SignalHandles>()
+        && let Some(mut existing_handles) = entity.get_mut::<SignalHandles>()
     {
-        handles.add(handle);
+        for handle in handles {
+            existing_handles.add(handle);
+        }
     }
 }
 
@@ -75,6 +100,11 @@ impl JonmoBuilder {
         })
     }
 
+    /// Attach registered [`SignalHandle`]s to this entity for automatic cleanup on despawn.
+    pub fn hold_signals(self, handles: impl IntoIterator<Item = SignalHandle> + SSs) -> Self {
+        self.on_spawn(move |world, entity| add_handles(world, entity, handles))
+    }
+
     /// Run a function with this builder's [`EntityWorldMut`].
     pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
         self.on_spawn(move |world, entity| {
@@ -113,8 +143,22 @@ impl JonmoBuilder {
         })
     }
 
+    /// When this builder's [`Entity`] is despawned, run a function with mutable access to the
+    /// [`DeferredWorld`] and this entity's [`Entity`].
+    pub fn on_despawn(self, on_despawn: impl FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static) -> Self {
+        self.on_spawn(|world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                if let Some(mut on_despawn_component) = entity_mut.get_mut::<OnDespawnCallbacks>() {
+                    on_despawn_component.0.push(Box::new(on_despawn));
+                } else {
+                    entity_mut.insert(OnDespawnCallbacks(vec![Box::new(on_despawn)]));
+                }
+            }
+        })
+    }
+
     /// Set the [`LazyEntity`] to this builder's [`Entity`].
-    pub fn entity_sync(self, entity: LazyEntity) -> Self {
+    pub fn lazy_entity(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
     }
 
@@ -131,7 +175,7 @@ impl JonmoBuilder {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle =
                 Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -173,7 +217,7 @@ impl JonmoBuilder {
                 }),
                 world,
             );
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -189,7 +233,7 @@ impl JonmoBuilder {
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle = Signal::register_signal(f(SignalBuilder::from_entity(entity)), world);
-            add_handle(world, entity, handle);
+            add_handles(world, entity, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -337,7 +381,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
-        self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
+        self.lazy_entity(entity.clone()).signal_from_entity(move |signal| {
             f(signal).map(move |In(component_option): In<Option<C>>, world: &mut World| {
                 if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
                     if let Some(component) = component_option {
@@ -362,7 +406,7 @@ impl JonmoBuilder {
         F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
     {
         let entity = LazyEntity::new();
-        self.entity_sync(entity.clone()).signal_from_entity(move |signal| {
+        self.lazy_entity(entity.clone()).signal_from_entity(move |signal| {
             f(signal.map(ancestor_map(generations))).map(
                 move |In(component_option): In<Option<C>>, world: &mut World| {
                     if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
@@ -499,7 +543,7 @@ impl JonmoBuilder {
                 }
             };
             let handle = child_option.map(system).register(world);
-            add_handle(world, parent, handle);
+            add_handles(world, parent, [handle]);
         };
         self.on_spawn(on_spawn)
     }
@@ -668,7 +712,7 @@ impl JonmoBuilder {
                 }
             };
             let handle = children_signal_vec.for_each(system).register(world);
-            add_handle(world, parent, handle);
+            add_handles(world, parent, [handle]);
         };
         self.on_spawn(on_spawn)
     }

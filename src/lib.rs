@@ -119,7 +119,7 @@ pub mod prelude {
     pub use crate::{
         JonmoPlugin,
         graph::SignalHandles,
-        signal::{IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
+        signal::{self, IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
         signal_map::{
             IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap,
             SignalMapEither, SignalMapExt,
@@ -128,7 +128,7 @@ pub mod prelude {
             IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
             SignalVecExt,
         },
-        utils::{LazyEntity, clone},
+        utils::{LazyEntity, clone, deref_cloned, deref_copied},
     };
     #[doc(no_inline)]
     pub use apply::{Also, Apply};

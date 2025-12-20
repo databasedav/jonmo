@@ -175,10 +175,10 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
         // Each item gets its own `Lifetime` component, which will be updated by the `live` system.
         Lifetime::default(),
     ))
-    // Here we fulfill the promise. `entity_sync` will set the `Entity` id into the
+    // Here we fulfill the promise. `lazy_entity` will set the `Entity` id into the
     // `lifetime_holder` once this `JonmoBuilder` is spawned into an actual entity.
     // Any signals that were created using `lifetime_holder` will now point to the correct entity.
-    .entity_sync(lifetime_holder.clone())
+    .lazy_entity(lifetime_holder.clone())
     .child({
         // The main info panel for the item.
         JonmoBuilder::from((

@@ -4,6 +4,37 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+### changed
+
+- `.entity_sync` renamed to `.lazy_entity`
+- `SignalExt::combine` always `.clone`s its latest upstream outputs no longer `.take`s its stored upstream outputs, instead 
+
+### added
+
+- `JonmoBuilder::hold_signals`
+- `JonmoBuilder::on_despawn`
+- `SignalBuilder::from_function`
+- `SignalBuilder::always`
+- `signal::option`
+- `SignalExt::map_bool_in`
+- `SignalExt::map_true_in`
+- `SignalExt::map_false_in`
+- `SignalExt::map_option_in`
+- `SignalExt::map_some_in`
+- `SignalExt::map_none_in`
+- `signal::eq!`
+- `signal::all!`
+- `signal::any!`
+- `signal::distinct!`
+- `signal::sum!`
+- `signal::product!`
+- `signal::min!`
+- `signal::max!`
+
+### fixed
+
+- `SignalExt::debug` now logs correct code location
+
 # 0.4.2 (2025-11-28)
 
 ### added
