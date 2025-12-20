@@ -1,7 +1,7 @@
 # jonmo [জন্ম](https://translate.google.com/?sl=bn&tl=en&text=%E0%A6%9C%E0%A6%A8%E0%A7%8D%E0%A6%AE&op=translate)
 
 [![Crates.io Version](https://img.shields.io/crates/v/jonmo?style=for-the-badge)](https://crates.io/crates/jonmo)
-[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-0.17-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
+[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-0.18-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
 [![Docs.rs](https://img.shields.io/docsrs/jonmo?style=for-the-badge)](https://docs.rs/jonmo)
 
 ```text
@@ -147,6 +147,7 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
 |bevy|jonmo|
 |-|-|
+|0.18|0.6|
 |0.17|0.5|
 |0.16|0.3|
 |0.15|0.1|
