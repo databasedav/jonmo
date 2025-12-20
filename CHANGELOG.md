@@ -4,6 +4,10 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+### changed
+
+- upgraded to bevy 0.18-rc.1
+
 # 0.5.0 (2025-12-19)
 
 ### changed
@@ -17,13 +21,13 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `JonmoBuilder::on_despawn`
 - `SignalBuilder::from_function`
 - `SignalBuilder::always`
-- `signal::option`
 - `SignalExt::map_bool_in`
 - `SignalExt::map_true_in`
 - `SignalExt::map_false_in`
 - `SignalExt::map_option_in`
 - `SignalExt::map_some_in`
 - `SignalExt::map_none_in`
+- `signal::option`
 - `signal::eq!`
 - `signal::all!`
 - `signal::any!`
@@ -65,7 +69,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### changed
 
-- upgraded to Bevy 0.17
+- upgraded to bevy 0.17
 
 ### added
 
