@@ -2562,27 +2562,9 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 macro_rules! eq {
     // Entry point
     ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::eq!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In(val @ $crate::eq!(@pattern $s1, $s2 $(, $rest)*))|
-                $crate::eq!(@check val, $s1, $s2 $(, $rest)*)
-            )
-    };
-
-    // Combine chain
-    (@combine $first:expr, $second:expr) => {
-        $first.combine($second)
-    };
-    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::eq!(@combine $first.combine($second), $($rest),+)
-    };
-
-    // Pattern generator
-    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::eq!(@pattern_helper (_, _), $($rest)*)
-    };
-    (@pattern_helper $acc:tt $(,)?) => { $acc };
-    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::eq!(@pattern_helper ($acc, _), $($tail)*)
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::eq!(@check val, $s1, $s2 $(, $rest)*)
+        })
     };
 
     // Check logic
@@ -2596,7 +2578,38 @@ macro_rules! eq {
     };
 }
 
-/// Creates a [`Signal`] that outputs the logical AND of all input [`Signal`]s.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_combine_and_map {
+    // Single argument case
+    ($s1:expr $(,)?; |$val:ident| $body:block) => {
+        $s1.map(|In($val)| $body)
+    };
+    // Entry point
+    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?; |$val:ident| $body:block) => {
+        $crate::__signal_combine_and_map!(@combine $s1, $s2 $(, $rest)*)
+            .map(|In($val @ $crate::__signal_combine_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
+    };
+
+    // Combine chain
+    (@combine $first:expr, $second:expr) => {
+        $first.combine($second)
+    };
+    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
+        $crate::__signal_combine_and_map!(@combine $first.combine($second), $($rest),+)
+    };
+
+    // Pattern generator (nested tuple of `_` matching the combine nesting)
+    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
+        $crate::__signal_combine_and_map!(@pattern_helper (_, _) $(, $rest)*)
+    };
+    (@pattern_helper $acc:tt $(,)?) => { $acc };
+    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
+        $crate::__signal_combine_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
+    };
+}
+
+/// Creates a [`Signal`] that outputs `true` if all input [`Signal`]s are `true`.
 ///
 /// Accepts 2 or more [`Signal`]s. All signals must output `bool`.
 ///
@@ -2609,51 +2622,16 @@ macro_rules! eq {
 /// let s1 = SignalBuilder::from_system(|_: In<()>| true);
 /// let s2 = SignalBuilder::from_system(|_: In<()>| true);
 ///
-/// let and_signal = signal::and!(s1, s2); // outputs `true`
+/// let all_signal = signal::all!(s1, s2); // outputs `true`
 /// ```
 #[macro_export]
-macro_rules! and {
-    // Single argument case
-    ($s1:expr $(,)?) => {
-        $s1
-    };
-    // Entry point
-    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::and!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In(val @ $crate::and!(@pattern $s1, $s2 $(, $rest)*))|
-                $crate::and!(@check val, $s1, $s2 $(, $rest)*)
-            )
-    };
-
-    // Combine chain
-    (@combine $first:expr, $second:expr) => {
-        $first.combine($second)
-    };
-    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::and!(@combine $first.combine($second), $($rest),+)
-    };
-
-    // Pattern generator
-    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::and!(@pattern_helper (_, _), $($rest)*)
-    };
-    (@pattern_helper $acc:tt $(,)?) => { $acc };
-    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::and!(@pattern_helper ($acc, _), $($tail)*)
-    };
-
-    // Check logic
-    // Base case: 2 signals
-    (@check $val:expr, $a:expr, $b:expr) => {
-        $val.0 && $val.1
-    };
-    // Recursive case: 3+ signals
-    (@check $val:expr, $head:expr, $($tail:expr),+) => {
-        $val.1 && $crate::and!(@check $val.0, $($tail),+)
+macro_rules! all {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(&&; $($args),+)
     };
 }
 
-/// Creates a [`Signal`] that outputs the logical OR of all input [`Signal`]s.
+/// Creates a [`Signal`] that outputs `true` if any input [`Signal`] is `true`.
 ///
 /// Accepts 2 or more [`Signal`]s. All signals must output `bool`.
 ///
@@ -2666,47 +2644,12 @@ macro_rules! and {
 /// let s1 = SignalBuilder::from_system(|_: In<()>| true);
 /// let s2 = SignalBuilder::from_system(|_: In<()>| false);
 ///
-/// let or_signal = signal::or!(s1, s2); // outputs `true`
+/// let any_signal = signal::any!(s1, s2); // outputs `true`
 /// ```
 #[macro_export]
-macro_rules! or {
-    // Single argument case
-    ($s1:expr $(,)?) => {
-        $s1
-    };
-    // Entry point
-    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::or!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In(val @ $crate::or!(@pattern $s1, $s2 $(, $rest)*))|
-                $crate::or!(@check val, $s1, $s2 $(, $rest)*)
-            )
-    };
-
-    // Combine chain
-    (@combine $first:expr, $second:expr) => {
-        $first.combine($second)
-    };
-    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::or!(@combine $first.combine($second), $($rest),+)
-    };
-
-    // Pattern generator
-    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::or!(@pattern_helper (_, _), $($rest)*)
-    };
-    (@pattern_helper $acc:tt $(,)?) => { $acc };
-    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::or!(@pattern_helper ($acc, _), $($tail)*)
-    };
-
-    // Check logic
-    // Base case: 2 signals
-    (@check $val:expr, $a:expr, $b:expr) => {
-        $val.0 || $val.1
-    };
-    // Recursive case: 3+ signals
-    (@check $val:expr, $head:expr, $($tail:expr),+) => {
-        $val.1 || $crate::or!(@check $val.0, $($tail),+)
+macro_rules! any {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(||; $($args),+)
     };
 }
 
@@ -2730,36 +2673,42 @@ macro_rules! or {
 #[macro_export]
 macro_rules! distinct {
     ($($args:expr),+ $(,)?) => {
-        $crate::distinct!(@generate_pairs $($args),+)
+        $crate::__signal_pairwise_all!(__signal_distinct_pair; $($args),+)
     };
+}
 
-    // Internal: Generate pairwise comparisons
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_distinct_pair {
+    ($a:expr, $b:expr) => {
+        $crate::eq!($a.clone(), $b.clone()).not()
+    };
+}
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_pairwise_all {
     // Base case: 2 args
-    (@generate_pairs $head:expr, $last:expr) => {
-        $crate::eq!($head.clone(), $last.clone()).not()
+    ($pair:ident; $a:expr, $b:expr $(,)?) => {
+        $crate::$pair!($a, $b)
     };
 
     // Recursive case: 3+ args
-    (@generate_pairs $head:expr, $next:expr, $($tail:expr),+) => {
-        $crate::and!(
-            $crate::distinct!(@check_head $head, $next, $($tail),+),
-            $crate::distinct!(@generate_pairs $next, $($tail),+)
+    ($pair:ident; $head:expr, $next:expr, $($tail:expr),+ $(,)?) => {
+        $crate::all!(
+            $crate::__signal_pairwise_all!(@with_head $pair; $head, $next, $($tail),+),
+            $crate::__signal_pairwise_all!($pair; $next, $($tail),+)
         )
     };
 
-    // Helper to check head against all tail elements
-
-    // Base case for check_head: head vs last
-    (@check_head $head:expr, $last:expr) => {
-        $crate::eq!($head.clone(), $last.clone()).not()
+    // Compare a fixed head against all remaining elements
+    (@with_head $pair:ident; $head:expr, $last:expr $(,)?) => {
+        $crate::$pair!($head, $last)
     };
-
-    // Recursive case for check_head
-    (@check_head $head:expr, $next:expr, $($tail:expr),+) => {
-        $crate::and!(
-            $crate::eq!($head.clone(), $next.clone()).not(),
-            $crate::distinct!(@check_head $head, $($tail),+)
+    (@with_head $pair:ident; $head:expr, $next:expr, $($tail:expr),+ $(,)?) => {
+        $crate::all!(
+            $crate::$pair!($head, $next),
+            $crate::__signal_pairwise_all!(@with_head $pair; $head, $($tail),+)
         )
     };
 }
@@ -2782,50 +2731,142 @@ macro_rules! distinct {
 /// ```
 #[macro_export]
 macro_rules! sum {
-    // Single argument case
-    ($s1:expr $(,)?) => {
-        $s1
-    };
-    // Entry point
-    ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::sum!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In(val @ $crate::sum!(@pattern $s1, $s2 $(, $rest)*))|
-                $crate::sum!(@add val, $s1, $s2 $(, $rest)*)
-            )
-    };
-
-    // Combine chain
-    (@combine $first:expr, $second:expr) => {
-        $first.combine($second)
-    };
-    (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::sum!(@combine $first.combine($second), $($rest),+)
-    };
-
-    // Pattern generator
-    (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::sum!(@pattern_helper (_, _) $(, $rest)*)
-    };
-    (@pattern_helper $acc:tt $(,)?) => { $acc };
-    (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::sum!(@pattern_helper ($acc, _) $(, $tail)*)
-    };
-
-    // Add logic
-    // Base case: 2 signals
-    (@add $val:expr, $a:expr, $b:expr) => {
-        $val.0 + $val.1
-    };
-    // Recursive case: 3+ signals
-    (@add $val:expr, $head:expr, $($tail:expr),+) => {
-        $val.1 + $crate::sum!(@add $val.0, $($tail),+)
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(+; $($args),+)
     };
 }
 
-pub use and;
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_reduce_binop {
+    // Single argument case
+    ($op:tt; $s1:expr $(,)?) => {
+        $s1
+    };
+    // Entry point
+    ($op:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::__signal_reduce_binop!(@apply $op, val, $s1, $s2 $(, $rest)*)
+        })
+    };
+
+    // Apply logic
+    // Base case: 2 signals
+    (@apply $op:tt, $val:expr, $a:expr, $b:expr) => {
+        $val.0 $op $val.1
+    };
+    // Recursive case: 3+ signals
+    (@apply $op:tt, $val:expr, $head:expr, $($tail:expr),+) => {
+        $val.1 $op $crate::__signal_reduce_binop!(@apply $op, $val.0, $($tail),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the product of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output numeric types that implement `Mul`.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 3);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 4);
+///
+/// let product_signal = signal::product!(s1, s2, s3); // outputs `24`
+/// ```
+#[macro_export]
+macro_rules! product {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_binop!(*; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the minimum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output types that implement
+/// [`PartialOrd`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+///
+/// let min_signal = signal::min!(s1, s2, s3); // outputs `2`
+/// ```
+#[macro_export]
+macro_rules! min {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_cmp!(<; $($args),+)
+    };
+}
+
+/// Creates a [`Signal`] that outputs the maximum of all input [`Signal`]s.
+///
+/// Accepts 2 or more [`Signal`]s. All signals must output types that implement
+/// [`PartialOrd`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+///
+/// let max_signal = signal::max!(s1, s2, s3); // outputs `7`
+/// ```
+#[macro_export]
+macro_rules! max {
+    ($($args:expr),+ $(,)?) => {
+        $crate::__signal_reduce_cmp!(>; $($args),+)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_reduce_cmp {
+    // Single argument case
+    ($cmp:tt; $s1:expr $(,)?) => {
+        $s1
+    };
+    // Entry point
+    ($cmp:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
+        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+            $crate::__signal_reduce_cmp!(@select $cmp, val, $s1, $s2 $(, $rest)*)
+        })
+    };
+
+    // Selection logic
+    // Base case: 2 signals
+    (@select $cmp:tt, $val:expr, $a:expr, $b:expr) => {
+        if $val.0 $cmp $val.1 { $val.0 } else { $val.1 }
+    };
+    // Recursive case: 3+ signals
+    (@select $cmp:tt, $val:expr, $head:expr, $($tail:expr),+) => {
+        {
+            let rhs = $crate::__signal_reduce_cmp!(@select $cmp, $val.0, $($tail),+);
+            if $val.1 $cmp rhs { $val.1 } else { rhs }
+        }
+    };
+}
+
+pub use all;
+pub use any;
 pub use distinct;
 pub use eq;
-pub use or;
+pub use max;
+pub use min;
+pub use product;
 pub use sum;
 
 #[cfg(test)]
@@ -4710,14 +4751,14 @@ mod tests {
         let f = SignalBuilder::from_system(|_: In<()>| false);
 
         // Test AND (all true)
-        let and_signal = crate::signal::and!(t.clone(), t.clone(), t.clone());
-        and_signal.map(capture_output::<bool>).register(app.world_mut());
+        let all_signal = crate::signal::all!(t.clone(), t.clone(), t.clone());
+        all_signal.map(capture_output::<bool>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
 
         // Test AND (one false)
-        let and_signal = crate::signal::and!(t.clone(), f.clone(), t.clone());
-        and_signal.map(capture_output::<bool>).register(app.world_mut());
+        let all_signal = crate::signal::all!(t.clone(), f.clone(), t.clone());
+        all_signal.map(capture_output::<bool>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
     }
@@ -4731,14 +4772,14 @@ mod tests {
         let f = SignalBuilder::from_system(|_: In<()>| false);
 
         // Test OR (all false)
-        let or_signal = crate::signal::or!(f.clone(), f.clone(), f.clone());
-        or_signal.map(capture_output::<bool>).register(app.world_mut());
+        let any_signal = crate::signal::any!(f.clone(), f.clone(), f.clone());
+        any_signal.map(capture_output::<bool>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(false));
 
         // Test OR (one true)
-        let or_signal = crate::signal::or!(f.clone(), t.clone(), f.clone());
-        or_signal.map(capture_output::<bool>).register(app.world_mut());
+        let any_signal = crate::signal::any!(f.clone(), t.clone(), f.clone());
+        any_signal.map(capture_output::<bool>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<bool>>().0, Some(true));
     }
@@ -4796,6 +4837,97 @@ mod tests {
 
         let sum_signal = crate::signal::sum!(s1, s2, s3, s4);
         sum_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(10));
+    }
+
+    #[test]
+    fn test_signal_product() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        // Test product with 2 signals
+        let product_signal = crate::signal::product!(s1, s2);
+        product_signal
+            .map(capture_output::<i32>)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(6));
+
+        // Test product with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+
+        let product_signal = crate::signal::product!(s1, s2, s3, s4);
+        product_signal
+            .map(capture_output::<i32>)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(24));
+    }
+
+    #[test]
+    fn test_signal_min() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test min with 2 signals
+        let min_signal = crate::signal::min!(s1, s2);
+        min_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(2));
+
+        // Test min with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        let min_signal = crate::signal::min!(s1, s2, s3, s4);
+        min_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(2));
+    }
+
+    #[test]
+    fn test_signal_max() {
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+
+        // Test max with 2 signals
+        let max_signal = crate::signal::max!(s1, s2);
+        max_signal.map(capture_output::<i32>).register(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(5));
+
+        // Test max with 4 signals
+        let mut app = create_test_app();
+        app.insert_resource(SignalOutput::<i32>::default());
+
+        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+
+        let max_signal = crate::signal::max!(s1, s2, s3, s4);
+        max_signal.map(capture_output::<i32>).register(app.world_mut());
         app.update();
         assert_eq!(app.world().resource::<SignalOutput<i32>>().0, Some(10));
     }
