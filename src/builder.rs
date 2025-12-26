@@ -13,6 +13,8 @@ use bevy_ecs::{
     system::{IntoObserverSystem, RunSystemOnce},
     world::DeferredWorld,
 };
+#[cfg(debug_assertions)]
+use bevy_log::warn;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
@@ -31,11 +33,62 @@ use bevy_platform::{
 /// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html),
 /// and [haalka](https://github.com/databasedav/haalka)'s
 /// [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
-#[derive(Clone, Default)]
+///
+/// # `Clone` semantics
+///
+/// This type implements [`Clone`] **only** to satisfy trait bounds required by signal combinators.
+/// **Cloning [`JonmoBuilder`]s at runtime is a bug.** See [`JonmoBuilder::clone`] for
+/// details.
+#[derive(Default)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
     child_block_populations: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Clone for JonmoBuilder {
+    /// # Warning
+    ///
+    /// This clone implementation exists **only** to satisfy trait bounds required by signal
+    /// combinators (e.g., [`SignalExt::map`], [`SignalVecExt::filter_map`]). **Cloning
+    /// [`JonmoBuilder`]s at runtime is a bug and will lead to unexpected behavior.**
+    ///
+    /// Clones share internal on-spawn hooks via [`Arc`]. These hooks are one-shot ([`FnOnce`])
+    /// and are consumed when the builder is spawned. Spawning one clone will affect all other
+    /// clones.
+    ///
+    /// Use factory functions instead if you need reusable UI templates:
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// fn my_widget(label: &str) -> JonmoBuilder {
+    ///     JonmoBuilder::new().insert(Name::new(label.to_string()))
+    ///     // ... other configuration
+    /// }
+    ///
+    /// // Correct: each call creates a fresh builder
+    /// let mut world = World::new();
+    /// let widget1 = my_widget("First").spawn(&mut world);
+    /// let widget2 = my_widget("Second").spawn(&mut world);
+    /// ```
+    #[track_caller]
+    fn clone(&self) -> Self {
+        #[cfg(debug_assertions)]
+        warn!(
+            "Cloning `JonmoBuilder` at {} is a bug! `JonmoBuilder`'s `Clone` shares internal on-spawn \
+             hook queues via `Arc`. These hooks are one-shot (`FnOnce`) and are consumed on spawn. \
+             Spawning one clone will affect all other clones. Use factory functions instead if you \
+             need reusable UI templates.",
+            core::panic::Location::caller()
+        );
+
+        Self {
+            on_spawns: self.on_spawns.clone(),
+            child_block_populations: self.child_block_populations.clone(),
+        }
+    }
 }
 
 impl<T: Bundle> From<T> for JonmoBuilder {
