@@ -10,7 +10,7 @@ use super::{
     utils::{LazyEntity, SSs, ancestor_map},
 };
 use crate::prelude::clone;
-use bevy_ecs::{entity_disabling::Internal, prelude::*, system::SystemState};
+use bevy_ecs::{prelude::*, system::SystemState};
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         use bevy_log::prelude::*;
@@ -1412,7 +1412,7 @@ pub trait SignalExt: Signal {
             //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
             //    forwarder.
             let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
-                    clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
+                    clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
                         if let Ok(mut state) = query.get_mut(reader_entity.get()) {
                             state.value.take()
                         } else {
@@ -1477,11 +1477,7 @@ pub trait SignalExt: Signal {
                         let forwarder_handle = inner_signal
                             .map(
                                 // This first map writes the value to the state component.
-                                move |In(value),
-                                      mut query: Query<
-                                    &mut FlattenState<<Self::Item as Signal>::Item>,
-                                    Allow<Internal>,
-                                >| {
+                                move |In(value), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
                                     if let Ok(mut state) = query.get_mut(*reader_system) {
                                         state.value = Some(value);
                                     }
@@ -1602,7 +1598,7 @@ pub trait SignalExt: Signal {
             // The output system is a "poller". It runs when poked and drains its own queue.
             let output_signal_entity = LazyEntity::new();
             let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
+                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>>| {
                     if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
                         if queue.0.is_empty() {
                             None
@@ -1665,7 +1661,7 @@ pub trait SignalExt: Signal {
                     // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
                     // _now_. This synchronously sends the initial `Replace` diff through the pipe we
                     // just established.
-                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
+                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
                     for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
@@ -1738,20 +1734,21 @@ pub trait SignalExt: Signal {
 
             // The output signal is a "poller". It runs when poked and drains its own queue.
             let output_signal_entity = LazyEntity::new();
-            let output_signal = *SignalBuilder::from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
-                        if queue.0.is_empty() {
-                            None
+            let output_signal =
+                *SignalBuilder::from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
+                    clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>>| {
+                        if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
+                            if queue.0.is_empty() {
+                                None
+                            } else {
+                                Some(core::mem::take(&mut queue.0))
+                            }
                         } else {
-                            Some(core::mem::take(&mut queue.0))
+                            None
                         }
-                    } else {
-                        None
-                    }
-                }),
-            )
-            .register(world);
+                    }),
+                )
+                .register(world);
             output_signal_entity.set(*output_signal);
 
             // Add the queue component to the output signal's entity so it can be found.
@@ -1803,7 +1800,7 @@ pub trait SignalExt: Signal {
                     // F. MANUALLY TRIGGER REPLAY: Take the trigger from the new signal and run it
                     // _now_. This synchronously sends the initial `Replace` diff through the pipe we
                     // just established.
-                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
+                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
                     for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {

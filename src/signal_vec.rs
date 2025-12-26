@@ -10,7 +10,7 @@ use super::{
 };
 use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::{change_detection::Mut, entity_disabling::Internal, prelude::*, system::SystemId};
+use bevy_ecs::{change_detection::Mut, prelude::*, system::SystemId};
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -477,11 +477,11 @@ fn spawn_filter_signal<T: Clone + SSs>(
         let self_entity = *entity;
 
         // The processor might run after its parent has been cleaned up.
-        let Ok(signal_index_comp) = world.query_filtered::<&FilterSignalIndex, Allow<Internal>>().get(world, self_entity) else {
+        let Ok(signal_index_comp) = world.query::<&FilterSignalIndex>().get(world, self_entity) else {
             return;
         };
         let item_index = signal_index_comp.0;
-        let Ok(mut filter_signal_data) = world.query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>().get_mut(world, parent) else {
+        let Ok(mut filter_signal_data) = world.query::<&mut FilterSignalData<T>>().get_mut(world, parent) else {
             return;
         };
 
@@ -2052,7 +2052,7 @@ pub trait SignalVecExt: SignalVec {
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
                         SignalBuilder::from_system(
-                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
+                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState>| {
                                 Some(
                                     query
                                         .get(processor_entity_handle.get())
@@ -2657,7 +2657,7 @@ pub trait SignalVecExt: SignalVec {
                 SignalBuilder::from_system(
                     clone!(
                         (state_entity_handle) move |_: In<()>,
-                        query: Query<&IntersperseState<Self::Item>, Allow<Internal>>| {
+                        query: Query<&IntersperseState<Self::Item>>| {
                             Some(
                                 query
                                     .get(state_entity_handle.get())
@@ -3797,7 +3797,7 @@ impl<T> MutableVec<T> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_vec_datas: Query<&MutableVecData<T>>| {
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce>, mutable_vec_datas: Query<&MutableVecData<T>>| {
                 if replay_onces.contains(*replay_entity) {
                     if !was_initially_empty {
                         let initial_vec = self_.read(&mutable_vec_datas).to_vec();
@@ -3986,10 +3986,7 @@ pub(crate) fn trigger_replay<ReplayTrigger: Component + Replayable>(world: &mut 
 }
 
 pub(crate) fn trigger_replays<ReplayTrigger: Component + Replayable>(world: &mut World) {
-    let triggers: Vec<Entity> = world
-        .query_filtered::<Entity, (With<ReplayOnce>, Allow<Internal>)>()
-        .iter(world)
-        .collect();
+    let triggers: Vec<Entity> = world.query_filtered::<Entity, With<ReplayOnce>>().iter(world).collect();
     for entity in triggers {
         trigger_replay::<ReplayTrigger>(world, entity);
     }

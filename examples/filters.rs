@@ -200,11 +200,13 @@ fn maybe_insert_random_sorted(builder: JonmoBuilder) -> JonmoBuilder {
 
 fn text_node(text: &'static str) -> JonmoBuilder {
     JonmoBuilder::from((
-        Node::default(),
+        Node {
+            border_radius: BorderRadius::all(Val::Px(GAP)),
+            ..default()
+        },
         Text::new(text),
         TextColor(Color::WHITE),
         TextLayout::new_with_justify(Justify::Center),
-        BorderRadius::all(Val::Px(GAP)),
     ))
 }
 
@@ -319,7 +321,10 @@ fn shape_toggles(row_parent: LazyEntity) -> JonmoBuilder {
         ..default()
     })
     .child(shape_toggle(row_parent.clone(), Shape::Square))
-    .child(shape_toggle(row_parent.clone(), Shape::Circle).insert(BorderRadius::MAX))
+    .child(
+        shape_toggle(row_parent.clone(), Shape::Circle)
+            .with_component::<Node>(|mut node| node.border_radius = BorderRadius::MAX),
+    )
 }
 
 fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
@@ -338,9 +343,9 @@ fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
                         width: Val::Px(15.),
                         height: Val::Px(15.),
                         border: UiRect::all(Val::Px(1.)),
+                        border_radius: BorderRadius::all(Val::Px(GAP)),
                         ..default()
                     },
-                    BorderRadius::all(Val::Px(GAP)),
                     BackgroundColor(color.into()),
                     BorderColor::all(Color::BLACK),
                 ))
@@ -367,11 +372,11 @@ fn button(text: &'static str, offset: f32) -> JonmoBuilder {
             height: Val::Px((ITEM_SIZE / 2) as f32),
             justify_content: JustifyContent::Center,
             border: UiRect::all(Val::Px(1.)),
+            border_radius: BorderRadius::all(Val::Px(GAP)),
             ..default()
         },
         BackgroundColor(bevy::color::palettes::basic::GRAY.into()),
         BorderColor::all(Color::WHITE),
-        BorderRadius::all(Val::Px(GAP)),
     ))
     .child(
         text_node(text)
@@ -494,13 +499,13 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
             width: Val::Px(ITEM_SIZE as f32),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
+            border_radius: match shape {
+                Shape::Square => BorderRadius::default(),
+                Shape::Circle => BorderRadius::MAX,
+            },
             ..default()
         },
         BackgroundColor(color.into()),
-        match shape {
-            Shape::Square => BorderRadius::default(),
-            Shape::Circle => BorderRadius::MAX,
-        },
     ))
     .component_signal(index.map_in(|index| index.map(Index)))
     .apply(on_click(

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
-use bevy_ecs::{entity_disabling::Internal, prelude::*};
+use bevy_ecs::prelude::*;
 #[cfg(feature = "tracing")]
 use bevy_log::debug;
 use bevy_platform::{
@@ -1124,7 +1124,7 @@ impl<K, V> MutableBTreeMap<K, V> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
                 if replay_onces.contains(*replay_entity) {
                     if !was_initially_empty {
                         let initial_map = self_.read(&mutable_btree_map_datas);

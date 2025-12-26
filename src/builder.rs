@@ -674,7 +674,7 @@ impl JonmoBuilder {
                             if let Ok(mut parent) = world.get_entity_mut(parent) {
                                 // Bevy's `remove_children` finds the entity and removes it from its
                                 // current position, correctly shifting subsequent children.
-                                parent.remove_children(&[moved_entity]);
+                                parent.detach_children(&[moved_entity]);
 
                                 // The new insertion index must be calculated with the offset from any
                                 // preceding static children.
