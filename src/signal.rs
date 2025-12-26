@@ -1485,8 +1485,6 @@ pub trait SignalExt: Signal {
     /// Outputs up to the first `count` values from this [`Signal`], and then terminates for all
     /// subsequent frames.
     ///
-    /// After `count` values are emitted, this signal will stop propagating any further values.
-    ///
     /// If `count` is `0`, this will never propagate any values.
     ///
     /// # Example
@@ -1521,8 +1519,6 @@ pub trait SignalExt: Signal {
     }
 
     /// Outputs this [`Signal`]'s first value and then terminates for all subsequent frames.
-    ///
-    /// After the first value is emitted, this signal will stop propagating any further values.
     ///
     /// # Example
     ///
