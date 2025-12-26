@@ -18,7 +18,13 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
-use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering}};
+use core::{
+    cmp::Ordering,
+    fmt,
+    marker::PhantomData,
+    ops::Deref,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableVec`] that are piped to downstream
@@ -300,7 +306,6 @@ fn find_index<'a>(indices: impl Iterator<Item = &'a bool>, index: usize) -> usiz
 }
 
 /// Helper for `filter` - clones input to pass to system, returns original if predicate passes.
-#[track_caller]
 fn filter_helper<T>(
     world: &mut World,
     diffs: Vec<VecDiff<T::Inner<'static>>>,
@@ -318,9 +323,7 @@ where
                 *indices = Vec::with_capacity(values.len());
                 let mut output = Vec::with_capacity(values.len());
                 for input in values {
-                    let include = world
-                        .run_system_with(system, input.clone())
-                        .unwrap_or(false);
+                    let include = world.run_system_with(system, input.clone()).unwrap_or(false);
                     indices.push(include);
                     if include {
                         output.push(input);
@@ -329,9 +332,7 @@ where
                 Some(VecDiff::Replace { values: output })
             }
             VecDiff::InsertAt { index, value } => {
-                let include = world
-                    .run_system_with(system, value.clone())
-                    .unwrap_or(false);
+                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
                 if include {
                     indices.insert(index, true);
                     Some(VecDiff::InsertAt {
@@ -344,9 +345,7 @@ where
                 }
             }
             VecDiff::UpdateAt { index, value } => {
-                let include = world
-                    .run_system_with(system, value.clone())
-                    .unwrap_or(false);
+                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
                 if include {
                     if indices[index] {
                         Some(VecDiff::UpdateAt {
@@ -398,9 +397,7 @@ where
                 }
             }
             VecDiff::Push { value } => {
-                let include = world
-                    .run_system_with(system, value.clone())
-                    .unwrap_or(false);
+                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
                 if include {
                     indices.push(true);
                     Some(VecDiff::Push { value })
@@ -429,7 +426,6 @@ where
 }
 
 /// Helper for `filter_map` - does NOT clone input, system takes ownership and returns mapped value.
-#[track_caller]
 fn filter_map_helper<T, O>(
     world: &mut World,
     diffs: Vec<VecDiff<T::Inner<'static>>>,
@@ -1450,7 +1446,6 @@ pub trait SignalVecExt: SignalVec {
     /// [`.for_each`](SignalVecExt::for_each), returns a [`Signal`], not a [`SignalVec`], since the
     /// output type need not be an [`Option<Vec<VecDiff>>`]. If the [`System`] logic is infallible,
     /// wrapping the result in an option is unnecessary.
-    #[track_caller]
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
@@ -1934,7 +1929,6 @@ pub trait SignalVecExt: SignalVec {
     ///     .signal_vec()
     ///     .filter_map(|In(s): In<&'static str>| s.parse::<u32>().ok()); // outputs `SignalVec -> [1, 5]`
     /// ```
-    #[track_caller]
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, O>
     where
         Self: Sized,
@@ -2925,7 +2919,6 @@ pub trait SignalVecExt: SignalVec {
     }
 
     // TODO: the example is clearly a copout ...
-    // TODO: why won't doctest compile ?
     /// Place the [`Item`](SignalVec::Item) output by the [`System`] between adjacent items of this
     /// [`SignalVec`]; the [`System`] takes [`In`] a [`Signal<Item = Option<usize>>`] which outputs
     /// the index of the corresponding [`Item`](SignalVec::Item) or [`None`] if it has been removed.
@@ -2934,13 +2927,13 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     /// use jonmo::signal::{Dedupe, Source};
     ///
     /// let mut world = World::new();
-    /// MutableVec::from([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// MutableVecBuilder::from([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where

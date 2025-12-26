@@ -18,7 +18,12 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
-use core::{fmt, marker::PhantomData, ops::Deref, sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering}};
+use core::{
+    fmt,
+    marker::PhantomData,
+    ops::Deref,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to downstream

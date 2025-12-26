@@ -2779,20 +2779,19 @@ pub trait SignalExt: Signal {
         }
     }
 
-    // TODO: why won't doctest compile ?
     #[cfg(feature = "tracing")]
     #[track_caller]
     /// Adds debug logging to this [`Signal`]'s ouptut.
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
     /// SignalBuilder::from_system(|_: In<()>| 1)
     ///     .debug() // logs `1`
-    ///     .map_in(|x: i32| x * 2);
+    ///     .map_in(|x: i32| x * 2)
     ///     .debug(); // logs `2`
     /// ```
     fn debug(self) -> Debug<Self>
@@ -4059,9 +4058,7 @@ mod tests {
             assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
             assert_eq!(
                 diffs[0],
-                VecDiff::Replace {
-                    values: vec![10, 20],
-                },
+                VecDiff::Replace { values: vec![10, 20] },
                 "Switching back should Replace with the current state of List A."
             );
 

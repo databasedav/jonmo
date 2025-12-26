@@ -115,9 +115,7 @@ impl Plugin for JonmoPlugin {
 /// `use jonmo::prelude::*;` imports everything one needs to use start using [jonmo](crate).
 pub mod prelude {
     #[cfg(feature = "builder")]
-    pub use crate::builder::{
-        Holdable, JonmoBuilder, SignalHoldExt, SignalMapHoldExt, SignalVecHoldExt,
-    };
+    pub use crate::builder::{Holdable, JonmoBuilder, SignalHoldExt, SignalMapHoldExt, SignalVecHoldExt};
     pub use crate::{
         JonmoPlugin,
         graph::SignalHandles,
