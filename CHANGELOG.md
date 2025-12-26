@@ -4,6 +4,20 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+### changed
+
+- `JonmoBuilder::hold_signals` takes `Box<dyn Holdable>`s instead of `SignalHandles`
+- removed output `Clone` bound from `SignalExt::filter_map`
+
+### added
+- `track_caller` derive for panicking `LazyEntity` methods
+
+### fixed
+
+- deadlock when despawning `MutableVec/Map`s during another `MutableVec/Map` despawn
+- initially empty `MutableVec/Map`s work as expected when output to `.switch_signal_vec/map`
+- `SignalVecExt::debug` and `SignalMapExt::debug` now log correct code location
+
 # 0.5.0 (2025-12-19)
 
 ### changed

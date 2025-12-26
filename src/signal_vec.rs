@@ -305,35 +305,30 @@ fn find_index<'a>(indices: impl Iterator<Item = &'a bool>, index: usize) -> usiz
     indices.take(index).filter(|x| **x).count()
 }
 
-/// Helper for `filter` - clones input to pass to system, returns original if predicate passes.
-fn filter_helper<T>(
-    world: &mut World,
-    diffs: Vec<VecDiff<T::Inner<'static>>>,
-    system: SystemId<T, bool>,
+/// Generic helper for filter/filter_map operations on VecDiff streams.
+/// `process` takes a value and returns `Option<O>` - `Some` means include, `None` means exclude.
+fn filter_generic_helper<T, O>(
+    diffs: Vec<VecDiff<T>>,
     indices: &mut Vec<bool>,
-) -> Option<Vec<VecDiff<T::Inner<'static>>>>
-where
-    T: SystemInput + 'static,
-    T::Inner<'static>: Clone,
-{
+    mut process: impl FnMut(T) -> Option<O>,
+) -> Option<Vec<VecDiff<O>>> {
     let mut output = vec![];
     for diff in diffs {
         let diff_option = match diff {
             VecDiff::Replace { values } => {
                 *indices = Vec::with_capacity(values.len());
-                let mut output = Vec::with_capacity(values.len());
+                let mut out_values = Vec::with_capacity(values.len());
                 for input in values {
-                    let include = world.run_system_with(system, input.clone()).unwrap_or(false);
-                    indices.push(include);
-                    if include {
-                        output.push(input);
+                    let mapped = process(input);
+                    indices.push(mapped.is_some());
+                    if let Some(value) = mapped {
+                        out_values.push(value);
                     }
                 }
-                Some(VecDiff::Replace { values: output })
+                Some(VecDiff::Replace { values: out_values })
             }
             VecDiff::InsertAt { index, value } => {
-                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
-                if include {
+                if let Some(value) = process(value) {
                     indices.insert(index, true);
                     Some(VecDiff::InsertAt {
                         index: find_index(indices.iter(), index),
@@ -345,8 +340,7 @@ where
                 }
             }
             VecDiff::UpdateAt { index, value } => {
-                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
-                if include {
+                if let Some(value) = process(value) {
                     if indices[index] {
                         Some(VecDiff::UpdateAt {
                             index: find_index(indices.iter(), index),
@@ -397,8 +391,7 @@ where
                 }
             }
             VecDiff::Push { value } => {
-                let include = world.run_system_with(system, value.clone()).unwrap_or(false);
-                if include {
+                if let Some(value) = process(value) {
                     indices.push(true);
                     Some(VecDiff::Push { value })
                 } else {
@@ -425,7 +418,25 @@ where
     if output.is_empty() { None } else { Some(output) }
 }
 
-/// Helper for `filter_map` - does NOT clone input, system takes ownership and returns mapped value.
+fn filter_helper<T>(
+    world: &mut World,
+    diffs: Vec<VecDiff<T::Inner<'static>>>,
+    system: SystemId<T, bool>,
+    indices: &mut Vec<bool>,
+) -> Option<Vec<VecDiff<T::Inner<'static>>>>
+where
+    T: SystemInput + 'static,
+    T::Inner<'static>: Clone,
+{
+    filter_generic_helper(diffs, indices, |value| {
+        if world.run_system_with(system, value.clone()).unwrap_or(false) {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
+
 fn filter_map_helper<T, O>(
     world: &mut World,
     diffs: Vec<VecDiff<T::Inner<'static>>>,
@@ -436,110 +447,9 @@ where
     T: SystemInput + 'static,
     O: 'static,
 {
-    let mut output = vec![];
-    for diff in diffs {
-        let diff_option = match diff {
-            VecDiff::Replace { values } => {
-                *indices = Vec::with_capacity(values.len());
-                let mut output = Vec::with_capacity(values.len());
-                for input in values {
-                    let mapped = world.run_system_with(system, input).ok().flatten();
-                    indices.push(mapped.is_some());
-                    if let Some(value) = mapped {
-                        output.push(value);
-                    }
-                }
-                Some(VecDiff::Replace { values: output })
-            }
-            VecDiff::InsertAt { index, value } => {
-                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
-                    indices.insert(index, true);
-                    Some(VecDiff::InsertAt {
-                        index: find_index(indices.iter(), index),
-                        value,
-                    })
-                } else {
-                    indices.insert(index, false);
-                    None
-                }
-            }
-            VecDiff::UpdateAt { index, value } => {
-                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
-                    if indices[index] {
-                        Some(VecDiff::UpdateAt {
-                            index: find_index(indices.iter(), index),
-                            value,
-                        })
-                    } else {
-                        indices[index] = true;
-                        Some(VecDiff::InsertAt {
-                            index: find_index(indices.iter(), index),
-                            value,
-                        })
-                    }
-                } else if indices[index] {
-                    indices[index] = false;
-                    Some(VecDiff::RemoveAt {
-                        index: find_index(indices.iter(), index),
-                    })
-                } else {
-                    None
-                }
-            }
-            VecDiff::Move { old_index, new_index } => {
-                // Determine if the item being moved is part of the filtered set.
-                let was_included = indices[old_index];
-
-                // Calculate the filtered old and new indices BEFORE and AFTER mutating `indices`.
-                let filtered_old_index = find_index(indices.iter(), old_index);
-                let temp_val = indices.remove(old_index);
-                indices.insert(new_index, temp_val);
-                let filtered_new_index = find_index(indices.iter(), new_index);
-
-                if was_included {
-                    Some(VecDiff::Move {
-                        old_index: filtered_old_index,
-                        new_index: filtered_new_index,
-                    })
-                } else {
-                    None
-                }
-            }
-            VecDiff::RemoveAt { index } => {
-                if indices.remove(index) {
-                    Some(VecDiff::RemoveAt {
-                        index: find_index(indices.iter(), index),
-                    })
-                } else {
-                    None
-                }
-            }
-            VecDiff::Push { value } => {
-                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
-                    indices.push(true);
-                    Some(VecDiff::Push { value })
-                } else {
-                    indices.push(false);
-                    None
-                }
-            }
-            VecDiff::Pop => {
-                if indices.pop().expect("can't pop from empty vec") {
-                    Some(VecDiff::Pop)
-                } else {
-                    None
-                }
-            }
-            VecDiff::Clear => {
-                indices.clear();
-                Some(VecDiff::Clear)
-            }
-        };
-        if let Some(diff) = diff_option {
-            output.push(diff);
-        }
-    }
-    if output.is_empty() { None } else { Some(output) }
+    filter_generic_helper(diffs, indices, |value| {
+        world.run_system_with(system, value).ok().flatten()
+    })
 }
 
 /// Signal graph node which selectively forwards upstream [`Item`](SignalVec::Item)s, see
