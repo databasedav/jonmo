@@ -2,6 +2,7 @@
 use super::{
     graph::{SignalHandle, SignalHandles},
     signal::{Signal, SignalBuilder, SignalExt},
+    signal_map::{SignalMap, SignalMapExt},
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
     utils::{LazyEntity, SSs, ancestor_map},
 };
@@ -16,6 +17,78 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
 };
+
+/// A type-erased signal that can be registered with a [`World`] at spawn time.
+/// 
+/// This trait enables [`JonmoBuilder::hold_signals`] to accept signals that haven't
+/// been registered yet, deferring their registration until the entity is spawned.
+/// 
+/// Use the [`.hold()`](SignalHoldExt::hold) extension method to convert a [`Signal`],
+/// [`SignalVec`], or [`SignalMap`] into a `Box<dyn Holdable>`.
+pub trait Holdable: Send + Sync + 'static {
+    /// Register this signal with the world and return its handle.
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle;
+}
+
+// Signal wrapper
+struct HoldableSignal<S>(S);
+
+impl<S: Signal + SSs> Holdable for HoldableSignal<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`Signal`] into a [`Holdable`].
+pub trait SignalHoldExt: Signal + Sized + SSs {
+    /// Convert this signal into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignal(self))
+    }
+}
+
+impl<S: Signal + Sized + SSs> SignalHoldExt for S {}
+
+// SignalVec wrapper
+struct HoldableSignalVec<S>(S);
+
+impl<S: SignalVec + SSs> Holdable for HoldableSignalVec<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`SignalVec`] into a [`Holdable`].
+pub trait SignalVecHoldExt: SignalVec + Sized + SSs {
+    /// Convert this signal vec into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignalVec(self))
+    }
+}
+
+impl<S: SignalVec + Sized + SSs> SignalVecHoldExt for S {}
+
+// SignalMap wrapper
+struct HoldableSignalMap<S>(S);
+
+impl<S: SignalMap + SSs> Holdable for HoldableSignalMap<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`SignalMap`] into a [`Holdable`].
+pub trait SignalMapHoldExt: SignalMap + Sized + SSs {
+    /// Convert this signal map into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignalMap(self))
+    }
+}
+
+impl<S: SignalMap + Sized + SSs> SignalMapHoldExt for S {}
 
 fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
     let entity = ctx.entity;
@@ -100,9 +173,25 @@ impl JonmoBuilder {
         })
     }
 
-    /// Attach registered [`SignalHandle`]s to this entity for automatic cleanup on despawn.
-    pub fn hold_signals(self, handles: impl IntoIterator<Item = SignalHandle> + SSs) -> Self {
-        self.on_spawn(move |world, entity| add_handles(world, entity, handles))
+    /// Attach [`Holdable`] signals to this entity for automatic cleanup on despawn.
+    /// 
+    /// Use [`.hold()`](SignalHoldExt::hold) to convert a [`Signal`], [`SignalVec`], or
+    /// [`SignalMap`] into a [`Holdable`].
+    /// 
+    /// # Example
+    /// 
+    /// ```ignore
+    /// let my_signal = SignalBuilder::from_resource::<MyResource>().map_in(|r| r.value).hold();
+    /// let my_signal_vec = my_mutable_vec.signal_vec().hold();
+    /// 
+    /// JonmoBuilder::new()
+    ///     .hold_signals([my_signal, my_signal_vec])
+    /// ```
+    pub fn hold_signals(self, holdables: impl IntoIterator<Item = Box<dyn Holdable>> + SSs) -> Self {
+        self.on_spawn(move |world, entity| {
+            let handles: Vec<_> = holdables.into_iter().map(|h| h.register_holdable(world)).collect();
+            add_handles(world, entity, handles);
+        })
     }
 
     /// Run a function with this builder's [`EntityWorldMut`].
@@ -158,6 +247,7 @@ impl JonmoBuilder {
     }
 
     /// Set the [`LazyEntity`] to this builder's [`Entity`].
+    #[track_caller]
     pub fn lazy_entity(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
     }

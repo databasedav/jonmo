@@ -18,7 +18,7 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
-use core::{fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
+use core::{fmt, marker::PhantomData, ops::Deref, sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering}};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to downstream
@@ -158,11 +158,23 @@ impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMapDynClone<Key = K, Va
 
 /// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<MapDiff>`]s of its
 /// upstream, see [.for_each](SignalMapExt::for_each).
-#[derive(Clone)]
 pub struct ForEach<Upstream, O> {
     upstream: Upstream,
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
+}
+
+impl<Upstream, O> Clone for ForEach<Upstream, O>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            upstream: self.upstream.clone(),
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for ForEach<Upstream, O>
@@ -182,10 +194,18 @@ where
 
 /// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
 /// upstream, see [`.map_value`](SignalMapExt::map_value).
-#[derive(Clone)]
 pub struct MapValue<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapValue<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> SignalMap for MapValue<Upstream, O>
@@ -204,10 +224,18 @@ where
 /// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
 /// upstream, forwarding the output of each resulting [`Signal`], see
 /// [`.map_value`](SignalMapExt::map_value).
-#[derive(Clone)]
 pub struct MapValueSignal<Upstream, S: Signal> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, S)>,
+}
+
+impl<Upstream, S: Signal> Clone for MapValueSignal<Upstream, S> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, S: Signal> SignalMap for MapValueSignal<Upstream, S>
@@ -226,12 +254,22 @@ where
 
 /// Signal graph node which maps its upstream [`SignalVec`] to a [`Key`](SignalMap::Key)-lookup
 /// [`Signal`], see [`.key`](SignalMapExt::key).
-#[derive(Clone)]
 pub struct Key<Upstream>
 where
     Upstream: SignalMap,
 {
     inner: ForEach<Upstream, Option<Upstream::Value>>,
+}
+
+impl<Upstream> Clone for Key<Upstream>
+where
+    Upstream: SignalMap + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Key<Upstream>
@@ -251,13 +289,23 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         /// Signal graph node that debug logs its upstream's "raw" [`Vec<MapDiff>`]s, see
         /// [`.debug`](SignalMapExt::debug).
-        #[derive(Clone)]
         pub struct Debug<Upstream>
         where
             Upstream: SignalMap,
         {
             #[allow(clippy::type_complexity)]
             signal: ForEach<Upstream, Vec<MapDiff<Upstream::Key, Upstream::Value>>>,
+        }
+
+        impl<Upstream> Clone for Debug<Upstream>
+        where
+            Upstream: SignalMap + Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    signal: self.signal.clone(),
+                }
+            }
         }
 
         impl<Upstream> SignalMap for Debug<Upstream>
@@ -277,10 +325,18 @@ cfg_if::cfg_if! {
 /// Signal graph node with no upstreams which outputs some [`MutableBTreeMap`]'s sorted
 /// [`Key`](SignalMap::Key)s as a [`SignalVec`], see
 /// [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
-#[derive(Clone)]
 pub struct SignalVecKeys<K> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> K>,
+}
+
+impl<K> Clone for SignalVecKeys<K> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K> SignalVec for SignalVecKeys<K>
@@ -296,10 +352,18 @@ where
 
 /// Signal graph node which maps its upstream [`MutableBTreeMap`] to a [`SignalVec`] of its sorted
 /// `(key, value)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
-#[derive(Clone)]
 pub struct SignalVecEntries<K, V> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> Clone for SignalVecEntries<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K, V> SignalVec for SignalVecEntries<K, V>
@@ -318,7 +382,6 @@ where
 /// although note that all [`SignalMap`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
-#[derive(Clone)]
 #[allow(missing_docs)]
 pub enum SignalMapEither<L, R>
 where
@@ -327,6 +390,19 @@ where
 {
     Left(L),
     Right(R),
+}
+
+impl<L, R> Clone for SignalMapEither<L, R>
+where
+    L: SignalMap + Clone,
+    R: SignalMap + Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Left(left) => Self::Left(left.clone()),
+            Self::Right(right) => Self::Right(right.clone()),
+        }
+    }
 }
 
 impl<K, V, L, R> SignalMap for SignalMapEither<L, R>
@@ -736,7 +812,7 @@ pub trait SignalMapExt: SignalMap {
     fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
-        Self::Key: PartialEq + Clone + SSs,
+        Self::Key: PartialEq + SSs,
         Self::Value: Clone + Send + 'static,
     {
         Key {
@@ -780,6 +856,7 @@ pub trait SignalMapExt: SignalMap {
     }
 
     #[cfg(feature = "tracing")]
+    #[track_caller]
     /// Adds debug logging to this [`SignalMap`]'s raw [`MapDiff`] outputs.
     ///
     /// # Example
@@ -894,8 +971,8 @@ impl<T: ?Sized> SignalMapExt for T where T: SignalMap {}
 static STALE_MUTABLE_BTREE_MAPS: LazyLock<Mutex<Vec<Entity>>> = LazyLock::new(Mutex::default);
 
 pub(crate) fn despawn_stale_mutable_btree_maps(world: &mut World) {
-    let mut queue = STALE_MUTABLE_BTREE_MAPS.lock().unwrap();
-    for entity in queue.drain(..) {
+    let queue = STALE_MUTABLE_BTREE_MAPS.lock().unwrap().drain(..).collect::<Vec<_>>();
+    for entity in queue {
         world.despawn(entity);
     }
 }
@@ -1006,7 +1083,7 @@ pub struct MutableBTreeMap<K, V> {
 
 impl<K, V> Clone for MutableBTreeMap<K, V> {
     fn clone(&self) -> Self {
-        self.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.references.fetch_add(1, AtomicOrdering::SeqCst);
         Self {
             entity: self.entity,
             references: self.references.clone(),
@@ -1017,7 +1094,7 @@ impl<K, V> Clone for MutableBTreeMap<K, V> {
 
 impl<K, V> Drop for MutableBTreeMap<K, V> {
     fn drop(&mut self) {
-        if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+        if self.references.fetch_sub(1, AtomicOrdering::SeqCst) == 1 {
             STALE_MUTABLE_BTREE_MAPS.lock().unwrap().push(self.entity);
         }
     }
@@ -1025,10 +1102,18 @@ impl<K, V> Drop for MutableBTreeMap<K, V> {
 
 /// Signal graph node with no upstreams which forwards [`Vec<MapDiff<K, V>>`]s flushed from some
 /// source [`MutableBTreeMap<K, V>`], see [`MutableBTreeMap::signal_map`].
-#[derive(Clone)]
 pub struct Source<K, V> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> Clone for Source<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K, V> SignalMap for Source<K, V>
@@ -1124,15 +1209,26 @@ impl<K, V> MutableBTreeMap<K, V> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+            let is_first_replay = Arc::new(AtomicBool::new(true));
+            let replay_system = clone!((self_, replay_entity, is_first_replay) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
                 if replay_onces.contains(*replay_entity) {
-                    if !was_initially_empty {
-                        let initial_map = self_.read(&mutable_btree_map_datas);
-                        Some(vec![MapDiff::Replace { entries: initial_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
-                    } else if upstream_diffs.is_empty() {
-                        None
+                    let first_replay = is_first_replay.swap(false, AtomicOrdering::SeqCst);
+                    if first_replay && was_initially_empty {
+                        // Initial replay with empty map - just forward upstream diffs
+                        if upstream_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(upstream_diffs)
+                        }
                     } else {
-                        Some(upstream_diffs)
+                        // Either non-empty initial state, or subsequent replay (e.g., switch_signal_map)
+                        // Always emit Replace with current state
+                        let current_map = self_.read(&mutable_btree_map_datas);
+                        if current_map.is_empty() {
+                            None
+                        } else {
+                            Some(vec![MapDiff::Replace { entries: current_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
+                        }
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });

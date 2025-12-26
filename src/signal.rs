@@ -75,10 +75,18 @@ impl<O: 'static> Signal for Box<dyn SignalDynClone<Item = O> + Send + Sync> {
 
 /// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See [`SignalBuilder`]
 /// methods for examples.
-#[derive(Clone)]
 pub struct Source<O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
+}
+
+impl<O> Clone for Source<O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<O> Signal for Source<O>
@@ -93,11 +101,23 @@ where
 }
 
 /// Signal graph node which applies a [`System`] to its upstream, see [`.map`](SignalExt::map).
-#[derive(Clone)]
 pub struct Map<Upstream, O> {
     upstream: Upstream,
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
+}
+
+impl<Upstream, O> Clone for Map<Upstream, O>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            upstream: self.upstream.clone(),
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for Map<Upstream, O>
@@ -117,9 +137,19 @@ where
 
 /// Signal graph node which maps its upstream [`Entity`] to a corresponding [`Component`], see
 /// [.component](SignalExt::component).
-#[derive(Clone)]
 pub struct MapComponent<Upstream, C> {
     signal: Map<Upstream, C>,
+}
+
+impl<Upstream, C> Clone for MapComponent<Upstream, C>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream, C> Signal for MapComponent<Upstream, C>
@@ -136,9 +166,19 @@ where
 
 /// Signal graph node which maps its upstream [`Entity`] to a corresponding [`Option<Component>`],
 /// see [.component_option](SignalExt::component_option).
-#[derive(Clone)]
 pub struct ComponentOption<Upstream, C> {
     signal: Map<Upstream, Option<C>>,
+}
+
+impl<Upstream, C> Clone for ComponentOption<Upstream, C>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream, C> Signal for ComponentOption<Upstream, C>
@@ -155,9 +195,19 @@ where
 
 /// Signal graph node which maps its upstream [`Entity`] to its [`Changed`] `C` [`Component`],
 /// see [.component_changed](SignalExt::component_changed).
-#[derive(Clone)]
 pub struct ComponentChanged<Upstream, C> {
     signal: Map<Upstream, C>,
+}
+
+impl<Upstream, C> Clone for ComponentChanged<Upstream, C>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream, C> Signal for ComponentChanged<Upstream, C>
@@ -174,10 +224,21 @@ where
 
 /// Signal graph node with maps its upstream [`Entity`] to whether it has some [`Component`], see
 /// [`.has_component`](SignalExt::has_component).
-#[derive(Clone)]
 pub struct HasComponent<Upstream, C> {
     signal: Map<Upstream, bool>,
     _marker: PhantomData<fn() -> C>,
+}
+
+impl<Upstream, C> Clone for HasComponent<Upstream, C>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, C> Signal for HasComponent<Upstream, C>
@@ -194,12 +255,22 @@ where
 
 /// Signal graph node which does not forward upstream duplicates, see
 /// [`.dedupe`](SignalExt::dedupe).
-#[derive(Clone)]
 pub struct Dedupe<Upstream>
 where
     Upstream: Signal,
 {
     signal: Map<Upstream, Upstream::Item>,
+}
+
+impl<Upstream> Clone for Dedupe<Upstream>
+where
+    Upstream: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Dedupe<Upstream>
@@ -215,12 +286,22 @@ where
 
 /// Signal graph node that terminates forever after forwarding a single upstream value, see
 /// [`.first`](SignalExt::first).
-#[derive(Clone)]
 pub struct First<Upstream>
 where
     Upstream: Signal,
 {
-    signal: Map<Upstream, Upstream::Item>,
+    signal: Take<Upstream>,
+}
+
+impl<Upstream> Clone for First<Upstream>
+where
+    Upstream: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for First<Upstream>
@@ -234,8 +315,38 @@ where
     }
 }
 
+/// Signal graph node that terminates forever after forwarding `count` upstream values, see
+/// [`.take`](SignalExt::take).
+pub struct Take<Upstream>
+where
+    Upstream: Signal,
+{
+    signal: Map<Upstream, Upstream::Item>,
+}
+
+impl<Upstream> Clone for Take<Upstream>
+where
+    Upstream: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
+}
+
+impl<Upstream> Signal for Take<Upstream>
+where
+    Upstream: Signal,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
 /// Signal graph node which combines two upstreams, see [`.combine`](SignalExt::combine).
-#[derive(Clone)]
 pub struct Combine<Left, Right>
 where
     Left: Signal,
@@ -246,6 +357,20 @@ where
     #[allow(clippy::type_complexity)]
     right_wrapper: Map<Right, (Option<Left::Item>, Option<Right::Item>)>,
     signal: LazySignal,
+}
+
+impl<Left, Right> Clone for Combine<Left, Right>
+where
+    Left: Signal + Clone,
+    Right: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            left_wrapper: self.left_wrapper.clone(),
+            right_wrapper: self.right_wrapper.clone(),
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Left, Right> Signal for Combine<Left, Right>
@@ -267,9 +392,19 @@ where
 
 /// Signal graph node which outputs equality between its upstream and a fixed value, see
 /// [`.eq`](SignalExt::eq).
-#[derive(Clone)]
 pub struct Eq<Upstream> {
     signal: Map<Upstream, bool>,
+}
+
+impl<Upstream> Clone for Eq<Upstream>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Eq<Upstream>
@@ -285,9 +420,19 @@ where
 
 /// Signal graph node which outputs inequality between its upstream and a fixed value, see
 /// [`.neq`](SignalExt::neq).
-#[derive(Clone)]
 pub struct Neq<Upstream> {
     signal: Map<Upstream, bool>,
+}
+
+impl<Upstream> Clone for Neq<Upstream>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Neq<Upstream>
@@ -303,7 +448,6 @@ where
 }
 
 /// Signal graph node which applies [`ops::Not`] to its upstream, see [`.not`](SignalExt::not).
-#[derive(Clone)]
 pub struct Not<Upstream>
 where
     Upstream: Signal,
@@ -311,6 +455,19 @@ where
     <<Upstream as Signal>::Item as ops::Not>::Output: Clone,
 {
     signal: Map<Upstream, <Upstream::Item as ops::Not>::Output>,
+}
+
+impl<Upstream> Clone for Not<Upstream>
+where
+    Upstream: Signal + Clone,
+    <Upstream as Signal>::Item: ops::Not,
+    <<Upstream as Signal>::Item as ops::Not>::Output: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Not<Upstream>
@@ -327,10 +484,18 @@ where
 }
 
 /// Signal graph node which selectively terminates propagation, see [`.filter`](SignalExt::filter).
-#[derive(Clone)]
 pub struct Filter<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for Filter<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> Signal for Filter<Upstream>
@@ -351,7 +516,6 @@ struct FlattenState<T> {
 
 /// Signal graph node which forwards the upstream output [`Signal`]'s output, see
 /// [`.flatten`](SignalExt::flatten).
-#[derive(Clone)]
 pub struct Flatten<Upstream>
 where
     Upstream: Signal,
@@ -360,6 +524,19 @@ where
     signal: LazySignal,
     #[allow(clippy::type_complexity)]
     _marker: PhantomData<fn() -> (Upstream, Upstream::Item)>,
+}
+
+impl<Upstream> Clone for Flatten<Upstream>
+where
+    Upstream: Signal,
+    Upstream::Item: Signal,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> Signal for Flatten<Upstream>
@@ -377,7 +554,6 @@ where
 
 /// Signal graph node which maps its upstream to a [`Signal`], forwarding its output, see
 /// [`.switch`](SignalExt::switch).
-#[derive(Clone)]
 pub struct Switch<Upstream, Other>
 where
     Upstream: Signal,
@@ -385,6 +561,19 @@ where
     Other::Item: Clone,
 {
     signal: Flatten<Map<Upstream, Other>>,
+}
+
+impl<Upstream, Other> Clone for Switch<Upstream, Other>
+where
+    Upstream: Signal,
+    Other: Signal,
+    Other::Item: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream, Other> Signal for Switch<Upstream, Other>
@@ -402,7 +591,6 @@ where
 
 /// Signal graph node which maps its upstream to a [`SignalVec`], see
 /// [`.switch_signal_vec`](SignalExt::switch_signal_vec).
-#[derive(Clone)]
 pub struct SwitchSignalVec<Upstream, Switched>
 where
     Upstream: Signal,
@@ -410,6 +598,19 @@ where
 {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, Switched)>,
+}
+
+impl<Upstream, Switched> Clone for SwitchSignalVec<Upstream, Switched>
+where
+    Upstream: Signal,
+    Switched: SignalVec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, Switched> SignalVec for SwitchSignalVec<Upstream, Switched>
@@ -427,7 +628,6 @@ where
 
 /// Signal graph node which maps its upstream to a [`SignalMap`], see
 /// [`.switch_signal_map`](SignalExt::switch_signal_map).
-#[derive(Clone)]
 pub struct SwitchSignalMap<Upstream, Switched>
 where
     Upstream: Signal,
@@ -435,6 +635,19 @@ where
 {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, Switched)>,
+}
+
+impl<Upstream, Switched> Clone for SwitchSignalMap<Upstream, Switched>
+where
+    Upstream: Signal,
+    Switched: SignalMap,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, Switched> SignalMap for SwitchSignalMap<Upstream, Switched>
@@ -456,12 +669,22 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "time")] {
         /// Signal graph node which delays the propagation of subsequent upstream outputs, see
         /// [`.throttle`](SignalExt::throttle).
-        #[derive(Clone)]
         pub struct Throttle<Upstream>
         where
             Upstream: Signal,
         {
             signal: Map<Upstream, Upstream::Item>,
+        }
+
+        impl<Upstream> Clone for Throttle<Upstream>
+        where
+            Upstream: Signal + Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    signal: self.signal.clone(),
+                }
+            }
         }
 
         impl<Upstream> Signal for Throttle<Upstream>
@@ -479,10 +702,18 @@ cfg_if::cfg_if! {
 
 /// Signal graph node whose [`System`] depends on its upstream [`bool`] value, see
 /// [`.map_bool`](SignalExt::map_bool).
-#[derive(Clone)]
 pub struct MapBool<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapBool<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapBool<Upstream, O>
@@ -499,10 +730,18 @@ where
 
 /// Signal graph node whose system only runs when its upstream outputs [`true`], see
 /// [`.map_true`](SignalExt::map_true).
-#[derive(Clone)]
 pub struct MapTrue<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapTrue<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapTrue<Upstream, O>
@@ -519,10 +758,18 @@ where
 
 /// Signal graph node whose system only runs when its upstream outputs [`false`], see
 /// [`.map_false`](SignalExt::map_false).
-#[derive(Clone)]
 pub struct MapFalse<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapFalse<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapFalse<Upstream, O>
@@ -539,10 +786,18 @@ where
 
 /// Signal graph node whose [`System`] depends on its upstream [`Option`] value, see
 /// [`.map_option`](SignalExt::map_option).
-#[derive(Clone)]
 pub struct MapOption<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapOption<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapOption<Upstream, O>
@@ -559,10 +814,18 @@ where
 
 /// Signal graph node whose system only runs when its upstream outputs [`Some`], see
 /// [`.map_some`](SignalExt::map_some).
-#[derive(Clone)]
 pub struct MapSome<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapSome<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapSome<Upstream, O>
@@ -579,10 +842,18 @@ where
 
 /// Signal graph node whose system only runs when its upstream outputs [`None`], see
 /// [`.map_none`](SignalExt::map_none).
-#[derive(Clone)]
 pub struct MapNone<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapNone<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for MapNone<Upstream, O>
@@ -599,13 +870,24 @@ where
 
 /// Signal graph node which maps its upstream [`Vec`] to a [`SignalVec`], see
 /// [`.to_signal_vec`](SignalExt::to_signal_vec).
-#[derive(Clone)]
 pub struct ToSignalVec<Upstream>
 where
     Upstream: Signal,
 {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for ToSignalVec<Upstream>
+where
+    Upstream: Signal,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, T> SignalVec for ToSignalVec<Upstream>
@@ -623,12 +905,22 @@ where
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         /// Signal graph node that debug logs its upstream's output, see [`.debug`](SignalExt::debug).
-        #[derive(Clone)]
         pub struct Debug<Upstream>
         where
             Upstream: Signal,
         {
             signal: Map<Upstream, Upstream::Item>,
+        }
+
+        impl<Upstream> Clone for Debug<Upstream>
+        where
+            Upstream: Signal + Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    signal: self.signal.clone(),
+                }
+            }
         }
 
         impl<Upstream> Signal for Debug<Upstream>
@@ -822,7 +1114,6 @@ where
 /// although note that all [`Signal`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
-#[derive(Clone)]
 #[allow(missing_docs)]
 pub enum SignalEither<L, R>
 where
@@ -831,6 +1122,19 @@ where
 {
     Left(L),
     Right(R),
+}
+
+impl<L, R> Clone for SignalEither<L, R>
+where
+    L: Signal + Clone,
+    R: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Left(left) => Self::Left(left.clone()),
+            Self::Right(right) => Self::Right(right.clone()),
+        }
+    }
 }
 
 impl<T, L: Signal<Item = T>, R: Signal<Item = T>> Signal for SignalEither<L, R>
@@ -1178,6 +1482,44 @@ pub trait SignalExt: Signal {
         }
     }
 
+    /// Outputs up to the first `count` values from this [`Signal`], and then terminates for all
+    /// subsequent frames.
+    ///
+    /// After `count` values are emitted, this signal will stop propagating any further values.
+    ///
+    /// If `count` is `0`, this will never propagate any values.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// SignalBuilder::from_system({
+    ///     move |_: In<()>, mut state: Local<usize>| {
+    ///         *state += 1;
+    ///         *state
+    ///     }
+    /// })
+    /// .take(2); // outputs `1`, `2`, then terminates forever
+    /// ```
+    fn take(self, count: usize) -> Take<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + 'static,
+    {
+        Take {
+            signal: self.map(move |In(item): In<Self::Item>, mut emitted: Local<usize>| {
+                if *emitted >= count {
+                    None
+                } else {
+                    *emitted += 1;
+                    Some(item)
+                }
+            }),
+        }
+    }
+
     /// Outputs this [`Signal`]'s first value and then terminates for all subsequent frames.
     ///
     /// After the first value is emitted, this signal will stop propagating any further values.
@@ -1201,16 +1543,7 @@ pub trait SignalExt: Signal {
         Self: Sized,
         Self::Item: Clone + 'static,
     {
-        First {
-            signal: self.map(|In(item): In<Self::Item>, mut first: Local<bool>| {
-                if *first {
-                    None
-                } else {
-                    *first = true;
-                    Some(item)
-                }
-            }),
-        }
+        First { signal: self.take(1) }
     }
 
     /// Output this [`Signal`]'s equality with a fixed value.
@@ -2873,7 +3206,7 @@ mod tests {
         graph::{LazySignalHolder, SignalRegistrationCount},
         prelude::{IntoSignalVecEither, SignalVecExt, clone},
         signal::{SignalBuilder, SignalExt, Upstream},
-        signal_vec::{MutableVecBuilder, VecDiff},
+        signal_vec::{MutableVec, MutableVecBuilder, VecDiff},
         utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
@@ -3315,6 +3648,36 @@ mod tests {
     }
 
     #[test]
+    fn test_take() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+        let counter = Arc::new(Mutex::new(0));
+        let values = Arc::new(Mutex::new(vec![10, 20, 30]));
+        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+            let mut values_lock = values.lock().unwrap();
+            if values_lock.is_empty() {
+                None
+            } else {
+                Some(values_lock.remove(0))
+            }
+        }))
+        .take(2)
+        .map(clone!((counter) move |In(val): In<i32>| {
+            *counter.lock().unwrap() += 1;
+            val
+        }))
+        .map(capture_output)
+        .register(app.world_mut());
+        app.update();
+        app.update();
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(20));
+        assert_eq!(*counter.lock().unwrap(), 2);
+        assert_eq!(values.lock().unwrap().len(), 0);
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn test_combine() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
@@ -3605,6 +3968,110 @@ mod tests {
     }
 
     #[test]
+    fn test_switch_signal_vec_initially_empty() {
+        {
+            // --- Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<i32>>();
+
+            // Start with an EMPTY list - this tests the `was_initially_empty` code path
+            let list_a: MutableVec<i32> = app.world_mut().into();
+            let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            let signal_a = list_a.signal_vec().map_in(identity);
+            let signal_b = list_b.signal_vec();
+
+            // A resource to control which list is active.
+            #[derive(Resource, Clone, Copy, PartialEq, Debug)]
+            enum ListSelector {
+                A,
+                B,
+            }
+
+            app.insert_resource(ListSelector::A);
+
+            // The control signal reads the resource.
+            let control_signal =
+                SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
+
+            // The signal chain under test.
+            let switched_signal = control_signal.dedupe().switch_signal_vec(
+                clone!((signal_a, signal_b) move |In(selector): In<ListSelector>| match selector {
+                    ListSelector::A => signal_a.clone().left_either(),
+                    ListSelector::B => signal_b.clone().right_either(),
+                }),
+            );
+
+            // Register the final signal to a capture system.
+            let handle = switched_signal.for_each(capture_vec_output).register(app.world_mut());
+
+            // --- Test 1: Initial State with Empty List ---
+            // The first update should select List A which is empty.
+            // With an empty initial list, no Replace diff should be emitted.
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Initial update with empty list should produce no diffs, got: {:?}",
+                diffs
+            );
+
+            // --- Test 2: Push to Empty Active List ---
+            // A push to the initially empty List A should be forwarded as a Push.
+            list_a.write(app.world_mut()).push(10);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Push to active list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push { value: 10 },
+                "Should forward Push diff from List A."
+            );
+
+            // --- Test 3: Another Push ---
+            list_a.write(app.world_mut()).push(20);
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Second push should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Push { value: 20 },
+                "Should forward second Push diff from List A."
+            );
+
+            // --- Test 4: Switch to List B (non-empty) ---
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::B;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching to non-empty list should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![100, 200, 300]
+                },
+                "Switch should emit a Replace with List B's contents."
+            );
+
+            // --- Test 5: Switch Back to List A (now non-empty) ---
+            // When switching back, List A now has items, so it should emit Replace.
+            *app.world_mut().resource_mut::<ListSelector>() = ListSelector::A;
+            app.update();
+            let diffs = get_and_clear_vec_output::<i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
+            assert_eq!(
+                diffs[0],
+                VecDiff::Replace {
+                    values: vec![10, 20],
+                },
+                "Switching back should Replace with the current state of List A."
+            );
+
+            handle.cleanup(app.world_mut());
+        }
+
+        crate::signal_vec::tests::cleanup(true);
+    }
+
+    #[test]
     fn test_switch_signal_map() {
         use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMapBuilder, SignalMapExt};
 
@@ -3738,6 +4205,128 @@ mod tests {
                 matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 10), (2, 20), (3, 30), (4, 99)]),
                 "Switching back should Replace with the current state of Map A."
             );
+            handle.cleanup(app.world_mut());
+        }
+
+        crate::signal_map::tests::cleanup(true);
+    }
+
+    #[test]
+    fn test_switch_signal_map_initially_empty() {
+        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMap, MutableBTreeMapBuilder, SignalMapExt};
+
+        #[derive(Resource, Default, core::fmt::Debug)]
+        struct SignalMapOutput<K, V>(Vec<MapDiff<K, V>>)
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug;
+
+        fn capture_map_output<K, V>(In(diffs): In<Vec<MapDiff<K, V>>>, mut output: ResMut<SignalMapOutput<K, V>>)
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug,
+        {
+            output.0.extend(diffs);
+        }
+
+        fn get_and_clear_map_output<K, V>(world: &mut World) -> Vec<MapDiff<K, V>>
+        where
+            K: SSs + Clone + core::fmt::Debug,
+            V: SSs + Clone + core::fmt::Debug,
+        {
+            world
+                .get_resource_mut::<SignalMapOutput<K, V>>()
+                .map(|mut res| core::mem::take(&mut res.0))
+                .unwrap_or_default()
+        }
+
+        {
+            // --- Setup ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalMapOutput<i32, i32>>();
+
+            // Start with an EMPTY map - this tests the `was_initially_empty` code path
+            let map_a: MutableBTreeMap<i32, i32> = app.world_mut().into();
+            let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(app.world_mut());
+            let signal_a = map_a.signal_map().map_value(|In(x): In<i32>| x);
+            let signal_b = map_b.signal_map();
+
+            // A resource to control which map is active.
+            #[derive(Resource, Clone, Copy, PartialEq, Debug)]
+            enum MapSelector {
+                A,
+                B,
+            }
+
+            app.insert_resource(MapSelector::A);
+
+            // The control signal reads the resource.
+            let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
+
+            // The signal chain under test.
+            let switched_signal = control_signal.dedupe().switch_signal_map(
+                clone!((signal_a, signal_b) move |In(selector): In<MapSelector>| match selector {
+                    MapSelector::A => signal_a.clone().left_either(),
+                    MapSelector::B => signal_b.clone().right_either(),
+                }),
+            );
+
+            // Register the final signal to a capture system.
+            let handle = switched_signal.for_each(capture_map_output).register(app.world_mut());
+
+            // --- Test 1: Initial State with Empty Map ---
+            // The first update should select Map A which is empty.
+            // With an empty initial map, no Replace diff should be emitted.
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert!(
+                diffs.is_empty(),
+                "Initial update with empty map should produce no diffs, got: {:?}",
+                diffs
+            );
+
+            // --- Test 2: Insert to Empty Active Map ---
+            // An insert to the initially empty Map A should be forwarded as an Insert.
+            map_a.write(app.world_mut()).insert(1, 10);
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Insert to active map should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Insert { key: 1, value: 10 }),
+                "Should forward Insert diff from Map A."
+            );
+
+            // --- Test 3: Another Insert ---
+            map_a.write(app.world_mut()).insert(2, 20);
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Second insert should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Insert { key: 2, value: 20 }),
+                "Should forward second Insert diff from Map A."
+            );
+
+            // --- Test 4: Switch to Map B (non-empty) ---
+            *app.world_mut().resource_mut::<MapSelector>() = MapSelector::B;
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching to non-empty map should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 100), (2, 200), (3, 300)]),
+                "Switch should emit a Replace with Map B's contents."
+            );
+
+            // --- Test 5: Switch Back to Map A (now non-empty) ---
+            // When switching back, Map A now has items, so it should emit Replace.
+            *app.world_mut().resource_mut::<MapSelector>() = MapSelector::A;
+            app.update();
+            let diffs = get_and_clear_map_output::<i32, i32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Switching back to A should produce one diff.");
+            assert!(
+                matches!(&diffs[0], MapDiff::Replace { entries } if entries == &vec![(1, 10), (2, 20)]),
+                "Switching back should Replace with the current state of Map A."
+            );
+
             handle.cleanup(app.world_mut());
         }
 

@@ -11,7 +11,7 @@ pub use enclose::enclose as clone;
 #[derive(Default, Clone)]
 pub struct LazyEntity(Arc<OnceLock<Entity>>);
 
-const LAZY_ENTITY_GET_ERROR: &str = "EntityHolder does not contain an Entity";
+const LAZY_ENTITY_GET_ERROR: &str = "LazyEntity does not contain an Entity";
 
 impl LazyEntity {
     #[allow(missing_docs)]
@@ -20,11 +20,13 @@ impl LazyEntity {
     }
 
     /// Set the [`Entity`], panicking if it was already set.
+    #[track_caller]
     pub fn set(&self, entity: Entity) {
-        self.0.set(entity).expect("EntityHolder already contains an Entity");
+        self.0.set(entity).expect("LazyEntity already contains an Entity");
     }
 
     /// Get the [`Entity`], panicking if it was not set.
+    #[track_caller]
     pub fn get(&self) -> Entity {
         self.0.get().copied().expect(LAZY_ENTITY_GET_ERROR)
     }
@@ -33,6 +35,7 @@ impl LazyEntity {
 impl Deref for LazyEntity {
     type Target = Entity;
 
+    #[track_caller]
     fn deref(&self) -> &Self::Target {
         self.0.get().expect(LAZY_ENTITY_GET_ERROR)
     }

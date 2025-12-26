@@ -18,7 +18,7 @@ use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
-use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
+use core::{cmp::Ordering, fmt, marker::PhantomData, ops::Deref, sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering}};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableVec`] that are piped to downstream
@@ -173,10 +173,18 @@ impl<T: 'static> SignalVec for Box<dyn SignalVecDynClone<Item = T> + Send + Sync
 
 /// Signal graph node with no upstreams which forwards [`Vec<VecDiff<T>>`]s flushed from some source
 /// [`MutableVec<T>`], see [`MutableVec::signal_vec`].
-#[derive(Clone)]
 pub struct Source<T> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Source<T> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<T> SignalVec for Source<T>
@@ -192,11 +200,23 @@ where
 
 /// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<VecDiff>`]s of its
 /// upstream, see [`.for_each`](SignalVecExt::for_each).
-#[derive(Clone)]
 pub struct ForEach<Upstream, O> {
     upstream: Upstream,
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
+}
+
+impl<Upstream, O> Clone for ForEach<Upstream, O>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            upstream: self.upstream.clone(),
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for ForEach<Upstream, O>
@@ -216,10 +236,18 @@ where
 
 /// Signal graph node which applies a [`System`] to each [`Item`](SignalVec::Item) of its upstream,
 /// see [`.map`](SignalVecExt::map).
-#[derive(Clone)]
 pub struct Map<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for Map<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> SignalVec for Map<Upstream, O>
@@ -240,10 +268,18 @@ struct ItemIndex(usize);
 /// Signal graph node which applies a [`System`] to each [`Item`](SignalVec::Item) of its upstream,
 /// forwarding the output of each resulting [`Signal`], see
 /// [`.map_signal`](SignalVecExt::map_signal).
-#[derive(Clone)]
 pub struct MapSignal<Upstream, S: Signal> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, S)>,
+}
+
+impl<Upstream, S: Signal> Clone for MapSignal<Upstream, S> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, S: Signal> SignalVec for MapSignal<Upstream, S>
@@ -263,17 +299,17 @@ fn find_index<'a>(indices: impl Iterator<Item = &'a bool>, index: usize) -> usiz
     indices.take(index).filter(|x| **x).count()
 }
 
-fn filter_helper<T, O, O2>(
+/// Helper for `filter` - clones input to pass to system, returns original if predicate passes.
+#[track_caller]
+fn filter_helper<T>(
     world: &mut World,
     diffs: Vec<VecDiff<T::Inner<'static>>>,
-    system: SystemId<T, O>,
-    f: impl Fn(T::Inner<'static>, O) -> Option<O2>,
+    system: SystemId<T, bool>,
     indices: &mut Vec<bool>,
-) -> Option<Vec<VecDiff<O2>>>
+) -> Option<Vec<VecDiff<T::Inner<'static>>>>
 where
     T: SystemInput + 'static,
     T::Inner<'static>: Clone,
-    O: 'static,
 {
     let mut output = vec![];
     for diff in diffs {
@@ -282,23 +318,21 @@ where
                 *indices = Vec::with_capacity(values.len());
                 let mut output = Vec::with_capacity(values.len());
                 for input in values {
-                    let value = world
+                    let include = world
                         .run_system_with(system, input.clone())
-                        .ok()
-                        .and_then(|output| f(input, output));
-                    indices.push(value.is_some());
-                    if let Some(value) = value {
-                        output.push(value);
+                        .unwrap_or(false);
+                    indices.push(include);
+                    if include {
+                        output.push(input);
                     }
                 }
                 Some(VecDiff::Replace { values: output })
             }
             VecDiff::InsertAt { index, value } => {
-                if let Some(value) = world
+                let include = world
                     .run_system_with(system, value.clone())
-                    .ok()
-                    .and_then(|output| f(value, output))
-                {
+                    .unwrap_or(false);
+                if include {
                     indices.insert(index, true);
                     Some(VecDiff::InsertAt {
                         index: find_index(indices.iter(), index),
@@ -310,11 +344,10 @@ where
                 }
             }
             VecDiff::UpdateAt { index, value } => {
-                if let Some(value) = world
+                let include = world
                     .run_system_with(system, value.clone())
-                    .ok()
-                    .and_then(|output| f(value, output))
-                {
+                    .unwrap_or(false);
+                if include {
                     if indices[index] {
                         Some(VecDiff::UpdateAt {
                             index: find_index(indices.iter(), index),
@@ -365,11 +398,128 @@ where
                 }
             }
             VecDiff::Push { value } => {
-                if let Some(value) = world
+                let include = world
                     .run_system_with(system, value.clone())
-                    .ok()
-                    .and_then(|output| f(value, output))
-                {
+                    .unwrap_or(false);
+                if include {
+                    indices.push(true);
+                    Some(VecDiff::Push { value })
+                } else {
+                    indices.push(false);
+                    None
+                }
+            }
+            VecDiff::Pop => {
+                if indices.pop().expect("can't pop from empty vec") {
+                    Some(VecDiff::Pop)
+                } else {
+                    None
+                }
+            }
+            VecDiff::Clear => {
+                indices.clear();
+                Some(VecDiff::Clear)
+            }
+        };
+        if let Some(diff) = diff_option {
+            output.push(diff);
+        }
+    }
+    if output.is_empty() { None } else { Some(output) }
+}
+
+/// Helper for `filter_map` - does NOT clone input, system takes ownership and returns mapped value.
+#[track_caller]
+fn filter_map_helper<T, O>(
+    world: &mut World,
+    diffs: Vec<VecDiff<T::Inner<'static>>>,
+    system: SystemId<T, Option<O>>,
+    indices: &mut Vec<bool>,
+) -> Option<Vec<VecDiff<O>>>
+where
+    T: SystemInput + 'static,
+    O: 'static,
+{
+    let mut output = vec![];
+    for diff in diffs {
+        let diff_option = match diff {
+            VecDiff::Replace { values } => {
+                *indices = Vec::with_capacity(values.len());
+                let mut output = Vec::with_capacity(values.len());
+                for input in values {
+                    let mapped = world.run_system_with(system, input).ok().flatten();
+                    indices.push(mapped.is_some());
+                    if let Some(value) = mapped {
+                        output.push(value);
+                    }
+                }
+                Some(VecDiff::Replace { values: output })
+            }
+            VecDiff::InsertAt { index, value } => {
+                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
+                    indices.insert(index, true);
+                    Some(VecDiff::InsertAt {
+                        index: find_index(indices.iter(), index),
+                        value,
+                    })
+                } else {
+                    indices.insert(index, false);
+                    None
+                }
+            }
+            VecDiff::UpdateAt { index, value } => {
+                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
+                    if indices[index] {
+                        Some(VecDiff::UpdateAt {
+                            index: find_index(indices.iter(), index),
+                            value,
+                        })
+                    } else {
+                        indices[index] = true;
+                        Some(VecDiff::InsertAt {
+                            index: find_index(indices.iter(), index),
+                            value,
+                        })
+                    }
+                } else if indices[index] {
+                    indices[index] = false;
+                    Some(VecDiff::RemoveAt {
+                        index: find_index(indices.iter(), index),
+                    })
+                } else {
+                    None
+                }
+            }
+            VecDiff::Move { old_index, new_index } => {
+                // Determine if the item being moved is part of the filtered set.
+                let was_included = indices[old_index];
+
+                // Calculate the filtered old and new indices BEFORE and AFTER mutating `indices`.
+                let filtered_old_index = find_index(indices.iter(), old_index);
+                let temp_val = indices.remove(old_index);
+                indices.insert(new_index, temp_val);
+                let filtered_new_index = find_index(indices.iter(), new_index);
+
+                if was_included {
+                    Some(VecDiff::Move {
+                        old_index: filtered_old_index,
+                        new_index: filtered_new_index,
+                    })
+                } else {
+                    None
+                }
+            }
+            VecDiff::RemoveAt { index } => {
+                if indices.remove(index) {
+                    Some(VecDiff::RemoveAt {
+                        index: find_index(indices.iter(), index),
+                    })
+                } else {
+                    None
+                }
+            }
+            VecDiff::Push { value } => {
+                if let Some(value) = world.run_system_with(system, value).ok().flatten() {
                     indices.push(true);
                     Some(VecDiff::Push { value })
                 } else {
@@ -398,10 +548,18 @@ where
 
 /// Signal graph node which selectively forwards upstream [`Item`](SignalVec::Item)s, see
 /// [`.filter`](SignalVecExt::filter).
-#[derive(Clone)]
 pub struct Filter<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for Filter<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for Filter<Upstream>
@@ -417,13 +575,24 @@ where
 
 /// Signal graph node which transforms and selectively forwards upstream [`Item`](SignalVec::Item)s,
 /// see [`.filter_map`](SignalVecExt::filter_map).
-#[derive(Clone)]
 pub struct FilterMap<Upstream, O>
 where
     Upstream: SignalVec,
 {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for FilterMap<Upstream, O>
+where
+    Upstream: SignalVec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> SignalVec for FilterMap<Upstream, O>
@@ -543,10 +712,18 @@ fn spawn_filter_signal<T: Clone + SSs>(
 
 /// Signal graph node which selectively forwards upstream [`Item`](SignalVec::Item)s depending on a
 /// [`Signal<Item = bool>`], see [`.filter_signal`](SignalVecExt::filter_signal).
-#[derive(Clone)]
 pub struct FilterSignal<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for FilterSignal<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for FilterSignal<Upstream>
@@ -569,7 +746,6 @@ struct EnumerateState {
 
 /// Signal graph node which prepends an index signal to each upstream [`Item`](SignalVec::Item), see
 /// [`.enumerate`](SignalVecExt::enumerate).
-#[derive(Clone)]
 pub struct Enumerate<Upstream>
 where
     Upstream: SignalVec,
@@ -577,6 +753,18 @@ where
     signal: LazySignal,
     #[allow(clippy::type_complexity)]
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for Enumerate<Upstream>
+where
+    Upstream: SignalVec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for Enumerate<Upstream>
@@ -592,12 +780,22 @@ where
 
 /// Signal graph node which collects upstream [`Item`](SignalVec::Item)s into a single [`Vec`], see
 /// [`.to_signal`](SignalVecExt::to_signal).
-#[derive(Clone)]
 pub struct ToSignal<Upstream>
 where
     Upstream: SignalVec,
 {
     signal: ForEach<Upstream, Vec<Upstream::Item>>,
+}
+
+impl<Upstream> Clone for ToSignal<Upstream>
+where
+    Upstream: SignalVec + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for ToSignal<Upstream>
@@ -613,13 +811,24 @@ where
 
 /// Signal graph node which outputs whether its upstream is populated, see
 /// [`.is_empty`](SignalVecExt::is_empty).
-#[derive(Clone)]
 pub struct IsEmpty<Upstream>
 where
     Upstream: SignalVec,
     Upstream::Item: Clone,
 {
     signal: super::signal::Map<ToSignal<Upstream>, bool>,
+}
+
+impl<Upstream> Clone for IsEmpty<Upstream>
+where
+    Upstream: SignalVec + Clone,
+    Upstream::Item: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for IsEmpty<Upstream>
@@ -635,13 +844,24 @@ where
 }
 
 /// Signal graph node which outputs its upstream's length, see [`.len`](SignalVecExt::len).
-#[derive(Clone)]
 pub struct Len<Upstream>
 where
     Upstream: SignalVec,
     Upstream::Item: Clone,
 {
     signal: super::signal::Map<ToSignal<Upstream>, usize>,
+}
+
+impl<Upstream> Clone for Len<Upstream>
+where
+    Upstream: SignalVec + Clone,
+    Upstream::Item: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Len<Upstream>
@@ -657,12 +877,22 @@ where
 }
 
 /// Signal graph node which outputs its upstream's sum, see [`.sum`](SignalVecExt::sum).
-#[derive(Clone)]
 pub struct Sum<Upstream>
 where
     Upstream: SignalVec,
 {
     signal: super::signal::Map<ToSignal<Upstream>, Upstream::Item>,
+}
+
+impl<Upstream> Clone for Sum<Upstream>
+where
+    Upstream: SignalVec + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Sum<Upstream>
@@ -676,14 +906,24 @@ where
     }
 }
 
-#[derive(Clone)]
 enum LrDiff<T> {
     Left(Vec<VecDiff<T>>),
     Right(Vec<VecDiff<T>>),
 }
 
+impl<T> Clone for LrDiff<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Left(left) => Self::Left(left.clone()),
+            Self::Right(right) => Self::Right(right.clone()),
+        }
+    }
+}
+
 /// Signal graph node which concatenates its upstreams, see [`.chain`](SignalVecExt::chain).
-#[derive(Clone)]
 pub struct Chain<Left, Right>
 where
     Left: SignalVec,
@@ -692,6 +932,20 @@ where
     left_wrapper: ForEach<Left, LrDiff<Left::Item>>,
     right_wrapper: ForEach<Right, LrDiff<Left::Item>>,
     signal: LazySignal,
+}
+
+impl<Left, Right> Clone for Chain<Left, Right>
+where
+    Left: SignalVec + Clone,
+    Right: SignalVec<Item = Left::Item> + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            left_wrapper: self.left_wrapper.clone(),
+            right_wrapper: self.right_wrapper.clone(),
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Left, Right> SignalVec for Chain<Left, Right>
@@ -713,12 +967,22 @@ where
 
 /// Signal graph node that places a separator between each upstream [`Item`](SignalVec::Item), see
 /// [`.intersperse`](SignalVecExt::intersperse).
-#[derive(Clone)]
 pub struct Intersperse<Upstream>
 where
     Upstream: SignalVec,
 {
     signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+}
+
+impl<Upstream> Clone for Intersperse<Upstream>
+where
+    Upstream: SignalVec + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
 }
 
 impl<Upstream> SignalVec for Intersperse<Upstream>
@@ -758,10 +1022,18 @@ impl<T> Default for IntersperseState<T> {
 
 /// Signal graph node that places a [`System`]-dependent separator between each upstream
 /// [`Item`](SignalVec::Item), see [`.intersperse_with`](SignalVecExt::intersperse_with).
-#[derive(Clone)]
 pub struct IntersperseWith<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for IntersperseWith<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for IntersperseWith<Upstream>
@@ -777,10 +1049,18 @@ where
 
 /// Signal graph node that sorts each upstream [`Item`](SignalVec::Item) based on a comparison
 /// [`System`], see [`.sort_by`](SignalVecExt::sort_by).
-#[derive(Clone)]
 pub struct SortBy<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for SortBy<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for SortBy<Upstream>
@@ -796,10 +1076,18 @@ where
 
 /// Signal graph node that sorts each upstream [`Item`](SignalVec::Item) based on a key extraction
 /// [`System`], see [`.sort_by_key`](SignalVecExt::sort_by_key).
-#[derive(Clone)]
 pub struct SortByKey<Upstream> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> Upstream>,
+}
+
+impl<Upstream> Clone for SortByKey<Upstream> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream> SignalVec for SortByKey<Upstream>
@@ -813,7 +1101,7 @@ where
     }
 }
 
-/* #[derive(Clone)]
+/*
 struct FlattenItem<O: SSs + Clone> {
     processor_handle: SignalHandle,
     values: Vec<O>,
@@ -994,12 +1282,22 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         /// Signal graph node that debug logs its upstream's "raw" [`Vec<VecDiff>`]s, see
         /// [`.debug`](SignalVecExt::debug).
-        #[derive(Clone)]
         pub struct Debug<Upstream>
         where
             Upstream: SignalVec,
         {
             signal: ForEach<Upstream, Vec<VecDiff<Upstream::Item>>>,
+        }
+
+        impl<Upstream> Clone for Debug<Upstream>
+        where
+            Upstream: SignalVec + Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    signal: self.signal.clone(),
+                }
+            }
         }
 
         impl<Upstream> SignalVec for Debug<Upstream>
@@ -1019,7 +1317,6 @@ cfg_if::cfg_if! {
 /// although note that all [`SignalVec`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
-#[derive(Clone)]
 #[allow(missing_docs)]
 pub enum SignalVecEither<L, R>
 where
@@ -1028,6 +1325,19 @@ where
 {
     Left(L),
     Right(R),
+}
+
+impl<L, R> Clone for SignalVecEither<L, R>
+where
+    L: SignalVec + Clone,
+    R: SignalVec + Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Left(left) => Self::Left(left.clone()),
+            Self::Right(right) => Self::Right(right.clone()),
+        }
+    }
 }
 
 impl<T, L: SignalVec<Item = T>, R: SignalVec<Item = T>> SignalVec for SignalVecEither<L, R>
@@ -1140,6 +1450,7 @@ pub trait SignalVecExt: SignalVec {
     /// [`.for_each`](SignalVecExt::for_each), returns a [`Signal`], not a [`SignalVec`], since the
     /// output type need not be an [`Option<Vec<VecDiff>>`]. If the [`System`] logic is infallible,
     /// wrapping the result in an option is unnecessary.
+    #[track_caller]
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
@@ -1310,7 +1621,7 @@ pub trait SignalVecExt: SignalVec {
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
+        Self::Item: SSs,
         S: Signal + 'static + Clone,
         S::Item: Clone + Send + Sync,
         F: IntoSystem<In<Self::Item>, S, M> + SSs,
@@ -1593,15 +1904,7 @@ pub trait SignalVecExt: SignalVec {
             let SignalHandle(signal) = self
                 .for_each::<Vec<VecDiff<Self::Item>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World, mut indices: Local<Vec<bool>>| {
-                        filter_helper(
-                            world,
-                            diffs,
-                            system,
-                            |item, include| {
-                                if include { Some(item) } else { None }
-                            },
-                            &mut indices,
-                        )
+                        filter_helper(world, diffs, system, &mut indices)
                     },
                 )
                 .register(world);
@@ -1631,10 +1934,11 @@ pub trait SignalVecExt: SignalVec {
     ///     .signal_vec()
     ///     .filter_map(|In(s): In<&'static str>| s.parse::<u32>().ok()); // outputs `SignalVec -> [1, 5]`
     /// ```
+    #[track_caller]
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, O>
     where
         Self: Sized,
-        Self::Item: Clone + 'static,
+        Self::Item: 'static,
         O: Clone + 'static,
         F: IntoSystem<In<Self::Item>, Option<O>, M> + SSs,
     {
@@ -1643,7 +1947,7 @@ pub trait SignalVecExt: SignalVec {
             let SignalHandle(signal) = self
                 .for_each::<Vec<VecDiff<O>>, _, _, _>(
                     move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World, mut indices: Local<Vec<bool>>| {
-                        filter_helper(world, diffs, system, |_, mapped| mapped, &mut indices)
+                        filter_map_helper(world, diffs, system, &mut indices)
                     },
                 )
                 .register(world);
@@ -3490,6 +3794,7 @@ pub trait SignalVecExt: SignalVec {
     } */
 
     #[cfg(feature = "tracing")]
+    #[track_caller]
     /// Adds debug logging to this [`SignalVec`]'s raw [`VecDiff`] outputs.
     ///
     /// # Example
@@ -3747,7 +4052,7 @@ pub struct MutableVec<T> {
 
 impl<T> Clone for MutableVec<T> {
     fn clone(&self) -> Self {
-        self.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.references.fetch_add(1, AtomicOrdering::SeqCst);
         Self {
             entity: self.entity,
             references: self.references.clone(),
@@ -3758,7 +4063,7 @@ impl<T> Clone for MutableVec<T> {
 
 impl<T> Drop for MutableVec<T> {
     fn drop(&mut self) {
-        if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+        if self.references.fetch_sub(1, AtomicOrdering::SeqCst) == 1 {
             STALE_MUTABLE_VECS.lock().unwrap().push(self.entity);
         }
     }
@@ -3797,15 +4102,26 @@ impl<T> MutableVec<T> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_vec_datas: Query<&MutableVecData<T>>| {
+            let is_first_replay = Arc::new(AtomicBool::new(true));
+            let replay_system = clone!((self_, replay_entity, is_first_replay) move |In(upstream_diffs): In<Vec<VecDiff<T>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_vec_datas: Query<&MutableVecData<T>>| {
                 if replay_onces.contains(*replay_entity) {
-                    if !was_initially_empty {
-                        let initial_vec = self_.read(&mutable_vec_datas).to_vec();
-                        Some(vec![VecDiff::Replace { values: initial_vec }])
-                    } else if upstream_diffs.is_empty() {
-                        None
+                    let first_replay = is_first_replay.swap(false, AtomicOrdering::SeqCst);
+                    if first_replay && was_initially_empty {
+                        // Initial replay with empty vec - just forward upstream diffs
+                        if upstream_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(upstream_diffs)
+                        }
                     } else {
-                        Some(upstream_diffs)
+                        // Either non-empty initial state, or subsequent replay (e.g., switch_signal_vec)
+                        // Always emit Replace with current state
+                        let current_vec = self_.read(&mutable_vec_datas).to_vec();
+                        if current_vec.is_empty() {
+                            None
+                        } else {
+                            Some(vec![VecDiff::Replace { values: current_vec }])
+                        }
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
@@ -3831,8 +4147,8 @@ impl<T> MutableVec<T> {
 }
 
 pub(crate) fn despawn_stale_mutable_vecs(world: &mut World) {
-    let mut queue = STALE_MUTABLE_VECS.lock().unwrap();
-    for entity in queue.drain(..) {
+    let queue = STALE_MUTABLE_VECS.lock().unwrap().drain(..).collect::<Vec<_>>();
+    for entity in queue {
         world.despawn(entity);
     }
 }
@@ -6568,11 +6884,19 @@ pub(crate) mod tests {
 
     /// A helper enum to represent the items in our final interspersed vector,
     /// allowing us to distinguish between original items and generated separators.
-    #[derive(Clone)]
     enum ItemOrSep {
         Item(u32),
         // The separator variant holds the *unregistered* index signal.
         Sep(crate::signal::Source<Option<usize>>),
+    }
+
+    impl Clone for ItemOrSep {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Item(i) => Self::Item(*i),
+                Self::Sep(s) => Self::Sep(s.clone()),
+            }
+        }
     }
 
     // Manual `Debug` implementation is required because `Source` does not implement it.
