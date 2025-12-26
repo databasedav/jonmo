@@ -12,6 +12,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### added
 - `SignalExt::take`
 - `track_caller` derive for panicking `LazyEntity` methods
+- warning that cloning `JonmoBuilder`s at runtime is a bug
 
 ### fixed
 
