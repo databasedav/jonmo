@@ -2,6 +2,7 @@
 use super::{
     graph::{SignalHandle, SignalHandles},
     signal::{Signal, SignalBuilder, SignalExt},
+    signal_map::{SignalMap, SignalMapExt},
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
     utils::{LazyEntity, SSs, ancestor_map},
 };
@@ -12,41 +13,11 @@ use bevy_ecs::{
     system::{IntoObserverSystem, RunSystemOnce},
     world::DeferredWorld,
 };
+use bevy_log::warn;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, Mutex},
 };
-
-fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
-    let entity = ctx.entity;
-    let fs = world
-        .get_mut::<OnDespawnCallbacks>(entity)
-        .unwrap()
-        .0
-        .drain(..)
-        .collect::<Vec<_>>();
-    for f in fs {
-        f(&mut world, entity);
-    }
-}
-
-#[allow(clippy::type_complexity)]
-#[derive(Component)]
-#[component(on_remove = on_despawn_hook)]
-struct OnDespawnCallbacks(Vec<Box<dyn FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static>>);
-
-fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
-where
-    I: IntoIterator<Item = SignalHandle>,
-{
-    if let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut existing_handles) = entity.get_mut::<SignalHandles>()
-    {
-        for handle in handles {
-            existing_handles.add(handle);
-        }
-    }
-}
 
 // TODO: the fluent interface link breaks cargo fmt ??
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of
@@ -61,11 +32,61 @@ where
 /// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html),
 /// and [haalka](https://github.com/databasedav/haalka)'s
 /// [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
-#[derive(Clone, Default)]
+///
+/// # `Clone` semantics
+///
+/// This type implements [`Clone`] **only** to satisfy trait bounds required by signal combinators.
+/// **Cloning [`JonmoBuilder`]s at runtime is a bug.** See [`JonmoBuilder::clone`] for
+/// details.
+#[derive(Default)]
 pub struct JonmoBuilder {
     #[allow(clippy::type_complexity)]
     on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
     child_block_populations: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Clone for JonmoBuilder {
+    /// # Warning
+    ///
+    /// This clone implementation exists **only** to satisfy trait bounds required by signal
+    /// combinators (e.g., [`SignalExt::map`], [`SignalVecExt::filter_map`]). **Cloning
+    /// [`JonmoBuilder`]s at runtime is a bug and will lead to unexpected behavior.**
+    ///
+    /// Clones share internal on-spawn hooks via [`Arc`]. These hooks are one-shot ([`FnOnce`])
+    /// and are consumed when the builder is spawned. Spawning one clone will affect all other
+    /// clones.
+    ///
+    /// Use factory functions instead if you need reusable UI templates:
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// fn my_widget(label: &str) -> JonmoBuilder {
+    ///     JonmoBuilder::new().insert(Name::new(label.to_string()))
+    ///     // ... other configuration
+    /// }
+    ///
+    /// // Correct: each call creates a fresh builder
+    /// let mut world = World::new();
+    /// let widget1 = my_widget("First").spawn(&mut world);
+    /// let widget2 = my_widget("Second").spawn(&mut world);
+    /// ```
+    #[track_caller]
+    fn clone(&self) -> Self {
+        warn!(
+            "Cloning `JonmoBuilder` at {} is a bug! `JonmoBuilder`'s `Clone` shares internal on-spawn \
+             hook queues via `Arc`. These hooks are one-shot (`FnOnce`) and are consumed on spawn. \
+             Spawning one clone will affect all other clones. Use factory functions instead if you \
+             need reusable UI templates.",
+            core::panic::Location::caller()
+        );
+
+        Self {
+            on_spawns: self.on_spawns.clone(),
+            child_block_populations: self.child_block_populations.clone(),
+        }
+    }
 }
 
 impl<T: Bundle> From<T> for JonmoBuilder {
@@ -100,9 +121,40 @@ impl JonmoBuilder {
         })
     }
 
-    /// Attach registered [`SignalHandle`]s to this entity for automatic cleanup on despawn.
-    pub fn hold_signals(self, handles: impl IntoIterator<Item = SignalHandle> + SSs) -> Self {
-        self.on_spawn(move |world, entity| add_handles(world, entity, handles))
+    /// Attach [`Holdable`] signals to this entity for automatic cleanup on despawn.
+    ///
+    /// Use [`.hold()`](SignalHoldExt::hold) to convert a [`Signal`], [`SignalVec`], or
+    /// [`SignalMap`] into a [`Holdable`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// #[derive(Resource, Clone)]
+    /// struct MyResource {
+    ///     value: i32,
+    /// }
+    ///
+    /// let my_signal = SignalBuilder::from_resource::<MyResource>()
+    ///     .map_in(|r: MyResource| println!("{}", r.value))
+    ///     .hold();
+    ///
+    /// let mut world = World::new();
+    /// let my_mutable_vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
+    /// let my_signal_vec = my_mutable_vec
+    ///     .signal_vec()
+    ///     .map_in(|item: i32| println!("{}", item))
+    ///     .hold();
+    ///
+    /// JonmoBuilder::new().hold_signals([my_signal, my_signal_vec]);
+    /// ```
+    pub fn hold_signals(self, holdables: impl IntoIterator<Item = Box<dyn Holdable>> + SSs) -> Self {
+        self.on_spawn(move |world, entity| {
+            let handles: Vec<_> = holdables.into_iter().map(|h| h.register_holdable(world)).collect();
+            add_handles(world, entity, handles);
+        })
     }
 
     /// Run a function with this builder's [`EntityWorldMut`].
@@ -158,6 +210,7 @@ impl JonmoBuilder {
     }
 
     /// Set the [`LazyEntity`] to this builder's [`Entity`].
+    #[track_caller]
     pub fn lazy_entity(self, entity: LazyEntity) -> Self {
         self.on_spawn(move |_, e| entity.set(e))
     }
@@ -733,6 +786,106 @@ impl JonmoBuilder {
         let entity = world.spawn_empty().id();
         self.spawn_on_entity(world, entity);
         entity
+    }
+}
+
+/// A type-erased signal that can be registered with a [`World`] at spawn time.
+///
+/// This trait enables [`JonmoBuilder::hold_signals`] to accept signals that haven't
+/// been registered yet, deferring their registration until the entity is spawned.
+///
+/// Use the [`.hold()`](SignalHoldExt::hold) extension method to convert a [`Signal`],
+/// [`SignalVec`], or [`SignalMap`] into a `Box<dyn Holdable>`.
+pub trait Holdable: Send + Sync + 'static {
+    /// Register this signal with the world and return its handle.
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle;
+}
+
+struct HoldableSignal<S>(S);
+
+impl<S: Signal + SSs> Holdable for HoldableSignal<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`Signal`] into a [`Holdable`].
+pub trait SignalHoldExt: Signal + Sized + SSs {
+    /// Convert this signal into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignal(self))
+    }
+}
+
+impl<S: Signal + Sized + SSs> SignalHoldExt for S {}
+
+struct HoldableSignalVec<S>(S);
+
+impl<S: SignalVec + SSs> Holdable for HoldableSignalVec<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`SignalVec`] into a [`Holdable`].
+pub trait SignalVecHoldExt: SignalVec + Sized + SSs {
+    /// Convert this signal vec into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignalVec(self))
+    }
+}
+
+impl<S: SignalVec + Sized + SSs> SignalVecHoldExt for S {}
+
+struct HoldableSignalMap<S>(S);
+
+impl<S: SignalMap + SSs> Holdable for HoldableSignalMap<S> {
+    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.0.register(world)
+    }
+}
+
+/// Extension trait for converting a [`SignalMap`] into a [`Holdable`].
+pub trait SignalMapHoldExt: SignalMap + Sized + SSs {
+    /// Convert this signal map into a type-erased [`Holdable`] for use with
+    /// [`JonmoBuilder::hold_signals`].
+    fn hold(self) -> Box<dyn Holdable> {
+        Box::new(HoldableSignalMap(self))
+    }
+}
+
+impl<S: SignalMap + Sized + SSs> SignalMapHoldExt for S {}
+
+fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
+    let entity = ctx.entity;
+    let fs = world
+        .get_mut::<OnDespawnCallbacks>(entity)
+        .unwrap()
+        .0
+        .drain(..)
+        .collect::<Vec<_>>();
+    for f in fs {
+        f(&mut world, entity);
+    }
+}
+
+#[allow(clippy::type_complexity)]
+#[derive(Component)]
+#[component(on_remove = on_despawn_hook)]
+struct OnDespawnCallbacks(Vec<Box<dyn FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static>>);
+
+fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
+where
+    I: IntoIterator<Item = SignalHandle>,
+{
+    if let Ok(mut entity) = world.get_entity_mut(entity)
+        && let Some(mut existing_handles) = entity.get_mut::<SignalHandles>()
+    {
+        for handle in handles {
+            existing_handles.add(handle);
+        }
     }
 }
 
@@ -3392,5 +3545,226 @@ mod tests {
         }
 
         cleanup()
+    }
+
+    #[test]
+    fn test_on_despawn() {
+        // --- 1. Setup ---
+        let mut app = create_test_app();
+
+        // A resource to track whether the on_despawn callback was executed.
+        #[derive(Resource, Default, Clone)]
+        struct DespawnTracker(Arc<Mutex<Vec<(Entity, String)>>>);
+
+        app.init_resource::<DespawnTracker>();
+
+        // --- 2. Test Basic Callback Execution ---
+        let tracker = app.world().resource::<DespawnTracker>().clone();
+        let builder1 = JonmoBuilder::new().on_despawn({
+            let tracker = tracker.clone();
+            move |_world, entity| {
+                tracker.0.lock().unwrap().push((entity, "callback1".to_string()));
+            }
+        });
+
+        let entity1 = builder1.spawn(app.world_mut());
+        app.update();
+
+        // Callback should not have been called yet.
+        assert!(
+            tracker.0.lock().unwrap().is_empty(),
+            "on_despawn callback should not run before despawn."
+        );
+
+        // Despawn the entity.
+        app.world_mut().entity_mut(entity1).despawn();
+        app.update();
+
+        // Callback should have been called with the correct entity.
+        let tracker_guard = tracker.0.lock().unwrap();
+        assert_eq!(tracker_guard.len(), 1, "Callback should have been called exactly once.");
+        assert_eq!(tracker_guard[0], (entity1, "callback1".to_string()));
+        drop(tracker_guard);
+        tracker.0.lock().unwrap().clear();
+
+        // --- 3. Test Multiple Callbacks on Same Entity ---
+        let builder2 = JonmoBuilder::new()
+            .on_despawn({
+                let tracker = tracker.clone();
+                move |_world, entity| {
+                    tracker.0.lock().unwrap().push((entity, "first".to_string()));
+                }
+            })
+            .on_despawn({
+                let tracker = tracker.clone();
+                move |_world, entity| {
+                    tracker.0.lock().unwrap().push((entity, "second".to_string()));
+                }
+            })
+            .on_despawn({
+                let tracker = tracker.clone();
+                move |_world, entity| {
+                    tracker.0.lock().unwrap().push((entity, "third".to_string()));
+                }
+            });
+
+        let entity2 = builder2.spawn(app.world_mut());
+        app.update();
+
+        // Despawn the entity.
+        app.world_mut().entity_mut(entity2).despawn();
+        app.update();
+
+        // All three callbacks should have been called.
+        let tracker_guard = tracker.0.lock().unwrap();
+        assert_eq!(tracker_guard.len(), 3, "All three callbacks should have been called.");
+        // Callbacks are stored in a Vec and called in order.
+        assert_eq!(tracker_guard[0], (entity2, "first".to_string()));
+        assert_eq!(tracker_guard[1], (entity2, "second".to_string()));
+        assert_eq!(tracker_guard[2], (entity2, "third".to_string()));
+        drop(tracker_guard);
+        tracker.0.lock().unwrap().clear();
+
+        // --- 4. Test Multi-Entity Independence ---
+        let builder3 = JonmoBuilder::new().on_despawn({
+            let tracker = tracker.clone();
+            move |_world, entity| {
+                tracker.0.lock().unwrap().push((entity, "entity3".to_string()));
+            }
+        });
+        let entity3 = builder3.spawn(app.world_mut());
+
+        let builder4 = JonmoBuilder::new().on_despawn({
+            let tracker = tracker.clone();
+            move |_world, entity| {
+                tracker.0.lock().unwrap().push((entity, "entity4".to_string()));
+            }
+        });
+        let entity4 = builder4.spawn(app.world_mut());
+        app.update();
+
+        // Despawn only entity3.
+        app.world_mut().entity_mut(entity3).despawn();
+        app.update();
+
+        // Only entity3's callback should have been called.
+        let tracker_guard = tracker.0.lock().unwrap();
+        assert_eq!(tracker_guard.len(), 1, "Only one callback should have been called.");
+        assert_eq!(tracker_guard[0], (entity3, "entity3".to_string()));
+        drop(tracker_guard);
+        tracker.0.lock().unwrap().clear();
+
+        // Now despawn entity4.
+        app.world_mut().entity_mut(entity4).despawn();
+        app.update();
+
+        // entity4's callback should have been called.
+        let tracker_guard = tracker.0.lock().unwrap();
+        assert_eq!(tracker_guard.len(), 1, "entity4's callback should have been called.");
+        assert_eq!(tracker_guard[0], (entity4, "entity4".to_string()));
+        drop(tracker_guard);
+        tracker.0.lock().unwrap().clear();
+
+        // --- 5. Test DeferredWorld Access ---
+        // Verify that the callback can actually interact with the world.
+        #[derive(Resource, Default)]
+        struct DespawnCounter(u32);
+
+        app.init_resource::<DespawnCounter>();
+
+        let builder5 = JonmoBuilder::new().on_despawn(|world, _entity| {
+            world.resource_mut::<DespawnCounter>().0 += 1;
+        });
+
+        let entity5 = builder5.spawn(app.world_mut());
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<DespawnCounter>().0,
+            0,
+            "Counter should be 0 before despawn."
+        );
+
+        app.world_mut().entity_mut(entity5).despawn();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<DespawnCounter>().0,
+            1,
+            "Counter should be incremented by on_despawn callback."
+        );
+
+        // Spawn and despawn another entity to verify counter increments again.
+        let builder6 = JonmoBuilder::new().on_despawn(|world, _entity| {
+            world.resource_mut::<DespawnCounter>().0 += 10;
+        });
+        let entity6 = builder6.spawn(app.world_mut());
+        app.update();
+        app.world_mut().entity_mut(entity6).despawn();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<DespawnCounter>().0,
+            11,
+            "Counter should be 1 + 10 = 11 after second despawn."
+        );
+
+        // --- 6. Test Combination with Other Builder Methods ---
+        // Ensure on_despawn works correctly with other builder methods like insert and child.
+        #[derive(Component)]
+        struct TestMarker;
+
+        let child_despawn_tracker = Arc::new(Mutex::new(Vec::new()));
+        let parent_despawn_tracker = Arc::new(Mutex::new(Vec::new()));
+
+        let child_tracker = child_despawn_tracker.clone();
+        let parent_tracker = parent_despawn_tracker.clone();
+
+        let builder_parent = JonmoBuilder::new()
+            .insert(TestMarker)
+            .on_despawn(move |_world, entity| {
+                parent_tracker.lock().unwrap().push(entity);
+            })
+            .child(JonmoBuilder::new().on_despawn(move |_world, entity| {
+                child_tracker.lock().unwrap().push(entity);
+            }));
+
+        let parent_entity = builder_parent.spawn(app.world_mut());
+        app.update();
+
+        // Get the child entity.
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(parent_entity)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        assert_eq!(children.len(), 1, "Parent should have one child.");
+        let child_entity = children[0];
+
+        // Despawn the parent (which should also despawn the child due to Bevy's hierarchy).
+        app.world_mut().entity_mut(parent_entity).despawn();
+        app.update();
+
+        // Both callbacks should have been called.
+        assert_eq!(
+            parent_despawn_tracker.lock().unwrap().len(),
+            1,
+            "Parent's on_despawn should have been called."
+        );
+        assert_eq!(
+            parent_despawn_tracker.lock().unwrap()[0],
+            parent_entity,
+            "Parent callback should receive parent entity."
+        );
+        assert_eq!(
+            child_despawn_tracker.lock().unwrap().len(),
+            1,
+            "Child's on_despawn should have been called when parent is despawned."
+        );
+        assert_eq!(
+            child_despawn_tracker.lock().unwrap()[0],
+            child_entity,
+            "Child callback should receive child entity."
+        );
     }
 }
