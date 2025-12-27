@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; background-color: #2b2c2f;">
+
+<head>
+    <meta charset="utf-8" />
+    <title>jonmo basic_builder_inject example</title>
+    
+    
+<script type="module">
+import init, * as bindings from './jonmo-297dbe498f1005e4.js';
+const wasm = await init({ module_or_path: './jonmo-297dbe498f1005e4_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="./jonmo-297dbe498f1005e4.js" crossorigin="anonymous" integrity="sha384-IbtL+giwnMKo1lXFZlDLlTAe6BUvrH9v3YhP0kKsjxSUhFgKKe8EZ5rQEXDgTAli"><link rel="preload" href="./jonmo-297dbe498f1005e4_bg.wasm" crossorigin="anonymous" integrity="sha384-17nGo5v5ujjuK75bg2tsURRbACJDFMGoOLApI0KagZLMlMGP9Kf5rodwGmFLTAlD" as="fetch" type="application/wasm"></head>
+
+<body style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0;">
+    <div id="game" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; display: flex;">
+        <canvas id="bevy">
+            js and canvas support is required
+        </canvas>
+    </div>
+</body>
+
+</html>

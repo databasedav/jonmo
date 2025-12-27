@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; background-color: #2b2c2f;">
+
+<head>
+    <meta charset="utf-8" />
+    <title>jonmo counter example</title>
+    
+    
+<script type="module">
+import init, * as bindings from './jonmo-9fe1a8f61fecebdb.js';
+const wasm = await init({ module_or_path: './jonmo-9fe1a8f61fecebdb_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="./jonmo-9fe1a8f61fecebdb.js" crossorigin="anonymous" integrity="sha384-RIfLqlM9y87kefT3PELs9+nfbcl3pyyfcANDG7OH8/Rea9P99zYLMZYK17iMaRMU"><link rel="preload" href="./jonmo-9fe1a8f61fecebdb_bg.wasm" crossorigin="anonymous" integrity="sha384-o3/xkGg3YnXpfiS8+NW/xK01XGFLM3yrGjwHANK0BecDkJhsYyZ/O9b8ZKf2VH+3" as="fetch" type="application/wasm"></head>
+
+<body style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0;">
+    <div id="game" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; display: flex;">
+        <canvas id="bevy">
+            js and canvas support is required
+        </canvas>
+    </div>
+</body>
+
+</html>
