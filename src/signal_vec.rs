@@ -2483,7 +2483,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// let mut world = World::new();
     /// let mut vec = MutableVecBuilder::from([1]).spawn(&mut world);
-    /// let signal = vec.signal_vec().is_empty();
+    /// let signal = vec.signal_vec().len();
     /// // `signal` outputs `1`
     /// vec.write(&mut world).pop();
     /// // `signal` outputs `0`
@@ -2508,7 +2508,7 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// let mut world = World::new();
     /// let mut vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
-    /// let signal = vec.signal_vec().is_empty();
+    /// let signal = vec.signal_vec().sum();
     /// // `signal` outputs `6`
     /// vec.write(&mut world).push(4);
     /// // `signal` outputs `10`

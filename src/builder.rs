@@ -13,7 +13,6 @@ use bevy_ecs::{
     system::{IntoObserverSystem, RunSystemOnce},
     world::DeferredWorld,
 };
-#[cfg(debug_assertions)]
 use bevy_log::warn;
 use bevy_platform::{
     prelude::*,
@@ -75,7 +74,6 @@ impl Clone for JonmoBuilder {
     /// ```
     #[track_caller]
     fn clone(&self) -> Self {
-        #[cfg(debug_assertions)]
         warn!(
             "Cloning `JonmoBuilder` at {} is a bug! `JonmoBuilder`'s `Clone` shares internal on-spawn \
              hook queues via `Arc`. These hooks are one-shot (`FnOnce`) and are consumed on spawn. \
