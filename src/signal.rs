@@ -352,11 +352,8 @@ where
     Left: Signal,
     Right: Signal,
 {
-    #[allow(clippy::type_complexity)]
-    left_wrapper: Map<Left, (Option<Left::Item>, Option<Right::Item>)>,
-    #[allow(clippy::type_complexity)]
-    right_wrapper: Map<Right, (Option<Left::Item>, Option<Right::Item>)>,
     signal: LazySignal,
+    _marker: PhantomData<fn() -> (Left, Right)>,
 }
 
 impl<Left, Right> Clone for With<Left, Right>
@@ -366,9 +363,27 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            left_wrapper: self.left_wrapper.clone(),
-            right_wrapper: self.right_wrapper.clone(),
             signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// Internal cache for [`.with`](SignalExt::with) combinator.
+///
+/// Each upstream updates its side. The gate signal runs once per frame and emits the latest
+/// combined output once both sides have produced at least one value.
+#[derive(Component)]
+struct WithCache<L, R> {
+    left: Option<L>,
+    right: Option<R>,
+}
+
+impl<L, R> Default for WithCache<L, R> {
+    fn default() -> Self {
+        Self {
+            left: None,
+            right: None,
         }
     }
 }
@@ -381,12 +396,7 @@ where
     type Item = (Left::Item, Right::Item);
 
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
-        let SignalHandle(left_upstream) = self.left_wrapper.register(world);
-        let SignalHandle(right_upstream) = self.right_wrapper.register(world);
-        let signal = self.signal.register(world);
-        pipe_signal(world, left_upstream, signal);
-        pipe_signal(world, right_upstream, signal);
-        signal.into()
+        self.signal.register(world).into()
     }
 }
 
@@ -1645,7 +1655,7 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their
+    /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their latest
     /// outputs. The resulting [`Signal`] will only output a value when both input [`Signal`]s have
     /// outputted a value.
     ///
@@ -1663,33 +1673,52 @@ pub trait SignalExt: Signal {
     where
         Self: Sized,
         Other: Signal,
-        Self::Item: Clone + Send + 'static,
-        Other::Item: Clone + Send + 'static,
+        Self::Item: Clone + SSs,
+        Other::Item: Clone + SSs,
     {
-        let left_wrapper = self.map(|In(left): In<Self::Item>| (Some(left), None::<Other::Item>));
-        let right_wrapper = other.map(|In(right): In<Other::Item>| (None::<Self::Item>, Some(right)));
-        let signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
-            #[allow(clippy::type_complexity)]
-            move |In((left_option, right_option)): In<(Option<Self::Item>, Option<Other::Item>)>,
-                  mut left_cache: Local<Option<Self::Item>>,
-                  mut right_cache: Local<Option<Other::Item>>| {
-                if left_option.is_some() {
-                    *left_cache = left_option;
+        let signal = LazySignal::new(move |world: &mut World| {
+            let with_entity = LazyEntity::new();
+
+            let left_wrapper = self.map(clone!((with_entity) move |In(left): In<Self::Item>, world: &mut World| {
+                if let Some(mut cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) {
+                    cache.left = Some(left);
                 }
-                if right_option.is_some() {
-                    *right_cache = right_option;
+            }));
+            let right_wrapper = other.map(clone!((with_entity) move |In(right): In<Other::Item>, world: &mut World| {
+                if let Some(mut cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) {
+                    cache.right = Some(right);
                 }
-                if left_cache.is_some() && right_cache.is_some() {
-                    left_cache.clone().zip(right_cache.clone())
-                } else {
-                    None
-                }
-            },
-        );
+            }));
+
+            let with_signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
+                clone!((with_entity) move |_: In<()>, world: &mut World| {
+                    let Some(cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) else {
+                        return None;
+                    };
+                    match (&cache.left, &cache.right) {
+                        (Some(left), Some(right)) => Some((left.clone(), right.clone())),
+                        _ => None,
+                    }
+                }),
+            );
+
+            let signal = with_signal.register(world);
+            if let Ok(mut entity) = world.get_entity_mut(*signal) {
+                entity.insert(WithCache::<Self::Item, Other::Item>::default());
+            }
+            with_entity.set(*signal);
+
+            let SignalHandle(left_upstream) = left_wrapper.register(world);
+            let SignalHandle(right_upstream) = right_wrapper.register(world);
+            pipe_signal(world, left_upstream, signal);
+            pipe_signal(world, right_upstream, signal);
+
+            signal
+        });
+
         With {
-            left_wrapper,
-            right_wrapper,
             signal,
+            _marker: PhantomData,
         }
     }
 
@@ -3258,6 +3287,9 @@ mod tests {
     #[derive(Resource, Default, Debug)]
     struct SignalOutput<T: SSs + Clone + fmt::Debug>(Option<T>);
 
+    #[derive(Resource, Default, Debug)]
+    struct SignalOutputVec<T: SSs + Clone + fmt::Debug>(Vec<T>);
+
     fn create_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
@@ -3276,6 +3308,17 @@ mod tests {
 
     fn get_output<T: SSs + Clone + fmt::Debug>(world: &World) -> Option<T> {
         world.resource::<SignalOutput<T>>().0.clone()
+    }
+
+    fn capture_output_vec<T: SSs + Clone + fmt::Debug>(In(value): In<T>, mut output: ResMut<SignalOutputVec<T>>) {
+        output.0.push(value);
+    }
+
+    fn get_and_clear_output_vec<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<T> {
+        world
+            .get_resource_mut::<SignalOutputVec<T>>()
+            .map(|mut res| core::mem::take(&mut res.0))
+            .unwrap_or_default()
     }
 
     #[test]
@@ -3718,6 +3761,89 @@ mod tests {
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<(i32, &'static str)>(app.world()), Some((10, "hello")));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_with_emits_after_both_emit() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutputVec<(i32, i32)>>();
+
+        let left = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+            *state += 1;
+            *state
+        });
+        let right = SignalBuilder::from_system(|_: In<()>| 10).first();
+
+        let signal = left
+            .with(right)
+            .map(capture_output_vec)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(
+            get_and_clear_output_vec::<(i32, i32)>(app.world_mut()),
+            vec![(1, 10), (1, 10)]
+        );
+
+        app.update();
+        assert_eq!(
+            get_and_clear_output_vec::<(i32, i32)>(app.world_mut()),
+            vec![(2, 10)]
+        );
+
+        app.update();
+        assert_eq!(
+            get_and_clear_output_vec::<(i32, i32)>(app.world_mut()),
+            vec![(3, 10)]
+        );
+
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_chain_multi_level_same_frame() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+
+        let signal = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+            *state += 1;
+            *state
+        })
+        .map_in(|x: i32| x + 1)
+        .map_in(|x: i32| x * 2)
+        .map(capture_output)
+        .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(4));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_fan_out_fan_in_with() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<(i32, i32)>>();
+
+        let source = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+            *state += 1;
+            *state
+        });
+
+        let left = source.clone().map_in(|x: i32| x + 1);
+        let right = source.map_in(|x: i32| x + 10);
+
+        let signal = left
+            .with(right)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<(i32, i32)>(app.world()), Some((2, 11)));
+
+        app.update();
+        assert_eq!(get_output::<(i32, i32)>(app.world()), Some((3, 12)));
+
         signal.cleanup(app.world_mut());
     }
 

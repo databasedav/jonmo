@@ -92,6 +92,7 @@ pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<graph::SignalGraphState>();
         app.add_systems(
             self.schedule,
             (
