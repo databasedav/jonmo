@@ -16,8 +16,8 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### fixed
 
-- deadlock when despawning `MutableVec/Map`s during another `MutableVec/Map` despawn
-- initially empty `MutableVec/Map`s work as expected when output to `.switch_signal_vec/map`
+- deadlock when despawning `MutableVec/BTreeMap`s during another `MutableVec/BTreeMap` despawn
+- initially empty `MutableVec/BTreeMap`s work as expected when output to `.switch_signal_vec/map`
 - `SignalVecExt::debug` and `SignalMapExt::debug` now log correct code location
 
 # 0.5.0 (2025-12-19)
@@ -25,7 +25,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### changed
 
 - `.entity_sync` renamed to `.lazy_entity`
-- `SignalExt::combine` always `.clone`s its latest upstream outputs instead of `.take`-ing them
+- `SignalExt::combine` emits its latest upstream outputs every frame, unlike previously, when it only emitted on frames where the latest output pair was yet to be emitted
 
 ### added
 

@@ -346,8 +346,8 @@ where
     }
 }
 
-/// Signal graph node which combines two upstreams, see [`.combine`](SignalExt::combine).
-pub struct Combine<Left, Right>
+/// Signal graph node which combines two upstreams, see [`.with`](SignalExt::with).
+pub struct With<Left, Right>
 where
     Left: Signal,
     Right: Signal,
@@ -359,7 +359,7 @@ where
     signal: LazySignal,
 }
 
-impl<Left, Right> Clone for Combine<Left, Right>
+impl<Left, Right> Clone for With<Left, Right>
 where
     Left: Signal + Clone,
     Right: Signal + Clone,
@@ -373,7 +373,7 @@ where
     }
 }
 
-impl<Left, Right> Signal for Combine<Left, Right>
+impl<Left, Right> Signal for With<Left, Right>
 where
     Left: Signal,
     Right: Signal,
@@ -507,11 +507,6 @@ where
     fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
     }
-}
-
-#[derive(Component)]
-struct FlattenState<T> {
-    value: Option<T>,
 }
 
 /// Signal graph node which forwards the upstream output [`Signal`]'s output, see
@@ -1662,9 +1657,9 @@ pub trait SignalExt: Signal {
     ///
     /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
     /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
-    /// signal_1.combine(signal_2); // outputs `(1, 2)`
+    /// signal_1.with(signal_2); // outputs `(1, 2)`
     /// ```
-    fn combine<Other>(self, other: Other) -> Combine<Self, Other>
+    fn with<Other>(self, other: Other) -> With<Self, Other>
     where
         Self: Sized,
         Other: Signal,
@@ -1691,7 +1686,7 @@ pub trait SignalExt: Signal {
                 }
             },
         );
-        Combine {
+        With {
             left_wrapper,
             right_wrapper,
             signal,
@@ -1732,14 +1727,18 @@ pub trait SignalExt: Signal {
         Self::Item: Signal + Clone + 'static,
         <Self::Item as Signal>::Item: Clone + Send + Sync,
     {
+        #[derive(Component)]
+        struct FlattenState<T> {
+            value: Option<T>,
+        }
+
         let signal = LazySignal::new(move |world: &mut World| {
-            // 1. The state entity that holds the latest value. This is the communication channel between the
-            //    dynamic inner signals and the static output signal.
+            // 1. State entity that holds the latest value, serving as the communication channel
+            //    between dynamic inner signals and the static output signal.
             let reader_entity = LazyEntity::new();
 
-            // 2. The final output signal (reader). Its ONLY job is to read the state component and propagate
-            //    the value. It has no upstream dependencies in the graph; it is triggered manually by the
-            //    forwarder.
+            // 2. The output signal (reader). Reads from state and propagates. Has no upstream
+            //    dependencies; triggered manually by the forwarder.
             let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
                     clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
                         if let Ok(mut state) = query.get_mut(reader_entity.get()) {
@@ -1755,45 +1754,32 @@ pub trait SignalExt: Signal {
                 .entity_mut(*reader_system)
                 .insert(FlattenState::<<Self::Item as Signal>::Item> { value: None });
 
-            // 3. This is the "subscription manager" system. It reacts to the outer signal emitting new inner
-            //    signals.
+            // 3. The subscription manager. Reacts to the outer signal emitting new inner signals.
             let manager_system = self
                 .map(
-                    // This closure contains the core logic for switching subscriptions.
                     move |In(inner_signal): In<Self::Item>,
                           world: &mut World,
                           mut active_forwarder: Local<Option<SignalHandle>>,
                           mut active_signal_id: Local<Option<SignalSystem>>| {
-                        // A. Get the canonical ID of the newly emitted inner signal. `register` is
-                        // idempotent; it just increments the ref-count if the system exists.
+                        // a. Get the canonical ID. `register` is idempotent for existing signals.
                         let new_signal_id = inner_signal.clone().register(world);
 
-                        // B. MEMOIZATION: Check if the signal has actually changed from the last frame.
+                        // b. Memoization: if unchanged, balance the ref-count and return early.
                         if Some(*new_signal_id) == *active_signal_id {
-                            // The signal is the same. Do nothing. IMPORTANT: We must cleanup the handle from
-                            // our `.register()` call above to balance the reference count, otherwise it will
-                            // leak.
                             new_signal_id.cleanup(world);
                             return;
                         }
 
-                        // C. TEARDOWN: The signal is new, so clean up the old forwarder and its ID.
+                        // c. Clean up the old forwarder.
                         if let Some(old_handle) = active_forwarder.take() {
                             old_handle.cleanup(world);
                         }
 
-                        // The old signal ID handle is implicitly dropped when overwritten.
-                        // ================== The Core Setup Logic for the NEW Signal ==================
-                        // D. Get the initial value of the new inner signal, synchronously. This is done
-                        // by creating a temporary one-shot signal.
-                        let temp_handle = inner_signal.clone().first().register(world);
-                        let initial_value = poll_signal(world, *temp_handle)
+                        // d. Poll the initial value synchronously.
+                        let initial_value = poll_signal(world, *new_signal_id)
                             .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
 
-                        // The temporary handle must be cleaned up immediately.
-                        temp_handle.cleanup(world);
-
-                        // E. Write this initial value directly into the state component.
+                        // e. Write initial value to state.
                         if let Some(value) = initial_value
                             && let Some(mut state) =
                                 world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
@@ -1801,42 +1787,29 @@ pub trait SignalExt: Signal {
                             state.value = Some(value);
                         }
 
-                        // F. Set up a persistent forwarder for all _subsequent_ updates from the new
-                        // signal.
+                        // f. Set up forwarder for subsequent values.
                         let forwarder_handle = inner_signal
-                            .map(
-                                // This first map writes the value to the state component.
-                                move |In(value),
-                                      mut query: Query<
-                                    &mut FlattenState<<Self::Item as Signal>::Item>,
-                                    Allow<Internal>,
-                                >| {
-                                    if let Ok(mut state) = query.get_mut(*reader_system) {
-                                        state.value = Some(value);
-                                    }
-                                },
-                            )
-                            .map(
-                                // This second map triggers the reader to run immediately after the state is
-                                // written.
-                                move |_, world: &mut World| {
-                                    process_signals(world, [reader_system], Box::new(()));
-                                },
-                            )
+                            .map(move |In(value), world: &mut World| {
+                                if let Some(mut state) =
+                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
+                                {
+                                    state.value = Some(value);
+                                }
+                                process_signals(world, [reader_system], Box::new(()));
+                            })
                             .register(world);
 
-                        // G. Store the new forwarder's handle and the new signal's ID for the next frame.
+                        // g. Store handles for next frame's memoization check.
                         *active_forwarder = Some(forwarder_handle);
                         *active_signal_id = Some(*new_signal_id);
 
-                        // H. Manually trigger the reader to run RIGHT NOW to consume the initial value.
+                        // h. Trigger reader to consume the initial value.
                         process_signals(world, [reader_system], Box::new(()));
                     },
                 )
                 .register(world);
 
-            // 4. Set up entity hierarchy for automatic cleanup. When the `reader_system` (the final output) is
-            //    cleaned up, it will also despawn its children.
+            // 4. Entity hierarchy for automatic cleanup.
             world
                 .entity_mut(*reader_system)
                 .insert(SignalHandles::from([manager_system]));
@@ -2887,7 +2860,7 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 macro_rules! eq {
     // Entry point
     ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::eq!(@check val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -2905,32 +2878,32 @@ macro_rules! eq {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __signal_combine_and_map {
+macro_rules! __signal_with_and_map {
     // Single argument case
     ($s1:expr $(,)?; |$val:ident| $body:block) => {
         $s1.map(|In($val)| $body)
     };
     // Entry point
     ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?; |$val:ident| $body:block) => {
-        $crate::__signal_combine_and_map!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In($val @ $crate::__signal_combine_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
+        $crate::__signal_with_and_map!(@combine $s1, $s2 $(, $rest)*)
+            .map(|In($val @ $crate::__signal_with_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
     };
 
     // Combine chain
     (@combine $first:expr, $second:expr) => {
-        $first.combine($second)
+        $first.with($second)
     };
     (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::__signal_combine_and_map!(@combine $first.combine($second), $($rest),+)
+        $crate::__signal_with_and_map!(@combine $first.with($second), $($rest),+)
     };
 
     // Pattern generator (nested tuple of `_` matching the combine nesting)
     (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::__signal_combine_and_map!(@pattern_helper (_, _) $(, $rest)*)
+        $crate::__signal_with_and_map!(@pattern_helper (_, _) $(, $rest)*)
     };
     (@pattern_helper $acc:tt $(,)?) => { $acc };
     (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::__signal_combine_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
+        $crate::__signal_with_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
     };
 }
 
@@ -3070,7 +3043,7 @@ macro_rules! __signal_reduce_binop {
     };
     // Entry point
     ($op:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::__signal_reduce_binop!(@apply $op, val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -3166,7 +3139,7 @@ macro_rules! __signal_reduce_cmp {
     };
     // Entry point
     ($cmp:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_combine_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::__signal_reduce_cmp!(@select $cmp, val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -3185,6 +3158,68 @@ macro_rules! __signal_reduce_cmp {
     };
 }
 
+/// Zips multiple [`Signal`]s into a single [`Signal`] that outputs a flat tuple of all their
+/// outputs. Unlike chaining [`.with()`](SignalExt::with) calls which produces nested tuples
+/// like `(((A, B), C), D)`, this macro produces flat tuples like `(A, B, C, D)`.
+///
+/// The resulting [`Signal`] will only output a value when all input [`Signal`]s have outputted a
+/// value.
+///
+/// Accepts 1 or more [`Signal`]s.
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::{prelude::*, signal};
+///
+/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s2 = SignalBuilder::from_system(|_: In<()>| "hello");
+/// let s3 = SignalBuilder::from_system(|_: In<()>| 3.14);
+/// let s4 = SignalBuilder::from_system(|_: In<()>| true);
+///
+/// // Outputs a flat tuple (i32, &str, f64, bool)
+/// let zipped = signal::zip!(s1, s2, s3, s4);
+///
+/// // Compare to chained .with() which would give (((i32, &str), f64), bool)
+/// ```
+#[macro_export]
+macro_rules! zip {
+    // Single signal case - just return it as-is wrapped in a 1-tuple for consistency
+    ($s1:expr $(,)?) => {
+        $s1.map(|In(__v)| (__v,))
+    };
+    // Two signals - use with directly (already flat)
+    ($s1:expr, $s2:expr $(,)?) => {
+        $s1.with($s2)
+    };
+    // Three or more signals - build combine chain then flatten
+    ($s1:expr, $s2:expr $(, $rest:expr)+ $(,)?) => {
+        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)+; |__v| {
+            $crate::__signal_zip_flatten!(__v; $s1, $s2 $(, $rest)+;)
+        })
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __signal_zip_flatten {
+    // Entry point - start building from innermost (.0.0...) outward
+    ($val:expr; $($signals:expr),+;) => {
+        $crate::__signal_zip_flatten!(@collect $val; $($signals),+; ())
+    };
+
+    // Base case: 2 signals left - prepend val.0, val.1 to accumulator
+    (@collect $val:expr; $s1:expr, $s2:expr; ($($acc:expr),*)) => {
+        ($val.0, $val.1 $(, $acc)*)
+    };
+
+    // Recursive case: 3+ signals - add val.1 to accumulator, recurse with val.0
+    (@collect $val:expr; $head:expr, $($tail:expr),+; ($($acc:expr),*)) => {
+        $crate::__signal_zip_flatten!(@collect $val.0; $($tail),+; ($val.1 $(, $acc)*))
+    };
+}
+
 pub use all;
 pub use any;
 pub use distinct;
@@ -3193,6 +3228,7 @@ pub use max;
 pub use min;
 pub use product;
 pub use sum;
+pub use zip;
 
 #[cfg(test)]
 mod tests {
@@ -3673,15 +3709,72 @@ mod tests {
     }
 
     #[test]
-    fn test_combine() {
+    fn test_with() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
         let signal = SignalBuilder::from_system(move |_: In<()>| 10)
-            .combine(SignalBuilder::from_system(move |_: In<()>| "hello"))
+            .with(SignalBuilder::from_system(move |_: In<()>| "hello"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<(i32, &'static str)>(app.world()), Some((10, "hello")));
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_zip_macro() {
+        use crate::signal::zip;
+
+        let mut app = create_test_app();
+
+        // Test 1 signal - returns 1-tuple
+        app.init_resource::<SignalOutput<(i32,)>>();
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let signal = zip!(s1).map(capture_output).register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<(i32,)>(app.world()), Some((1,)));
+        signal.cleanup(app.world_mut());
+
+        // Test 2 signals - same as .with()
+        app.init_resource::<SignalOutput<(i32, &'static str)>>();
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
+        let signal = zip!(s1, s2).map(capture_output).register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<(i32, &'static str)>(app.world()), Some((1, "two")));
+        signal.cleanup(app.world_mut());
+
+        // Test 3 signals - flat tuple (not nested)
+        app.init_resource::<SignalOutput<(i32, &'static str, f64)>>();
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3.0);
+        let signal = zip!(s1, s2, s3).map(capture_output).register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<(i32, &'static str, f64)>(app.world()), Some((1, "two", 3.0)));
+        signal.cleanup(app.world_mut());
+
+        // Test 4 signals - verifies flattening works for more signals
+        app.init_resource::<SignalOutput<(i32, &'static str, f64, bool)>>();
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3.0);
+        let s4 = SignalBuilder::from_system(|_: In<()>| true);
+        let signal = zip!(s1, s2, s3, s4).map(capture_output).register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<(i32, &'static str, f64, bool)>(app.world()), Some((1, "two", 3.0, true)));
+        signal.cleanup(app.world_mut());
+
+        // Test 5 signals - ensures unlimited recursion works
+        app.init_resource::<SignalOutput<(i32, i32, i32, i32, i32)>>();
+        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+        let s5 = SignalBuilder::from_system(|_: In<()>| 5);
+        let signal = zip!(s1, s2, s3, s4, s5).map(capture_output).register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<(i32, i32, i32, i32, i32)>(app.world()), Some((1, 2, 3, 4, 5)));
         signal.cleanup(app.world_mut());
     }
 

@@ -22,7 +22,7 @@ use core::{
     fmt,
     marker::PhantomData,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
 };
 use dyn_clone::{DynClone, clone_trait_object};
 
@@ -611,6 +611,9 @@ pub trait SignalMapExt: SignalMap {
         S::Item: Clone + SSs,
         F: IntoSystem<In<Self::Value>, S, M> + SSs,
     {
+        #[derive(Component)]
+        struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
+
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
             let output_signal_entity = LazyEntity::new();
@@ -1075,9 +1078,6 @@ pub struct MutableBTreeMapData<K, V> {
     broadcaster: LazySignal,
 }
 
-#[derive(Component)]
-struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
-
 /// Wrapper around a [`BTreeMap`] that emits mutations as [`MapDiff`]s, enabling diff-less
 /// constant-time reactive updates for downstream [`SignalMap`]s.
 pub struct MutableBTreeMap<K, V> {
@@ -1214,10 +1214,9 @@ impl<K, V> MutableBTreeMap<K, V> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let is_first_replay = Arc::new(AtomicBool::new(true));
-            let replay_system = clone!((self_, replay_entity, is_first_replay) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>, mut has_replayed: Local<bool>| {
                 if replay_onces.contains(*replay_entity) {
-                    let first_replay = is_first_replay.swap(false, AtomicOrdering::SeqCst);
+                    let first_replay = !core::mem::replace(&mut *has_replayed, true);
                     if first_replay && was_initially_empty {
                         // Initial replay with empty map - just forward upstream diffs
                         if upstream_diffs.is_empty() {

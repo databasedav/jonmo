@@ -29,9 +29,7 @@ use bevy_platform::{
 /// `&mut World` or [`Commands`].
 ///
 /// Port of [Dominator](https://github.com/Pauan/rust-dominator)'s
-/// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html),
-/// and [haalka](https://github.com/databasedav/haalka)'s
-/// [`NodeBuilder`](https://docs.rs/haalka/latest/haalka/node_builder/struct.NodeBuilder.html).
+/// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
 ///
 /// # `Clone` semantics
 ///
@@ -2009,7 +2007,7 @@ mod tests {
         let signal_factory = |entity_signal: crate::signal::Source<Entity>| {
             // Combine the entity signal with the global source signal.
             entity_signal
-                .combine(SignalBuilder::from_resource::<SignalSource>().dedupe())
+                .with(SignalBuilder::from_resource::<SignalSource>().dedupe())
                 // The `.map` combinator gives us access to other `SystemParam`s, like `Query`.
                 .map(
                     |In((entity, source)): In<(Entity, SignalSource)>, names: Query<&Name>| {
