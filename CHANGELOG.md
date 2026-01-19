@@ -6,7 +6,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### changed
 
-- `JonmoBuilder::hold_signals` takes `Box<dyn Holdable>`s instead of `SignalHandles`
+- `JonmoBuilder::hold_tasks` renamed to `JonmoBuilder::hold_signals` and takes `Box<dyn SignalTask>`s instead of `SignalHandles`
 - removed output `Clone` bound from `SignalExt::filter_map`
 
 ### added

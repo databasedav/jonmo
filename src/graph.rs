@@ -523,9 +523,9 @@ fn remove_signal_from_graph_state(world: &mut World, signal: SignalSystem) {
     if let Some(mut state) = world.get_resource_mut::<SignalGraphState>() {
         if state.is_processing {
             state.deferred_removals.insert(signal);
-            return;
+        } else {
+            remove_signal_from_graph_state_internal(&mut state, signal);
         }
-        remove_signal_from_graph_state_internal(&mut state, signal);
     }
 }
 
@@ -651,6 +651,7 @@ pub(crate) fn process_signal_graph(world: &mut World) {
     let mut state = world.resource_mut::<SignalGraphState>();
     state.is_processing = false;
     state.by_level = levels_snapshot;
+    // this indirection allows us to avoid cloning the topological ordering every frame
     apply_deferred_removals(&mut state);
 }
 

@@ -2296,8 +2296,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`true`], output the result of some [`System`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`true`], output the [`System`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2311,7 +2311,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_true(|_: In<()>| 1); // outputs `1`, terminates, outputs `1`, terminates, ...
+    /// .map_true(|_: In<()>| 1); // outputs `Some(1)`, `None`, `Some(1)`, `None`, ...
     /// ```
     fn map_true<O, F, M>(self, system: F) -> MapTrue<Self, O>
     where
@@ -2342,8 +2342,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`true`], output the result of some [`FnMut`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`true`], output the [`FnMut`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2357,7 +2357,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_true_in(|| 1); // outputs `1`, terminates, outputs `1`, terminates, ...
+    /// .map_true_in(|| 1); // outputs `Some(1)`, `None`, `Some(1)`, `None`, ...
     /// ```
     fn map_true_in<O, F>(self, mut function: F) -> MapTrue<Self, O>
     where
@@ -2382,8 +2382,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`false`], output the result of some [`System`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`false`], output the [`System`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2397,7 +2397,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_false(|_: In<()>| 1); // terminates, outputs `1`, terminates, outputs `1`, ...
+    /// .map_false(|_: In<()>| 1); // outputs `None`, `Some(1)`, `None`, `Some(1)`, ...
     /// ```
     fn map_false<O, F, M>(self, system: F) -> MapFalse<Self, O>
     where
@@ -2428,8 +2428,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`false`], output the result of some [`FnMut`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`false`], output the [`FnMut`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2443,7 +2443,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_false_in(|| 1); // terminates, outputs `1`, terminates, outputs `1`, ...
+    /// .map_false_in(|| 1); // outputs `None`, `Some(1)`, `None`, `Some(1)`, ...
     /// ```
     fn map_false_in<O, F>(self, mut function: F) -> MapFalse<Self, O>
     where
@@ -2561,8 +2561,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`Some`], output the result of some [`System`] which takes [`In`]
-    /// the [`Some`] value, otherwise terminate for the frame.
+    /// If this [`Signal`] outputs [`Some`], output the [`System`] (which takes [`In`] the [`Some`]
+    /// value) result wrapped in [`Some`], otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2578,7 +2578,7 @@ pub trait SignalExt: Signal {
     /// })
     /// .map_some(
     ///     |In(state): In<bool>| state
-    /// ); // outputs `true`, terminates, outputs `true`, terminates, ...
+    /// ); // outputs `Some(true)`, `None`, `Some(true)`, `None`, ...
     /// ```
     fn map_some<I, O, F, M>(self, system: F) -> MapSome<Self, O>
     where
@@ -2607,8 +2607,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`Some`], output the result of some [`FnMut`] which takes [`In`]
-    /// the [`Some`] value, otherwise terminate for the frame.
+    /// If this [`Signal`] outputs [`Some`], output the [`FnMut`] (which takes [`In`] the [`Some`]
+    /// value) result wrapped in [`Some`], otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2622,7 +2622,7 @@ pub trait SignalExt: Signal {
     ///        *state
     ///     }
     /// })
-    /// .map_some_in(|state: bool| state); // outputs `true`, terminates, outputs `true`, terminates, ...
+    /// .map_some_in(|state: bool| state); // outputs `Some(true)`, `None`, `Some(true)`, `None`, ...
     /// ```
     fn map_some_in<I, O, F>(self, mut function: F) -> MapSome<Self, O>
     where
@@ -2647,8 +2647,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`None`], output the result of some [`System`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`None`], output the [`System`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2662,7 +2662,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_none(|_: In<()>| false); // terminates, outputs `false`, terminates, outputs `false`, ...
+    /// .map_none(|_: In<()>| false); // outputs `None`, `Some(false)`, `None`, `Some(false)`, ...
     /// ```
     fn map_none<I, O, F, M>(self, none_system: F) -> MapNone<Self, O>
     where
@@ -2691,8 +2691,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`None`], output the result of some [`FnMut`], otherwise
-    /// terminate for the frame.
+    /// If this [`Signal`] outputs [`None`], output the [`FnMut`] result wrapped in [`Some`], otherwise
+    /// output [`None`].
     ///
     /// # Example
     ///
@@ -2706,7 +2706,7 @@ pub trait SignalExt: Signal {
     ///         *state
     ///     }
     /// })
-    /// .map_none_in(|| false); // terminates, outputs `false`, terminates, outputs `false`, ...
+    /// .map_none_in(|| false); // outputs `None`, `Some(false)`, `None`, `Some(false)`, ...
     /// ```
     fn map_none_in<I, O, F>(self, mut function: F) -> MapNone<Self, O>
     where

@@ -119,10 +119,10 @@ impl JonmoBuilder {
         })
     }
 
-    /// Attach [`Holdable`] signals to this entity for automatic cleanup on despawn.
+    /// Attach [`SignalTask`]s to this builder for automatic cleanup on despawn.
     ///
-    /// Use [`.hold()`](SignalHoldExt::hold) to convert a [`Signal`], [`SignalVec`], or
-    /// [`SignalMap`] into a [`Holdable`].
+    /// Use [`.task()`](SignalTaskExt::task) to convert a [`Signal`], [`SignalVec`], or
+    /// [`SignalMap`] into a [`SignalTask`].
     ///
     /// # Example
     ///
@@ -135,22 +135,22 @@ impl JonmoBuilder {
     ///     value: i32,
     /// }
     ///
-    /// let my_signal = SignalBuilder::from_resource::<MyResource>()
+    /// let my_signal_task = SignalBuilder::from_resource::<MyResource>()
     ///     .map_in(|r: MyResource| println!("{}", r.value))
-    ///     .hold();
+    ///     .task();
     ///
     /// let mut world = World::new();
     /// let my_mutable_vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
-    /// let my_signal_vec = my_mutable_vec
+    /// let my_signal_vec_task = my_mutable_vec
     ///     .signal_vec()
     ///     .map_in(|item: i32| println!("{}", item))
-    ///     .hold();
+    ///     .task();
     ///
-    /// JonmoBuilder::new().hold_signals([my_signal, my_signal_vec]);
+    /// JonmoBuilder::new().hold_tasks([my_signal_task, my_signal_vec_task]);
     /// ```
-    pub fn hold_signals(self, holdables: impl IntoIterator<Item = Box<dyn Holdable>> + SSs) -> Self {
+    pub fn hold_tasks(self, tasks: impl IntoIterator<Item = Box<dyn SignalTask>> + SSs) -> Self {
         self.on_spawn(move |world, entity| {
-            let handles: Vec<_> = holdables.into_iter().map(|h| h.register_holdable(world)).collect();
+            let handles: Vec<_> = tasks.into_iter().map(|task| task.register_task(world)).collect();
             add_handles(world, entity, handles);
         })
     }
@@ -194,7 +194,7 @@ impl JonmoBuilder {
     }
 
     /// When this builder's [`Entity`] is despawned, run a function with mutable access to the
-    /// [`DeferredWorld`] and this entity's [`Entity`].
+    /// [`DeferredWorld`] and this builder's [`Entity`].
     pub fn on_despawn(self, on_despawn: impl FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static) -> Self {
         self.on_spawn(|world, entity| {
             if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
@@ -787,74 +787,74 @@ impl JonmoBuilder {
     }
 }
 
-/// A type-erased signal that can be registered with a [`World`] at spawn time.
+/// A type-erased signal that can be managed as a free-floating "task".
 ///
-/// This trait enables [`JonmoBuilder::hold_signals`] to accept signals that haven't
+/// This trait enables [`JonmoBuilder::hold_tasks`] to accept signals that haven't
 /// been registered yet, deferring their registration until the entity is spawned.
 ///
-/// Use the [`.hold()`](SignalHoldExt::hold) extension method to convert a [`Signal`],
-/// [`SignalVec`], or [`SignalMap`] into a `Box<dyn Holdable>`.
-pub trait Holdable: Send + Sync + 'static {
-    /// Register this signal with the world and return its handle.
-    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle;
+/// Use the [`.task()`](SignalTaskExt::task) method to convert a [`Signal`],
+/// [`SignalVec`], or [`SignalMap`] into a [`SignalTask`].
+pub trait SignalTask: Send + Sync + 'static {
+    /// Register this signal task with the world and return its handle.
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle;
 }
 
-struct HoldableSignal<S>(S);
+struct SignalTaskSignal<S>(S);
 
-impl<S: Signal + SSs> Holdable for HoldableSignal<S> {
-    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+impl<S: Signal + SSs> SignalTask for SignalTaskSignal<S> {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
-/// Extension trait for converting a [`Signal`] into a [`Holdable`].
-pub trait SignalHoldExt: Signal + Sized + SSs {
-    /// Convert this signal into a type-erased [`Holdable`] for use with
-    /// [`JonmoBuilder::hold_signals`].
-    fn hold(self) -> Box<dyn Holdable> {
-        Box::new(HoldableSignal(self))
+/// Extension trait for converting a [`Signal`] into a [`SignalTask`].
+pub trait SignalTaskExt: Signal + Sized + SSs {
+    /// Convert this signal into a type-erased [`SignalTask`] for use with
+    /// [`JonmoBuilder::hold_tasks`].
+    fn task(self) -> Box<dyn SignalTask> {
+        Box::new(SignalTaskSignal(self))
     }
 }
 
-impl<S: Signal + Sized + SSs> SignalHoldExt for S {}
+impl<S: Signal + Sized + SSs> SignalTaskExt for S {}
 
-struct HoldableSignalVec<S>(S);
+struct SignalTaskSignalVec<S>(S);
 
-impl<S: SignalVec + SSs> Holdable for HoldableSignalVec<S> {
-    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+impl<S: SignalVec + SSs> SignalTask for SignalTaskSignalVec<S> {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
-/// Extension trait for converting a [`SignalVec`] into a [`Holdable`].
-pub trait SignalVecHoldExt: SignalVec + Sized + SSs {
-    /// Convert this signal vec into a type-erased [`Holdable`] for use with
-    /// [`JonmoBuilder::hold_signals`].
-    fn hold(self) -> Box<dyn Holdable> {
-        Box::new(HoldableSignalVec(self))
+/// Extension trait for converting a [`SignalVec`] into a [`SignalTask`].
+pub trait SignalVecTaskExt: SignalVec + Sized + SSs {
+    /// Convert this signal vec into a type-erased [`SignalTask`] for use with
+    /// [`JonmoBuilder::hold_tasks`].
+    fn task(self) -> Box<dyn SignalTask> {
+        Box::new(SignalTaskSignalVec(self))
     }
 }
 
-impl<S: SignalVec + Sized + SSs> SignalVecHoldExt for S {}
+impl<S: SignalVec + Sized + SSs> SignalVecTaskExt for S {}
 
-struct HoldableSignalMap<S>(S);
+struct SignalTaskSignalMap<S>(S);
 
-impl<S: SignalMap + SSs> Holdable for HoldableSignalMap<S> {
-    fn register_holdable(self: Box<Self>, world: &mut World) -> SignalHandle {
+impl<S: SignalMap + SSs> SignalTask for SignalTaskSignalMap<S> {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
-/// Extension trait for converting a [`SignalMap`] into a [`Holdable`].
-pub trait SignalMapHoldExt: SignalMap + Sized + SSs {
-    /// Convert this signal map into a type-erased [`Holdable`] for use with
-    /// [`JonmoBuilder::hold_signals`].
-    fn hold(self) -> Box<dyn Holdable> {
-        Box::new(HoldableSignalMap(self))
+/// Extension trait for converting a [`SignalMap`] into a [`SignalTask`].
+pub trait SignalMapTaskExt: SignalMap + Sized + SSs {
+    /// Convert this signal map into a type-erased [`SignalTask`] for use with
+    /// [`JonmoBuilder::hold_tasks`].
+    fn task(self) -> Box<dyn SignalTask> {
+        Box::new(SignalTaskSignalMap(self))
     }
 }
 
-impl<S: SignalMap + Sized + SSs> SignalMapHoldExt for S {}
+impl<S: SignalMap + Sized + SSs> SignalMapTaskExt for S {}
 
 fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
     let entity = ctx.entity;
