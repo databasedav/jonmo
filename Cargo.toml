@@ -26,7 +26,7 @@ document-features = { version = "0.2", optional = true }
 [features]
 default = ["builder", "tracing", "time", "std"]
 
-## Enables access to jonmo's high-level entity builder, [`JonmoBuilder`](https://docs.rs/jonmo/latest/jonmo/builder/struct.JonmoBuilder.html).
+## Enables access to jonmo's high-level entity builder, [`jonmo::Builder`](https://docs.rs/jonmo/latest/jonmo/builder/struct.Builder.html).
 builder = []
 
 ## Enables access to signal ext `.debug` methods, which conveniently logs signal outputs at any step.

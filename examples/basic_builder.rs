@@ -29,23 +29,25 @@ struct ValueTicker(Timer);
 #[derive(Component, Clone, Default, PartialEq)]
 struct Value(i32);
 
-fn ui() -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn ui() -> jonmo::Builder {
+    let lazy_entity = LazyEntity::new();
+    jonmo::Builder::from(Node {
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
         height: Val::Percent(100.),
         width: Val::Percent(100.),
         ..default()
     })
+    .lazy_entity(lazy_entity.clone())
     .child(
-        JonmoBuilder::from((Node::default(), TextFont::from_font_size(100.)))
+        jonmo::Builder::from((Node::default(), TextFont::from_font_size(100.)))
             .insert(Value(0))
-            .component_signal_from_component(|signal| {
-                signal
-                    .dedupe()
-                    .map(|In(value): In<Value>| Text(value.0.to_string()))
-                    .map_in(Some)
-            }),
+            .component_signal(
+                signal::from_component_changed_lazy::<Value>(lazy_entity)
+                    .map_in(|value| value.0.to_string())
+                    .map_in(Text)
+                    .map_in(Some),
+            ),
     )
 }
 

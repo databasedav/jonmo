@@ -73,8 +73,8 @@ impl<O: 'static> Signal for Box<dyn SignalDynClone<Item = O> + Send + Sync> {
     }
 }
 
-/// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See [`SignalBuilder`]
-/// methods for examples.
+/// Signal graph node which takes an input of [`In<()>`] and has no upstreams. See
+/// [`from_system`] for examples.
 pub struct Source<O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
@@ -941,137 +941,170 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Provides static methods for creating [`Source`] signals.
-pub struct SignalBuilder;
-
-impl From<Entity> for Source<Entity> {
-    fn from(entity: Entity) -> Self {
-        SignalBuilder::from_entity(entity)
+/// Creates a [`Source`] signal from a [`System`] that takes [`In<()>`].
+pub fn from_system<O, IOO, F, M>(system: F) -> Source<O>
+where
+    O: Clone + 'static,
+    IOO: Into<Option<O>> + 'static,
+    F: IntoSystem<In<()>, IOO, M> + SSs,
+{
+    Source {
+        signal: lazy_signal_from_system(system),
+        _marker: PhantomData,
     }
 }
 
-impl SignalBuilder {
-    /// Creates a [`Source`] signal from a [`System`] that takes [`In<()>`].
-    pub fn from_system<O, IOO, F, M>(system: F) -> Source<O>
-    where
-        O: Clone + 'static,
-        IOO: Into<Option<O>> + 'static,
-        F: IntoSystem<In<()>, IOO, M> + SSs,
-    {
-        Source {
-            signal: lazy_signal_from_system(system),
-            _marker: PhantomData,
+/// Creates a [`Source`] signal from an [`FnMut`].
+pub fn from_function<O, F>(mut f: F) -> Source<O>
+where
+    O: Clone + SSs,
+    F: FnMut() -> O + SSs,
+{
+    from_system(move |_: In<()>| Some(f()))
+}
+
+/// Creates a [`Source`] signal that always outputs a constant value.
+pub fn always<O>(value: O) -> Source<O>
+where
+    O: Clone + SSs,
+{
+    from_system(move |_: In<()>| Some(value.clone()))
+}
+
+/// Creates a [`Signal`] that outputs a value once and then terminates forever.
+pub fn once<O>(value: O) -> Source<O>
+where
+    O: Clone + SSs,
+{
+    from_system(move |_: In<()>, mut emitted: Local<bool>| {
+        if *emitted {
+            None
+        } else {
+            *emitted = true;
+            Some(value.clone())
         }
-    }
+    })
+}
 
-    /// Creates a [`Source`] signal from an [`FnMut`].
-    pub fn from_function<O, F>(mut f: F) -> Source<O>
-    where
-        O: Clone + SSs,
-        F: FnMut() -> O + SSs,
-    {
-        Self::from_system(move |_: In<()>| Some(f()))
-    }
+/// Creates a [`Source`] signal from an [`Entity`].
+pub fn from_entity(entity: Entity) -> Source<Entity> {
+    from_system(move |_: In<()>| entity)
+}
 
-    /// Creates a [`Source`] signal that always outputs a constant value.
-    pub fn always<O>(value: O) -> Source<O>
-    where
-        O: Clone + SSs,
-    {
-        Self::from_system(move |_: In<()>| Some(value.clone()))
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`].
+pub fn from_lazy_entity(entity: LazyEntity) -> Source<Entity> {
+    from_system(move |_: In<()>| *entity)
+}
 
-    /// Creates a [`Source`] signal from an [`Entity`].
-    pub fn from_entity(entity: Entity) -> Source<Entity> {
-        Self::from_system(move |_: In<()>| entity)
-    }
+/// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
+/// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
+/// output the [`Entity`] itself.
+pub fn from_ancestor(entity: Entity, generations: usize) -> Map<Source<Entity>, Entity> {
+    from_entity(entity).map(ancestor_map(generations))
+}
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`].
-    pub fn from_lazy_entity(entity: LazyEntity) -> Source<Entity> {
-        Self::from_system(move |_: In<()>| *entity)
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`]'s `generations`-th generation ancestor's
+/// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
+/// output the [`LazyEntity`]'s  [`Entity`] itself.
+pub fn from_ancestor_lazy(entity: LazyEntity, generations: usize) -> Map<Source<Entity>, Entity> {
+    from_lazy_entity(entity).map(ancestor_map(generations))
+}
 
-    /// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
-    /// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
-    /// output the [`Entity`] itself.
-    pub fn from_ancestor(entity: Entity, generations: usize) -> Map<Source<Entity>, Entity> {
-        Self::from_entity(entity).map(ancestor_map(generations))
-    }
+/// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`], terminating for frames
+/// where it does not exist. Passing `0` to `generation` will output the [`Entity`] itself.
+pub fn from_parent(entity: Entity) -> Map<Source<Entity>, Entity> {
+    from_ancestor(entity, 1)
+}
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`]'s `generations`-th generation ancestor's
-    /// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
-    /// output the [`LazyEntity`]'s  [`Entity`] itself.
-    pub fn from_ancestor_lazy(entity: LazyEntity, generations: usize) -> Map<Source<Entity>, Entity> {
-        Self::from_lazy_entity(entity).map(ancestor_map(generations))
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`], terminating for
+/// frames where it does not exist. Passing `0` to `generation` will output the
+/// [`LazyEntity`]'s [`Entity`] itself.
+pub fn from_parent_lazy(entity: LazyEntity) -> Map<Source<Entity>, Entity> {
+    from_ancestor_lazy(entity, 1)
+}
 
-    /// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`], terminating for frames
-    /// where it does not exist. Passing `0` to `generation` will output the [`Entity`] itself.
-    pub fn from_parent(entity: Entity) -> Map<Source<Entity>, Entity> {
-        Self::from_ancestor(entity, 1)
-    }
+/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating for the
+/// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
+/// [`Entity`].
+pub fn from_component<C>(entity: Entity) -> Source<C>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C>| components.get(entity).ok().cloned())
+}
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`], terminating for
-    /// frames where it does not exist. Passing `0` to `generation` will output the
-    /// [`LazyEntity`]'s [`Entity`] itself.
-    pub fn from_parent_lazy(entity: LazyEntity) -> Map<Source<Entity>, Entity> {
-        Self::from_ancestor_lazy(entity, 1)
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating for the
+/// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
+/// corresponding [`Entity`].
+pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C>| components.get(*entity).ok().cloned())
+}
 
-    /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating for the
-    /// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
-    /// [`Entity`].
-    pub fn from_component<C>(entity: Entity) -> Source<C>
-    where
-        C: Component + Clone,
-    {
-        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(entity).ok().cloned())
-    }
+/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], always outputting an
+/// [`Option`].
+pub fn from_component_option<C>(entity: Entity) -> Source<Option<C>>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity).ok().cloned()))
+}
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating for the
-    /// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
-    /// corresponding [`Entity`].
-    pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
-    where
-        C: Component + Clone,
-    {
-        Self::from_system(move |_: In<()>, components: Query<&C>| components.get(*entity).ok().cloned())
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], always outputting an
+/// [`Option`].
+pub fn from_component_option_lazy<C>(entity: LazyEntity) -> Source<Option<C>>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C>| Some(components.get(*entity).ok().cloned()))
+}
 
-    /// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], always outputting an
-    /// [`Option`].
-    pub fn from_component_option<C>(entity: Entity) -> Source<Option<C>>
-    where
-        C: Component + Clone,
-    {
-        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity).ok().cloned()))
-    }
+/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], only outputting on
+/// frames where the [`Component`] has [`Changed`]. Terminates for the frame if the [`Entity`]
+/// does not exist, the [`Component`] does not exist, or the [`Component`] has not changed.
+pub fn from_component_changed<C>(entity: Entity) -> Source<C>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C, Changed<C>>| components.get(entity).ok().cloned())
+}
 
-    /// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], always outputting an
-    /// [`Option`].
-    pub fn from_component_option_lazy<C>(entity: LazyEntity) -> Source<Option<C>>
-    where
-        C: Component + Clone,
-    {
-        Self::from_system(move |_: In<()>, components: Query<&C>| Some(components.get(*entity).ok().cloned()))
-    }
+/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], only outputting on
+/// frames where the [`Component`] has [`Changed`]. Terminates for the frame if the [`Entity`]
+/// does not exist, the [`Component`] does not exist, or the [`Component`] has not changed.
+pub fn from_component_changed_lazy<C>(entity: LazyEntity) -> Source<C>
+where
+    C: Component + Clone,
+{
+    from_system(move |_: In<()>, components: Query<&C, Changed<C>>| components.get(*entity).ok().cloned())
+}
 
-    /// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
-    /// exist.
-    pub fn from_resource<R>() -> Source<R>
-    where
-        R: Resource + Clone,
-    {
-        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| resource.as_deref().cloned())
-    }
+/// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
+/// exist.
+pub fn from_resource<R>() -> Source<R>
+where
+    R: Resource + Clone,
+{
+    from_system(move |_: In<()>, resource: Option<Res<R>>| resource.as_deref().cloned())
+}
 
-    /// Creates a signal from a [`Resource`], always outputting an [`Option`].
-    pub fn from_resource_option<R>() -> Source<Option<R>>
-    where
-        R: Resource + Clone,
-    {
-        Self::from_system(move |_: In<()>, resource: Option<Res<R>>| Some(resource.as_deref().cloned()))
-    }
+/// Creates a signal from a [`Resource`], always outputting an [`Option`].
+pub fn from_resource_option<R>() -> Source<Option<R>>
+where
+    R: Resource + Clone,
+{
+    from_system(move |_: In<()>, resource: Option<Res<R>>| Some(resource.as_deref().cloned()))
+}
+
+/// Creates a signal from a [`Resource`], only outputting on frames where the [`Resource`] has
+/// [`Changed`]. Terminates for the frame if the [`Resource`] does not exist or has not changed.
+pub fn from_resource_changed<R>() -> Source<R>
+where
+    R: Resource + Clone,
+{
+    from_system(move |_: In<()>, resource: Option<Res<R>>| resource.filter(|r| r.is_changed()).map(|r| r.clone()))
 }
 
 /// Converts an `Option<Signal<A>>` into a `Signal<Option<A>>`.
@@ -1079,7 +1112,7 @@ impl SignalBuilder {
 /// This is mostly useful with [`.switch`](SignalExt::switch) or [`.flatten`](SignalExt::flatten).
 ///
 /// If the value is `None` then it emits `None` once and then terminates (implemented as
-/// `SignalBuilder::always(None).first()`).
+/// `signal::once(None)`).
 ///
 /// If the value is `Some(signal)` then it will return the result of the signal,
 /// except wrapped in `Some`.
@@ -1097,10 +1130,10 @@ impl SignalBuilder {
 /// world.insert_resource(Enabled(false));
 ///
 /// // Turn `Signal<Item = Option<Signal<Item = T>>>` into `Signal<Item = Option<T>>`.
-/// let maybe_value = SignalBuilder::from_resource::<Enabled>()
+/// let maybe_value = signal::from_resource::<Enabled>()
 ///     .dedupe()
 ///     .map_in(|enabled: Enabled| enabled.0)
-///     .map_true_in(|| SignalBuilder::from_system(|_: In<()>| 42))
+///     .map_true_in(|| signal::from_system(|_: In<()>| 42))
 ///     .map_in(signal::option)
 ///     .flatten();
 /// ```
@@ -1111,7 +1144,7 @@ where
 {
     match value {
         Some(signal) => signal.map_in(Some).left_either(),
-        None => SignalBuilder::always(None).first().right_either(),
+        None => once(None).right_either(),
     }
 }
 
@@ -1181,14 +1214,14 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(UseSquare(true));
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<UseSquare>| res.0)
+    /// let signal = signal::from_system(|_: In<()>, res: Res<UseSquare>| res.0)
     ///     .map(move |In(use_square): In<bool>| {
     ///         if use_square {
-    ///             SignalBuilder::from_system(|_: In<()>| 10)
+    ///             signal::from_system(|_: In<()>| 10)
     ///                 .map(|In(x): In<i32>| x * x)
     ///                 .left_either()
     ///         } else {
-    ///             SignalBuilder::from_system(|_: In<()>| 42).right_either()
+    ///             signal::from_system(|_: In<()>| 42).right_either()
     ///         }
     ///     })
     ///     .flatten();
@@ -1220,12 +1253,12 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(Mode(false));
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<Mode>| res.0)
+    /// let signal = signal::from_system(|_: In<()>, res: Res<Mode>| res.0)
     ///     .map(move |In(mode): In<bool>| {
     ///         if mode {
-    ///             SignalBuilder::from_system(|_: In<()>| "A").left_either()
+    ///             signal::from_system(|_: In<()>| "A").left_either()
     ///         } else {
-    ///             SignalBuilder::from_system(|_: In<()>| "B")
+    ///             signal::from_system(|_: In<()>| "B")
     ///                 .filter(|In(x): In<&str>| x.len() > 0)
     ///                 .right_either()
     ///         }
@@ -1255,7 +1288,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| 1).map(|In(x): In<i32>| x * 2); // outputs `2`
+    /// signal::from_system(|_: In<()>| 1).map(|In(x): In<i32>| x * 2); // outputs `2`
     /// ```
     fn map<O, IOO, F, M>(self, system: F) -> Map<Self, O>
     where
@@ -1284,7 +1317,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2); // outputs `2`
+    /// signal::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2); // outputs `2`
     /// ```
     fn map_in<O, IOO, F>(self, mut function: F) -> Map<Self, O>
     where
@@ -1310,7 +1343,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| 1).map_in_ref(ToString::to_string); // outputs `"1"`
+    /// signal::from_system(|_: In<()>| 1).map_in_ref(ToString::to_string); // outputs `"1"`
     /// ```
     fn map_in_ref<O, IOO, F>(self, mut function: F) -> Map<Self, O>
     where
@@ -1337,10 +1370,10 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
-    /// SignalBuilder::from_entity(entity).component::<Value>(); // outputs `Value(0)`
+    /// signal::from_entity(entity).component::<Value>(); // outputs `Value(0)`
     ///
     /// let entity = world.spawn_empty().id();
-    /// SignalBuilder::from_entity(entity).component::<Value>(); // terminates
+    /// signal::from_entity(entity).component::<Value>(); // terminates
     /// ```
     fn component<C>(self) -> MapComponent<Self, C>
     where
@@ -1367,10 +1400,10 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
-    /// SignalBuilder::from_entity(entity).component_option::<Value>(); // outputs `Some(Value(0))`
+    /// signal::from_entity(entity).component_option::<Value>(); // outputs `Some(Value(0))`
     ///
     /// let entity = world.spawn_empty().id();
-    /// SignalBuilder::from_entity(entity).component::<Value>(); // outputs `None`
+    /// signal::from_entity(entity).component::<Value>(); // outputs `None`
     /// ```
     fn component_option<C>(self) -> ComponentOption<Self, C>
     where
@@ -1398,10 +1431,10 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
-    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // outputs `Value(0)` on changed frames
+    /// signal::from_entity(entity).component_changed::<Value>(); // outputs `Value(0)` on changed frames
     ///
     /// let entity = world.spawn_empty().id();
-    /// SignalBuilder::from_entity(entity).component_changed::<Value>(); // terminates
+    /// signal::from_entity(entity).component_changed::<Value>(); // terminates
     /// ```
     fn component_changed<C>(self) -> ComponentChanged<Self, C>
     where
@@ -1429,10 +1462,10 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// let entity = world.spawn(Value(0)).id();
-    /// SignalBuilder::from_entity(entity).has_component::<Value>(); // outputs `true`
+    /// signal::from_entity(entity).has_component::<Value>(); // outputs `true`
     ///
     /// let entity = world.spawn_empty().id();
-    /// SignalBuilder::from_entity(entity).has_component::<Value>(); // outputs `false`
+    /// signal::from_entity(entity).has_component::<Value>(); // outputs `false`
     /// ```
     fn has_component<C>(self) -> HasComponent<Self, C>
     where
@@ -1454,7 +1487,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///         *state += 1;
     ///         *state / 2
@@ -1498,7 +1531,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///         *state += 1;
     ///         *state
@@ -1531,7 +1564,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///         *state += 1;
     ///         *state / 2
@@ -1555,7 +1588,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
+    /// let signal = signal::from_system(|_: In<()>| 0);
     /// signal.clone().eq(0); // outputs `true`
     /// signal.eq(1); // outputs `false`
     /// ```
@@ -1577,7 +1610,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>| 0);
+    /// let signal = signal::from_system(|_: In<()>| 0);
     /// signal.clone().neq(0); // outputs `false`
     /// signal.neq(1); // outputs `true`
     /// ```
@@ -1599,7 +1632,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| true).not(); // outputs `false`
+    /// signal::from_system(|_: In<()>| true).not(); // outputs `false`
     /// ```
     fn not(self) -> Not<Self>
     where
@@ -1620,7 +1653,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///         *state += 1;
     ///         *state % 2
@@ -1655,9 +1688,9 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their latest
-    /// outputs. The resulting [`Signal`] will only output a value when both input [`Signal`]s have
-    /// outputted a value.
+    /// Combines this [`Signal`] with another [`Signal`], outputting a tuple with both of their
+    /// latest outputs. The resulting [`Signal`] will only output a value when both input
+    /// [`Signal`]s have outputted a value.
     ///
     /// # Example
     ///
@@ -1665,8 +1698,8 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
-    /// let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
+    /// let signal_1 = signal::from_system(|_: In<()>| 1);
+    /// let signal_2 = signal::from_system(|_: In<()>| 2);
     /// signal_1.with(signal_2); // outputs `(1, 2)`
     /// ```
     fn with<Other>(self, other: Other) -> With<Self, Other>
@@ -1679,22 +1712,20 @@ pub trait SignalExt: Signal {
         let signal = LazySignal::new(move |world: &mut World| {
             let with_entity = LazyEntity::new();
 
-            let left_wrapper = self.map(clone!((with_entity) move |In(left): In<Self::Item>, world: &mut World| {
-                if let Some(mut cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) {
-                    cache.left = Some(left);
-                }
-            }));
-            let right_wrapper = other.map(clone!((with_entity) move |In(right): In<Other::Item>, world: &mut World| {
-                if let Some(mut cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) {
-                    cache.right = Some(right);
-                }
-            }));
+            let left_wrapper = self.map(
+                clone!((with_entity) move |In(left): In<Self::Item>, world: &mut World| {
+                    world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap().left = Some(left);
+                }),
+            );
+            let right_wrapper = other.map(
+                clone!((with_entity) move |In(right): In<Other::Item>, world: &mut World| {
+                    world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap().right = Some(right);
+                }),
+            );
 
             let with_signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
                 clone!((with_entity) move |_: In<()>, world: &mut World| {
-                    let Some(cache) = world.get_mut::<WithCache<Self::Item, Other::Item>>(with_entity.get()) else {
-                        return None;
-                    };
+                    let cache = world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap();
                     match (&cache.left, &cache.right) {
                         (Some(left), Some(right)) => Some((left.clone(), right.clone())),
                         _ => None,
@@ -1703,9 +1734,9 @@ pub trait SignalExt: Signal {
             );
 
             let signal = with_signal.register(world);
-            if let Ok(mut entity) = world.get_entity_mut(*signal) {
-                entity.insert(WithCache::<Self::Item, Other::Item>::default());
-            }
+            world
+                .entity_mut(*signal)
+                .insert(WithCache::<Self::Item, Other::Item>::default());
             with_entity.set(*signal);
 
             let SignalHandle(left_upstream) = left_wrapper.register(world);
@@ -1735,13 +1766,13 @@ pub trait SignalExt: Signal {
     ///
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
-    /// let signal = SignalBuilder::from_resource::<Toggle>()
+    /// let signal = signal::from_resource::<Toggle>()
     ///     .dedupe()
     ///     .map(move |In(toggle): In<Toggle>| {
     ///         if toggle.0 {
-    ///             SignalBuilder::from_system(|_: In<()>| 1)
+    ///             signal::from_system(|_: In<()>| 1)
     ///         } else {
-    ///             SignalBuilder::from_system(|_: In<()>| 2)
+    ///             signal::from_system(|_: In<()>| 2)
     ///         }
     ///     })
     ///     .flatten();
@@ -1762,19 +1793,15 @@ pub trait SignalExt: Signal {
         }
 
         let signal = LazySignal::new(move |world: &mut World| {
-            // 1. State entity that holds the latest value, serving as the communication channel
-            //    between dynamic inner signals and the static output signal.
+            // 1. State entity that holds the latest value, serving as the communication channel between dynamic
+            //    inner signals and the static output signal.
             let reader_entity = LazyEntity::new();
 
-            // 2. The output signal (reader). Reads from state and propagates. Has no upstream
-            //    dependencies; triggered manually by the forwarder.
-            let reader_system = *SignalBuilder::from_system::<<Self::Item as Signal>::Item, _, _, _>(
+            // 2. The output signal (reader). Reads from state and propagates. Has no upstream dependencies;
+            //    triggered manually by the forwarder.
+            let reader_system = *from_system::<<Self::Item as Signal>::Item, _, _, _>(
                     clone!((reader_entity) move |_: In<()>, mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
-                        if let Ok(mut state) = query.get_mut(reader_entity.get()) {
-                            state.value.take()
-                        } else {
-                            None
-                        }
+                        query.get_mut(*reader_entity).unwrap().value.take()
                     }),
                 )
                 .register(world);
@@ -1809,21 +1836,20 @@ pub trait SignalExt: Signal {
                             .and_then(downcast_any_clone::<<Self::Item as Signal>::Item>);
 
                         // e. Write initial value to state.
-                        if let Some(value) = initial_value
-                            && let Some(mut state) =
-                                world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
-                        {
-                            state.value = Some(value);
+                        if let Some(value) = initial_value {
+                            world
+                                .get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
+                                .unwrap()
+                                .value = Some(value);
                         }
 
                         // f. Set up forwarder for subsequent values.
                         let forwarder_handle = inner_signal
                             .map(move |In(value), world: &mut World| {
-                                if let Some(mut state) =
-                                    world.get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
-                                {
-                                    state.value = Some(value);
-                                }
+                                world
+                                    .get_mut::<FlattenState<<Self::Item as Signal>::Item>>(*reader_system)
+                                    .unwrap()
+                                    .value = Some(value);
                                 process_signals(world, [reader_system], Box::new(()));
                             })
                             .register(world);
@@ -1864,13 +1890,13 @@ pub trait SignalExt: Signal {
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
     /// let signal =
-    ///     SignalBuilder::from_resource::<Toggle>()
+    ///     signal::from_resource::<Toggle>()
     ///         .dedupe()
     ///         .switch(move |In(toggle): In<Toggle>| {
     ///             if toggle.0 {
-    ///                 SignalBuilder::from_system(|_: In<()>| 1)
+    ///                 signal::from_system(|_: In<()>| 1)
     ///             } else {
-    ///                 SignalBuilder::from_system(|_: In<()>| 2)
+    ///                 signal::from_system(|_: In<()>| 2)
     ///             }
     ///         });
     /// // `signal` outputs `2`
@@ -1905,13 +1931,19 @@ pub trait SignalExt: Signal {
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
     ///
-    /// let signal = SignalBuilder::from_resource::<Toggle>()
+    /// let signal = signal::from_resource::<Toggle>()
     ///     .dedupe()
     ///     .switch_signal_vec(move |In(toggle): In<Toggle>, world: &mut World| {
     ///         if toggle.0 {
-    ///             MutableVecBuilder::from([1, 2, 3]).spawn(world).signal_vec()
+    ///             MutableVec::builder()
+    ///                 .values([1, 2, 3])
+    ///                 .spawn(world)
+    ///                 .signal_vec()
     ///         } else {
-    ///             MutableVecBuilder::from([10, 20]).spawn(world).signal_vec()
+    ///             MutableVec::builder()
+    ///                 .values([10, 20])
+    ///                 .spawn(world)
+    ///                 .signal_vec()
     ///         }
     ///     });
     /// // `signal` outputs `SignalVec -> [10, 20]`
@@ -1932,16 +1964,13 @@ pub trait SignalExt: Signal {
 
             // The output system is a "poller". It runs when poked and drains its own queue.
             let output_signal_entity = LazyEntity::new();
-            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+            let output_signal = *from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
                 clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
-                        if queue.0.is_empty() {
-                            None
-                        } else {
-                            Some(core::mem::take(&mut queue.0))
-                        }
-                    } else {
+                    let mut queue = q.get_mut(*output_signal_entity).unwrap();
+                    if queue.0.is_empty() {
                         None
+                    } else {
+                        Some(core::mem::take(&mut queue.0))
                     }
                 }),
             )
@@ -1980,10 +2009,12 @@ pub trait SignalExt: Signal {
                     // D. FORWARDING: The forwarder's only job is to queue ALL diffs from the inner
                     // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<VecDiff<S::Item>>>, world: &mut World| {
-                        if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_signal)
-                        {
-                            queue.0.extend(diffs);
+                        if !diffs.is_empty() {
+                            world
+                                .get_mut::<SwitcherQueue<S::Item>>(*output_signal)
+                                .unwrap()
+                                .0
+                                .extend(diffs);
                             process_signals(world, [output_signal], Box::new(()));
                         }
                     };
@@ -2037,15 +2068,17 @@ pub trait SignalExt: Signal {
     /// let mut world = World::new();
     /// world.insert_resource(Toggle(false));
     ///
-    /// let signal = SignalBuilder::from_resource::<Toggle>()
+    /// let signal = signal::from_resource::<Toggle>()
     ///     .dedupe()
     ///     .switch_signal_map(move |In(toggle): In<Toggle>, world: &mut World| {
     ///         if toggle.0 {
-    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///             MutableBTreeMap::builder()
+    ///                 .values([(1, 2), (3, 4)])
     ///                 .spawn(world)
     ///                 .signal_map()
     ///         } else {
-    ///             MutableBTreeMapBuilder::from([(10, 20)])
+    ///             MutableBTreeMap::builder()
+    ///                 .values([(10, 20)])
     ///                 .spawn(world)
     ///                 .signal_map()
     ///         }
@@ -2069,16 +2102,13 @@ pub trait SignalExt: Signal {
 
             // The output signal is a "poller". It runs when poked and drains its own queue.
             let output_signal_entity = LazyEntity::new();
-            let output_signal = *SignalBuilder::from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
+            let output_signal = *from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
                 clone!((output_signal_entity) move |_: In<()>, mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
-                    if let Ok(mut queue) = q.get_mut(*output_signal_entity) {
-                        if queue.0.is_empty() {
-                            None
-                        } else {
-                            Some(core::mem::take(&mut queue.0))
-                        }
-                    } else {
+                    let mut queue = q.get_mut(*output_signal_entity).unwrap();
+                    if queue.0.is_empty() {
                         None
+                    } else {
+                        Some(core::mem::take(&mut queue.0))
                     }
                 }),
             )
@@ -2118,10 +2148,12 @@ pub trait SignalExt: Signal {
                     // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<super::signal_map::MapDiff<S::Key, S::Value>>>,
                                                 world: &mut World| {
-                        if !diffs.is_empty()
-                            && let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal)
-                        {
-                            queue.0.extend(diffs);
+                        if !diffs.is_empty() {
+                            world
+                                .get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal)
+                                .unwrap()
+                                .0
+                                .extend(diffs);
                             process_signals(world, [output_signal], Box::new(()));
                         }
                     };
@@ -2170,7 +2202,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<usize>| {
     ///        *state += 1;
     ///        *state
@@ -2213,7 +2245,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2263,7 +2295,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2296,8 +2328,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`true`], output the [`System`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`true`], output the [`System`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2305,7 +2337,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2342,8 +2374,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`true`], output the [`FnMut`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`true`], output the [`FnMut`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2351,7 +2383,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2382,8 +2414,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`false`], output the [`System`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`false`], output the [`System`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2391,7 +2423,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2428,8 +2460,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`false`], output the [`FnMut`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`false`], output the [`FnMut`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2437,7 +2469,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<bool>| {
     ///         *state = !*state;
     ///         *state
@@ -2476,7 +2508,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///        *state = if state.is_some() { None } else { Some(true) };
     ///        *state
@@ -2528,7 +2560,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///         *state = if state.is_some() { None } else { Some(true) };
     ///         *state
@@ -2570,7 +2602,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///        *state = if state.is_some() { None } else { Some(true) };
     ///        *state
@@ -2616,10 +2648,10 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
-    ///        *state = if state.is_some() { None } else { Some(true) };
-    ///        *state
+    ///         *state = if state.is_some() { None } else { Some(true) };
+    ///         *state
     ///     }
     /// })
     /// .map_some_in(|state: bool| state); // outputs `Some(true)`, `None`, `Some(true)`, `None`, ...
@@ -2647,8 +2679,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`None`], output the [`System`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`None`], output the [`System`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2656,7 +2688,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///         *state = if state.is_some() { None } else { Some(true) };
     ///         *state
@@ -2691,8 +2723,8 @@ pub trait SignalExt: Signal {
         }
     }
 
-    /// If this [`Signal`] outputs [`None`], output the [`FnMut`] result wrapped in [`Some`], otherwise
-    /// output [`None`].
+    /// If this [`Signal`] outputs [`None`], output the [`FnMut`] result wrapped in [`Some`],
+    /// otherwise output [`None`].
     ///
     /// # Example
     ///
@@ -2700,7 +2732,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Option<bool>>| {
     ///         *state = if state.is_some() { None } else { Some(true) };
     ///         *state
@@ -2738,7 +2770,7 @@ pub trait SignalExt: Signal {
     ///
     /// Useful in situations where some [`System`] produces a static list every so often but one
     /// would like to render it dynamically e.g. with
-    /// [`JonmoBuilder::children_signal_vec`](super::builder::JonmoBuilder::children_signal_vec).
+    /// [`Builder::children_signal_vec`](crate::Builder::children_signal_vec).
     ///
     /// # Example
     ///
@@ -2746,7 +2778,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system({
+    /// signal::from_system({
     ///     move |_: In<()>, mut state: Local<Vec<usize>>| {
     ///         let new = state
     ///             .get(state.len().saturating_sub(1))
@@ -2787,7 +2819,7 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| 1)
+    /// signal::from_system(|_: In<()>| 1)
     ///     .debug() // logs `1`
     ///     .map_in(|x: i32| x * 2)
     ///     .debug(); // logs `2`
@@ -2817,9 +2849,11 @@ pub trait SignalExt: Signal {
     ///
     /// let condition = true;
     /// let signal = if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).map_in(|x: i32| x * 2).boxed() // this is a `Map<Source<i32>>`
+    ///     signal::from_system(|_: In<()>| 1)
+    ///         .map_in(|x: i32| x * 2)
+    ///         .boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
+    ///     signal::from_system(|_: In<()>| 1).dedupe().boxed() // this is a `Dedupe<Source<i32>>`
     /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
     fn boxed(self) -> Box<dyn Signal<Item = Self::Item>>
@@ -2840,13 +2874,11 @@ pub trait SignalExt: Signal {
     ///
     /// let condition = true;
     /// if condition {
-    ///     SignalBuilder::from_system(|_: In<()>| 1)
+    ///     signal::from_system(|_: In<()>| 1)
     ///         .map_in(|x: i32| x * 2)
     ///         .boxed_clone() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     SignalBuilder::from_system(|_: In<()>| 1)
-    ///         .dedupe()
-    ///         .boxed_clone() // this is a `Dedupe<Source<i32>>`
+    ///     signal::from_system(|_: In<()>| 1).dedupe().boxed_clone() // this is a `Dedupe<Source<i32>>`
     /// }; // without the `.boxed_clone()`, the compiler would not allow this
     /// ```
     fn boxed_clone(self) -> Box<dyn SignalDynClone<Item = Self::Item>>
@@ -2879,9 +2911,9 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 1);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 1);
+/// let s1 = signal::from_system(|_: In<()>| 1);
+/// let s2 = signal::from_system(|_: In<()>| 1);
+/// let s3 = signal::from_system(|_: In<()>| 1);
 ///
 /// let eq_signal = signal::eq!(s1, s2, s3); // outputs `true`
 /// ```
@@ -2946,8 +2978,8 @@ macro_rules! __signal_with_and_map {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| true);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| true);
+/// let s1 = signal::from_system(|_: In<()>| true);
+/// let s2 = signal::from_system(|_: In<()>| true);
 ///
 /// let all_signal = signal::all!(s1, s2); // outputs `true`
 /// ```
@@ -2968,8 +3000,8 @@ macro_rules! all {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| true);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| false);
+/// let s1 = signal::from_system(|_: In<()>| true);
+/// let s2 = signal::from_system(|_: In<()>| false);
 ///
 /// let any_signal = signal::any!(s1, s2); // outputs `true`
 /// ```
@@ -2991,9 +3023,9 @@ macro_rules! any {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+/// let s1 = signal::from_system(|_: In<()>| 1);
+/// let s2 = signal::from_system(|_: In<()>| 2);
+/// let s3 = signal::from_system(|_: In<()>| 3);
 ///
 /// let distinct_signal = signal::distinct!(s1, s2, s3); // outputs `true`
 /// ```
@@ -3050,9 +3082,9 @@ macro_rules! __signal_pairwise_all {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+/// let s1 = signal::from_system(|_: In<()>| 1);
+/// let s2 = signal::from_system(|_: In<()>| 2);
+/// let s3 = signal::from_system(|_: In<()>| 3);
 ///
 /// let sum_signal = signal::sum!(s1, s2, s3); // outputs `6`
 /// ```
@@ -3098,9 +3130,9 @@ macro_rules! __signal_reduce_binop {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 2);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 3);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 4);
+/// let s1 = signal::from_system(|_: In<()>| 2);
+/// let s2 = signal::from_system(|_: In<()>| 3);
+/// let s3 = signal::from_system(|_: In<()>| 4);
 ///
 /// let product_signal = signal::product!(s1, s2, s3); // outputs `24`
 /// ```
@@ -3122,9 +3154,9 @@ macro_rules! product {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+/// let s1 = signal::from_system(|_: In<()>| 5);
+/// let s2 = signal::from_system(|_: In<()>| 2);
+/// let s3 = signal::from_system(|_: In<()>| 7);
 ///
 /// let min_signal = signal::min!(s1, s2, s3); // outputs `2`
 /// ```
@@ -3146,9 +3178,9 @@ macro_rules! min {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 5);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 7);
+/// let s1 = signal::from_system(|_: In<()>| 5);
+/// let s2 = signal::from_system(|_: In<()>| 2);
+/// let s3 = signal::from_system(|_: In<()>| 7);
 ///
 /// let max_signal = signal::max!(s1, s2, s3); // outputs `7`
 /// ```
@@ -3202,10 +3234,10 @@ macro_rules! __signal_reduce_cmp {
 /// use bevy_ecs::prelude::*;
 /// use jonmo::{prelude::*, signal};
 ///
-/// let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-/// let s2 = SignalBuilder::from_system(|_: In<()>| "hello");
-/// let s3 = SignalBuilder::from_system(|_: In<()>| 3.14);
-/// let s4 = SignalBuilder::from_system(|_: In<()>| true);
+/// let s1 = signal::from_system(|_: In<()>| 1);
+/// let s2 = signal::from_system(|_: In<()>| "hello");
+/// let s3 = signal::from_system(|_: In<()>| 3.14);
+/// let s4 = signal::from_system(|_: In<()>| true);
 ///
 /// // Outputs a flat tuple (i32, &str, f64, bool)
 /// let zipped = signal::zip!(s1, s2, s3, s4);
@@ -3265,8 +3297,8 @@ mod tests {
         JonmoPlugin,
         graph::{LazySignalHolder, SignalRegistrationCount},
         prelude::{IntoSignalVecEither, SignalVecExt, clone},
-        signal::{SignalBuilder, SignalExt, Upstream},
-        signal_vec::{MutableVec, MutableVecBuilder, VecDiff},
+        signal::{self, SignalExt, Upstream},
+        signal_vec::{MutableVec, VecDiff},
         utils::{LazyEntity, SSs},
     };
     use core::{convert::identity, fmt};
@@ -3325,7 +3357,7 @@ mod tests {
     fn test_map() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| 1)
+        let signal = signal::from_system(|_: In<()>| 1)
             .map(|In(x): In<i32>| x + 1)
             .map(capture_output)
             .register(app.world_mut());
@@ -3339,7 +3371,7 @@ mod tests {
         // === Part 1: Basic Infallible Mapping ===
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<String>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| 10i32)
+        let signal = signal::from_system(|_: In<()>| 10i32)
             .map_in(|x: i32| format!("Value: {x}"))
             .map(capture_output)
             .register(app.world_mut());
@@ -3359,7 +3391,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
         // Note: .pop() removes from the end, so the sequence is 4, 3, 2, 1
         let inputs = Arc::new(Mutex::new(vec![1, 2, 3, 4]));
-        let source_signal = SignalBuilder::from_system(clone!((inputs) move |_: In<()>| {
+        let source_signal = signal::from_system(clone!((inputs) move |_: In<()>| {
             inputs.lock().unwrap().pop()
         }));
 
@@ -3396,7 +3428,7 @@ mod tests {
         // === Part 3: FnMut Stateful Closure ===
         app.init_resource::<SignalOutput<()>>(); // We don't care about the value, just that it runs
         let call_count = Arc::new(Mutex::new(0));
-        let signal = SignalBuilder::from_system(|_: In<()>| ())
+        let signal = signal::from_system(|_: In<()>| ())
             .map_in(clone!((call_count) move |_: ()| {
                 *call_count.lock().unwrap() += 1;
             }))
@@ -3416,7 +3448,7 @@ mod tests {
 
         // === Part 4: Cleanup ===
         app.init_resource::<SignalOutput<i32>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| 123)
+        let signal = signal::from_system(|_: In<()>| 123)
             .map_in(|x| x)
             .map(capture_output)
             .register(app.world_mut());
@@ -3441,7 +3473,7 @@ mod tests {
         // === Part 1: Basic Infallible Mapping ===
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<String>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| 42i32)
+        let signal = signal::from_system(|_: In<()>| 42i32)
             // Use a function that takes a reference, the primary use case for map_in_ref.
             .map_in_ref(ToString::to_string)
             .map(capture_output)
@@ -3461,7 +3493,7 @@ mod tests {
         // === Part 2: Fallible Mapping (Some/None) ===
         // Note: .pop() removes from the end, so the sequence is "FOUR", "three", "TWO", "one"
         let inputs = Arc::new(Mutex::new(vec!["one", "TWO", "three", "FOUR"]));
-        let source_signal = SignalBuilder::from_system(clone!((inputs) move |_: In<()>| {
+        let source_signal = signal::from_system(clone!((inputs) move |_: In<()>| {
             inputs.lock().unwrap().pop()
         }));
 
@@ -3514,7 +3546,7 @@ mod tests {
         // === Part 3: FnMut Stateful Closure ===
         app.init_resource::<SignalOutput<()>>();
         let call_count = Arc::new(Mutex::new(0));
-        let signal = SignalBuilder::from_system(|_: In<()>| 1i32)
+        let signal = signal::from_system(|_: In<()>| 1i32)
             .map_in_ref(clone!((call_count) move |_: &i32| {
                 *call_count.lock().unwrap() += 1;
             }))
@@ -3534,7 +3566,7 @@ mod tests {
 
         // === Part 4: Cleanup ===
         app.init_resource::<SignalOutput<i32>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| 123)
+        let signal = signal::from_system(|_: In<()>| 123)
             // Simple dereference to pass the value through
             .map_in_ref(|x: &i32| *x)
             .map(capture_output)
@@ -3560,7 +3592,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<TestData>>();
         let entity = app.world_mut().spawn(TestData(1)).id();
-        let signal = SignalBuilder::from_entity(entity)
+        let signal = signal::from_entity(entity)
             .component::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
@@ -3575,14 +3607,14 @@ mod tests {
         app.insert_resource(SignalOutput::<Option<TestData>>::default());
         let entity_with = app.world_mut().spawn(TestData(1)).id();
         let entity_without = app.world_mut().spawn_empty().id();
-        let signal = SignalBuilder::from_entity(entity_with)
+        let signal = signal::from_entity(entity_with)
             .component_option::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(1))));
         signal.cleanup(app.world_mut());
-        let signal = SignalBuilder::from_entity(entity_without)
+        let signal = signal::from_entity(entity_without)
             .component_option::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
@@ -3597,14 +3629,14 @@ mod tests {
         app.insert_resource(SignalOutput::<bool>::default());
         let entity_with = app.world_mut().spawn(TestData(1)).id();
         let entity_without = app.world_mut().spawn_empty().id();
-        let signal = SignalBuilder::from_entity(entity_with)
+        let signal = signal::from_entity(entity_with)
             .has_component::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
         signal.cleanup(app.world_mut());
-        let signal = SignalBuilder::from_entity(entity_without)
+        let signal = signal::from_entity(entity_without)
             .has_component::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
@@ -3618,7 +3650,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<TestData>>();
         let entity = app.world_mut().spawn(TestData(1)).id();
-        let signal = SignalBuilder::from_entity(entity)
+        let signal = signal::from_entity(entity)
             .component_changed::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
@@ -3648,7 +3680,7 @@ mod tests {
         // Test entity without component - signal should not fire
         app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
         let entity_without = app.world_mut().spawn_empty().id();
-        let signal = SignalBuilder::from_entity(entity_without)
+        let signal = signal::from_entity(entity_without)
             .component_changed::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
@@ -3667,7 +3699,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
         let values = Arc::new(Mutex::new(vec![1, 1, 2, 3, 3, 3, 4]));
-        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+        let signal = signal::from_system(clone!((values) move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -3697,7 +3729,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
         let values = Arc::new(Mutex::new(vec![10, 20, 30]));
-        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+        let signal = signal::from_system(clone!((values) move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -3722,12 +3754,35 @@ mod tests {
     }
 
     #[test]
+    fn test_once() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+        let counter = Arc::new(Mutex::new(0));
+        let signal = signal::once(42)
+            .map(clone!((counter) move |In(val): In<i32>| {
+                *counter.lock().unwrap() += 1;
+                val
+            }))
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+        assert_eq!(*counter.lock().unwrap(), 1);
+        app.update();
+        app.update();
+        // Should still be 42 and counter should still be 1 (no further emissions)
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+        assert_eq!(*counter.lock().unwrap(), 1);
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn test_take() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
         let counter = Arc::new(Mutex::new(0));
         let values = Arc::new(Mutex::new(vec![10, 20, 30]));
-        let signal = SignalBuilder::from_system(clone!((values) move |_: In<()>| {
+        let signal = signal::from_system(clone!((values) move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -3755,8 +3810,8 @@ mod tests {
     fn test_with() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
-        let signal = SignalBuilder::from_system(move |_: In<()>| 10)
-            .with(SignalBuilder::from_system(move |_: In<()>| "hello"))
+        let signal = signal::from_system(move |_: In<()>| 10)
+            .with(signal::from_system(move |_: In<()>| "hello"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -3769,16 +3824,13 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutputVec<(i32, i32)>>();
 
-        let left = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+        let left = signal::from_system(|_: In<()>, mut state: Local<i32>| {
             *state += 1;
             *state
         });
-        let right = SignalBuilder::from_system(|_: In<()>| 10).first();
+        let right = signal::from_system(|_: In<()>| 10).first();
 
-        let signal = left
-            .with(right)
-            .map(capture_output_vec)
-            .register(app.world_mut());
+        let signal = left.with(right).map(capture_output_vec).register(app.world_mut());
 
         app.update();
         assert_eq!(
@@ -3787,16 +3839,10 @@ mod tests {
         );
 
         app.update();
-        assert_eq!(
-            get_and_clear_output_vec::<(i32, i32)>(app.world_mut()),
-            vec![(2, 10)]
-        );
+        assert_eq!(get_and_clear_output_vec::<(i32, i32)>(app.world_mut()), vec![(2, 10)]);
 
         app.update();
-        assert_eq!(
-            get_and_clear_output_vec::<(i32, i32)>(app.world_mut()),
-            vec![(3, 10)]
-        );
+        assert_eq!(get_and_clear_output_vec::<(i32, i32)>(app.world_mut()), vec![(3, 10)]);
 
         signal.cleanup(app.world_mut());
     }
@@ -3806,7 +3852,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
 
-        let signal = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+        let signal = signal::from_system(|_: In<()>, mut state: Local<i32>| {
             *state += 1;
             *state
         })
@@ -3825,7 +3871,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, i32)>>();
 
-        let source = SignalBuilder::from_system(|_: In<()>, mut state: Local<i32>| {
+        let source = signal::from_system(|_: In<()>, mut state: Local<i32>| {
             *state += 1;
             *state
         });
@@ -3833,10 +3879,7 @@ mod tests {
         let left = source.clone().map_in(|x: i32| x + 1);
         let right = source.map_in(|x: i32| x + 10);
 
-        let signal = left
-            .with(right)
-            .map(capture_output)
-            .register(app.world_mut());
+        let signal = left.with(right).map(capture_output).register(app.world_mut());
 
         app.update();
         assert_eq!(get_output::<(i32, i32)>(app.world()), Some((2, 11)));
@@ -3849,13 +3892,11 @@ mod tests {
 
     #[test]
     fn test_zip_macro() {
-        use crate::signal::zip;
-
         let mut app = create_test_app();
 
         // Test 1 signal - returns 1-tuple
         app.init_resource::<SignalOutput<(i32,)>>();
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s1 = signal::from_system(|_: In<()>| 1);
         let signal = zip!(s1).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<(i32,)>(app.world()), Some((1,)));
@@ -3863,8 +3904,8 @@ mod tests {
 
         // Test 2 signals - same as .with()
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| "two");
         let signal = zip!(s1, s2).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<(i32, &'static str)>(app.world()), Some((1, "two")));
@@ -3872,35 +3913,44 @@ mod tests {
 
         // Test 3 signals - flat tuple (not nested)
         app.init_resource::<SignalOutput<(i32, &'static str, f64)>>();
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3.0);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| "two");
+        let s3 = signal::from_system(|_: In<()>| 3.0);
         let signal = zip!(s1, s2, s3).map(capture_output).register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<(i32, &'static str, f64)>(app.world()), Some((1, "two", 3.0)));
+        assert_eq!(
+            get_output::<(i32, &'static str, f64)>(app.world()),
+            Some((1, "two", 3.0))
+        );
         signal.cleanup(app.world_mut());
 
         // Test 4 signals - verifies flattening works for more signals
         app.init_resource::<SignalOutput<(i32, &'static str, f64, bool)>>();
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| "two");
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3.0);
-        let s4 = SignalBuilder::from_system(|_: In<()>| true);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| "two");
+        let s3 = signal::from_system(|_: In<()>| 3.0);
+        let s4 = signal::from_system(|_: In<()>| true);
         let signal = zip!(s1, s2, s3, s4).map(capture_output).register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<(i32, &'static str, f64, bool)>(app.world()), Some((1, "two", 3.0, true)));
+        assert_eq!(
+            get_output::<(i32, &'static str, f64, bool)>(app.world()),
+            Some((1, "two", 3.0, true))
+        );
         signal.cleanup(app.world_mut());
 
         // Test 5 signals - ensures unlimited recursion works
         app.init_resource::<SignalOutput<(i32, i32, i32, i32, i32)>>();
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
-        let s5 = SignalBuilder::from_system(|_: In<()>| 5);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 3);
+        let s4 = signal::from_system(|_: In<()>| 4);
+        let s5 = signal::from_system(|_: In<()>| 5);
         let signal = zip!(s1, s2, s3, s4, s5).map(capture_output).register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<(i32, i32, i32, i32, i32)>(app.world()), Some((1, 2, 3, 4, 5)));
+        assert_eq!(
+            get_output::<(i32, i32, i32, i32, i32)>(app.world()),
+            Some((1, 2, 3, 4, 5))
+        );
         signal.cleanup(app.world_mut());
     }
 
@@ -3908,14 +3958,14 @@ mod tests {
     fn test_flatten() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-        let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let signal_1 = signal::from_system(|_: In<()>| 1);
+        let signal_2 = signal::from_system(|_: In<()>| 2);
 
         #[derive(Resource, Default)]
         struct SignalSelector(bool);
 
         app.init_resource::<SignalSelector>();
-        let signal = SignalBuilder::from_system(
+        let signal = signal::from_system(
             move |_: In<()>, selector: Res<SignalSelector>| {
                 if selector.0 { signal_1.clone() } else { signal_2.clone() }
             },
@@ -3935,7 +3985,7 @@ mod tests {
     fn test_eq() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-        let source = SignalBuilder::from_system(|_: In<()>| 1);
+        let source = signal::from_system(|_: In<()>| 1);
         let signal = source.clone().eq(1).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
@@ -3950,7 +4000,7 @@ mod tests {
     fn test_neq() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-        let source = SignalBuilder::from_system(|_: In<()>| 1);
+        let source = signal::from_system(|_: In<()>| 1);
         let signal = source.clone().neq(2).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(true));
@@ -3965,14 +4015,14 @@ mod tests {
     fn test_not() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<bool>>();
-        let signal = SignalBuilder::from_system(|_: In<()>| true)
+        let signal = signal::from_system(|_: In<()>| true)
             .not()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(get_output::<bool>(app.world()), Some(false));
         signal.cleanup(app.world_mut());
-        let signal = SignalBuilder::from_system(|_: In<()>| false)
+        let signal = signal::from_system(|_: In<()>| false)
             .not()
             .map(capture_output)
             .register(app.world_mut());
@@ -3986,7 +4036,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
         let values = Arc::new(Mutex::new(vec![1, 2, 3, 4, 5, 6]));
-        let signal = SignalBuilder::from_system(move |_: In<()>| {
+        let signal = signal::from_system(move |_: In<()>| {
             let mut values_lock = values.lock().unwrap();
             if values_lock.is_empty() {
                 None
@@ -4008,14 +4058,14 @@ mod tests {
     fn test_switch() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
-        let signal_1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let signal_2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let signal_1 = signal::from_system(|_: In<()>| 1);
+        let signal_2 = signal::from_system(|_: In<()>| 2);
 
         #[derive(Resource, Default)]
         struct SwitcherToggle(bool);
 
         app.init_resource::<SwitcherToggle>();
-        let signal = SignalBuilder::from_system(move |_: In<()>, mut toggle: ResMut<SwitcherToggle>| {
+        let signal = signal::from_system(move |_: In<()>, mut toggle: ResMut<SwitcherToggle>| {
             let current = toggle.0;
             toggle.0 = !toggle.0;
             current
@@ -4062,8 +4112,8 @@ mod tests {
             app.init_resource::<SignalVecOutput<i32>>();
 
             // Two different data sources to switch between.
-            let list_a = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
-            let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            let list_a = MutableVec::builder().values([10, 20]).spawn(app.world_mut());
+            let list_b = MutableVec::builder().values([100, 200, 300]).spawn(app.world_mut());
             let signal_a = list_a.signal_vec().map_in(identity);
             let signal_b = list_b.signal_vec();
 
@@ -4077,8 +4127,7 @@ mod tests {
             app.insert_resource(ListSelector::A);
 
             // The control signal reads the resource.
-            let control_signal =
-                SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
+            let control_signal = signal::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_vec(
@@ -4190,7 +4239,7 @@ mod tests {
 
             // Start with an EMPTY list - this tests the `was_initially_empty` code path
             let list_a: MutableVec<i32> = app.world_mut().into();
-            let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(app.world_mut());
+            let list_b = MutableVec::builder().values([100, 200, 300]).spawn(app.world_mut());
             let signal_a = list_a.signal_vec().map_in(identity);
             let signal_b = list_b.signal_vec();
 
@@ -4204,8 +4253,7 @@ mod tests {
             app.insert_resource(ListSelector::A);
 
             // The control signal reads the resource.
-            let control_signal =
-                SignalBuilder::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
+            let control_signal = signal::from_system(|_: In<()>, selector: Res<ListSelector>| *selector).dedupe();
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_vec(
@@ -4285,7 +4333,7 @@ mod tests {
 
     #[test]
     fn test_switch_signal_map() {
-        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMapBuilder, SignalMapExt};
+        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMap, SignalMapExt};
 
         #[derive(Resource, Default, core::fmt::Debug)]
         struct SignalMapOutput<K, V>(Vec<MapDiff<K, V>>)
@@ -4318,8 +4366,12 @@ mod tests {
             app.init_resource::<SignalMapOutput<i32, i32>>();
 
             // Two different data sources to switch between.
-            let map_a = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(app.world_mut());
-            let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(app.world_mut());
+            let map_a = MutableBTreeMap::builder()
+                .values([(1, 10), (2, 20)])
+                .spawn(app.world_mut());
+            let map_b = MutableBTreeMap::builder()
+                .values([(1, 100), (2, 200), (3, 300)])
+                .spawn(app.world_mut());
             let signal_a = map_a.signal_map().map_value(|In(x): In<i32>| x);
             let signal_b = map_b.signal_map();
 
@@ -4333,7 +4385,7 @@ mod tests {
             app.insert_resource(MapSelector::A);
 
             // The control signal reads the resource.
-            let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
+            let control_signal = signal::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_map(
@@ -4425,7 +4477,7 @@ mod tests {
 
     #[test]
     fn test_switch_signal_map_initially_empty() {
-        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMap, MutableBTreeMapBuilder, SignalMapExt};
+        use crate::signal_map::{IntoSignalMapEither, MapDiff, MutableBTreeMap, SignalMapExt};
 
         #[derive(Resource, Default, core::fmt::Debug)]
         struct SignalMapOutput<K, V>(Vec<MapDiff<K, V>>)
@@ -4459,7 +4511,9 @@ mod tests {
 
             // Start with an EMPTY map - this tests the `was_initially_empty` code path
             let map_a: MutableBTreeMap<i32, i32> = app.world_mut().into();
-            let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(app.world_mut());
+            let map_b = MutableBTreeMap::builder()
+                .values([(1, 100), (2, 200), (3, 300)])
+                .spawn(app.world_mut());
             let signal_a = map_a.signal_map().map_value(|In(x): In<i32>| x);
             let signal_b = map_b.signal_map();
 
@@ -4473,7 +4527,7 @@ mod tests {
             app.insert_resource(MapSelector::A);
 
             // The control signal reads the resource.
-            let control_signal = SignalBuilder::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
+            let control_signal = signal::from_system(|_: In<()>, selector: Res<MapSelector>| *selector).dedupe();
 
             // The signal chain under test.
             let switched_signal = control_signal.dedupe().switch_signal_map(
@@ -4553,7 +4607,7 @@ mod tests {
         app.init_resource::<SignalOutput<i32>>();
 
         // A simple counter to generate a new value (1, 2, 3...) for each update.
-        let source_signal = SignalBuilder::from_system(|_: In<()>, mut counter: Local<i32>| {
+        let source_signal = signal::from_system(|_: In<()>, mut counter: Local<i32>| {
             *counter += 1;
             *counter
         });
@@ -4641,7 +4695,7 @@ mod tests {
         app.init_resource::<SignalOutput<&'static str>>();
 
         // Test true case
-        let signal_true = SignalBuilder::from_system(|_: In<()>| true)
+        let signal_true = signal::from_system(|_: In<()>| true)
             .map_bool(|_: In<()>| "True Branch", |_: In<()>| "False Branch")
             .map(capture_output)
             .register(app.world_mut());
@@ -4650,7 +4704,7 @@ mod tests {
         signal_true.cleanup(app.world_mut());
 
         // Test false case
-        let signal_false = SignalBuilder::from_system(|_: In<()>| false)
+        let signal_false = signal::from_system(|_: In<()>| false)
             .map_bool(|_: In<()>| "True Branch", |_: In<()>| "False Branch")
             .map(capture_output)
             .register(app.world_mut());
@@ -4665,7 +4719,7 @@ mod tests {
         app.init_resource::<SignalOutput<Option<&'static str>>>();
 
         // --- Test true case ---
-        let source_true = SignalBuilder::from_system(|_: In<()>| true);
+        let source_true = signal::from_system(|_: In<()>| true);
         let signal_true = source_true
             .map_true(|_: In<()>| "Was True")
             .map(capture_output)
@@ -4680,7 +4734,7 @@ mod tests {
 
         // --- Test false case --- Reset output
         app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
-        let source_false = SignalBuilder::from_system(|_: In<()>| false);
+        let source_false = signal::from_system(|_: In<()>| false);
         let signal_false = source_false
             .map_true(|_: In<()>| "Was True")
             .map(capture_output)
@@ -4700,7 +4754,7 @@ mod tests {
         app.init_resource::<SignalOutput<Option<&'static str>>>();
 
         // --- Test false case ---
-        let source_false = SignalBuilder::from_system(|_: In<()>| false);
+        let source_false = signal::from_system(|_: In<()>| false);
         let signal_false = source_false
             .map_false(|_: In<()>| "Was False")
             .map(capture_output)
@@ -4715,7 +4769,7 @@ mod tests {
 
         // --- Test true case --- Reset output
         app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
-        let source_true = SignalBuilder::from_system(|_: In<()>| true);
+        let source_true = signal::from_system(|_: In<()>| true);
         let signal_true = source_true
             .map_false(|_: In<()>| "Was False")
             .map(capture_output)
@@ -4735,7 +4789,7 @@ mod tests {
         app.init_resource::<SignalOutput<String>>();
 
         // Test Some case
-        let signal_some = SignalBuilder::from_system(|_: In<()>| Some(42))
+        let signal_some = signal::from_system(|_: In<()>| Some(42))
             .map_option(
                 |In(value): In<i32>| format!("Some({value})"),
                 |_: In<()>| "None".to_string(),
@@ -4750,7 +4804,7 @@ mod tests {
         app.world_mut().resource_mut::<SignalOutput<String>>().0 = None;
 
         // Test None case
-        let signal_none = SignalBuilder::from_system(|_: In<()>| None::<i32>)
+        let signal_none = signal::from_system(|_: In<()>| None::<i32>)
             .map_option(
                 |In(value): In<i32>| format!("Some({value})"),
                 |_: In<()>| "None".to_string(),
@@ -4768,7 +4822,7 @@ mod tests {
         app.init_resource::<SignalOutput<Option<String>>>();
 
         // --- Test Some case ---
-        let source_some = SignalBuilder::from_system(|_: In<()>| Some(42));
+        let source_some = signal::from_system(|_: In<()>| Some(42));
         let signal_some = source_some
             .map_some(|In(val): In<i32>| format!("Got {val}"))
             .map(capture_output)
@@ -4783,7 +4837,7 @@ mod tests {
 
         // --- Test None case --- Reset output
         app.world_mut().resource_mut::<SignalOutput<Option<String>>>().0 = None;
-        let source_none = SignalBuilder::from_system(|_: In<()>| None::<i32>);
+        let source_none = signal::from_system(|_: In<()>| None::<i32>);
         let signal_none = source_none
             .map_some(|In(val): In<i32>| format!("Got {val}"))
             .map(capture_output)
@@ -4803,7 +4857,7 @@ mod tests {
         app.init_resource::<SignalOutput<Option<&'static str>>>();
 
         // --- Test None case ---
-        let source_none = SignalBuilder::from_system(|_: In<()>| None::<i32>);
+        let source_none = signal::from_system(|_: In<()>| None::<i32>);
         let signal_none = source_none
             .map_none(|_: In<()>| "Was None")
             .map(capture_output)
@@ -4818,7 +4872,7 @@ mod tests {
 
         // --- Test Some case --- Reset output
         app.world_mut().resource_mut::<SignalOutput<Option<&'static str>>>().0 = None;
-        let source_some = SignalBuilder::from_system(|_: In<()>| Some(42));
+        let source_some = signal::from_system(|_: In<()>| Some(42));
         let signal_some = source_some
             .map_none(|_: In<()>| "Was None")
             .map(capture_output)
@@ -4837,7 +4891,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalVecOutput<i32>>();
         let source_vec = Arc::new(Mutex::new(None::<Vec<i32>>));
-        let source_signal = SignalBuilder::from_system(clone!((source_vec) move |_: In<()>| {
+        let source_signal = signal::from_system(clone!((source_vec) move |_: In<()>| {
             source_vec.lock().unwrap().take()
         }));
         let signal_vec = source_signal.to_signal_vec();
@@ -4887,7 +4941,7 @@ mod tests {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<i32>>();
 
-        let signal = SignalBuilder::from_system(|_: In<()>| 42)
+        let signal = signal::from_system(|_: In<()>| 42)
             .map(capture_output)
             .register(app.world_mut());
 
@@ -4902,7 +4956,7 @@ mod tests {
         app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
 
         let test_entity = app.world_mut().spawn_empty().id();
-        let signal = SignalBuilder::from_entity(test_entity)
+        let signal = signal::from_entity(test_entity)
             .map(capture_output)
             .register(app.world_mut());
 
@@ -4920,7 +4974,7 @@ mod tests {
         let test_entity = app.world_mut().spawn_empty().id();
         lazy.set(test_entity);
 
-        let signal = SignalBuilder::from_lazy_entity(lazy)
+        let signal = signal::from_lazy_entity(lazy)
             .map(capture_output)
             .register(app.world_mut());
 
@@ -4941,7 +4995,7 @@ mod tests {
         app.world_mut().entity_mut(parent).add_child(child);
 
         // Test self (generations = 0)
-        let signal_self = SignalBuilder::from_ancestor(child, 0)
+        let signal_self = signal::from_ancestor(child, 0)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -4949,7 +5003,7 @@ mod tests {
         signal_self.cleanup(app.world_mut());
 
         // Test parent (generations = 1)
-        let signal_parent = SignalBuilder::from_ancestor(child, 1)
+        let signal_parent = signal::from_ancestor(child, 1)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -4957,7 +5011,7 @@ mod tests {
         signal_parent.cleanup(app.world_mut());
 
         // Test grandparent (generations = 2)
-        let signal_gp = SignalBuilder::from_ancestor(child, 2)
+        let signal_gp = signal::from_ancestor(child, 2)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -4966,7 +5020,7 @@ mod tests {
 
         // Test invalid generation
         app.world_mut().resource_mut::<SignalOutput<Entity>>().0 = None;
-        let signal_invalid = SignalBuilder::from_ancestor(child, 3)
+        let signal_invalid = signal::from_ancestor(child, 3)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -4992,7 +5046,7 @@ mod tests {
         lazy_child.set(child);
 
         // Test parent (generations = 1)
-        let signal_parent = SignalBuilder::from_ancestor_lazy(lazy_child.clone(), 1)
+        let signal_parent = signal::from_ancestor_lazy(lazy_child.clone(), 1)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5000,7 +5054,7 @@ mod tests {
         signal_parent.cleanup(app.world_mut());
 
         // Test grandparent (generations = 2)
-        let signal_gp = SignalBuilder::from_ancestor_lazy(lazy_child, 2)
+        let signal_gp = signal::from_ancestor_lazy(lazy_child, 2)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5017,9 +5071,7 @@ mod tests {
         let child = app.world_mut().spawn_empty().id();
         app.world_mut().entity_mut(parent).add_child(child);
 
-        let signal = SignalBuilder::from_parent(child)
-            .map(capture_output)
-            .register(app.world_mut());
+        let signal = signal::from_parent(child).map(capture_output).register(app.world_mut());
         app.update();
         assert_eq!(get_output::<Entity>(app.world()), Some(parent));
         signal.cleanup(app.world_mut());
@@ -5027,7 +5079,7 @@ mod tests {
         // Test no parent
         app.world_mut().resource_mut::<SignalOutput<Entity>>().0 = None;
         let no_parent_entity = app.world_mut().spawn_empty().id();
-        let signal_no_parent = SignalBuilder::from_parent(no_parent_entity)
+        let signal_no_parent = signal::from_parent(no_parent_entity)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5050,7 +5102,7 @@ mod tests {
         app.world_mut().entity_mut(parent).add_child(child);
         lazy_child.set(child);
 
-        let signal = SignalBuilder::from_parent_lazy(lazy_child)
+        let signal = signal::from_parent_lazy(lazy_child)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5065,7 +5117,7 @@ mod tests {
 
         // Test component exists
         let entity_with = app.world_mut().spawn(TestData(42)).id();
-        let signal_with = SignalBuilder::from_component::<TestData>(entity_with)
+        let signal_with = signal::from_component::<TestData>(entity_with)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5075,7 +5127,7 @@ mod tests {
         // Test component missing
         app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
         let entity_without = app.world_mut().spawn_empty().id();
-        let signal_without = SignalBuilder::from_component::<TestData>(entity_without)
+        let signal_without = signal::from_component::<TestData>(entity_without)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5096,7 +5148,7 @@ mod tests {
         let entity_with = app.world_mut().spawn(TestData(42)).id();
         lazy.set(entity_with);
 
-        let signal = SignalBuilder::from_component_lazy::<TestData>(lazy)
+        let signal = signal::from_component_lazy::<TestData>(lazy)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5111,7 +5163,7 @@ mod tests {
 
         // Test component exists
         let entity_with = app.world_mut().spawn(TestData(42)).id();
-        let signal_with = SignalBuilder::from_component_option::<TestData>(entity_with)
+        let signal_with = signal::from_component_option::<TestData>(entity_with)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5120,7 +5172,7 @@ mod tests {
 
         // Test component missing
         let entity_without = app.world_mut().spawn_empty().id();
-        let signal_without = SignalBuilder::from_component_option::<TestData>(entity_without)
+        let signal_without = signal::from_component_option::<TestData>(entity_without)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5141,7 +5193,7 @@ mod tests {
         let entity_with = app.world_mut().spawn(TestData(42)).id();
         lazy.set(entity_with);
 
-        let signal = SignalBuilder::from_component_option_lazy::<TestData>(lazy)
+        let signal = signal::from_component_option_lazy::<TestData>(lazy)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5156,7 +5208,7 @@ mod tests {
 
         // Test resource exists
         app.insert_resource(TestData(42));
-        let signal_with = SignalBuilder::from_resource::<TestData>()
+        let signal_with = signal::from_resource::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5166,7 +5218,7 @@ mod tests {
         // Test resource missing
         app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
         app.world_mut().remove_resource::<TestData>();
-        let signal_without = SignalBuilder::from_resource::<TestData>()
+        let signal_without = signal::from_resource::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5185,7 +5237,7 @@ mod tests {
 
         // Test resource exists
         app.insert_resource(TestData(42));
-        let signal_with = SignalBuilder::from_resource_option::<TestData>()
+        let signal_with = signal::from_resource_option::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5194,7 +5246,7 @@ mod tests {
 
         // Test resource missing
         app.world_mut().remove_resource::<TestData>();
-        let signal_without = SignalBuilder::from_resource_option::<TestData>()
+        let signal_without = signal::from_resource_option::<TestData>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5207,12 +5259,138 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_from_component_changed() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        // Spawn entity with component
+        let entity = app.world_mut().spawn(TestData(42)).id();
+        let signal = signal::from_component_changed::<TestData>(entity)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        // First update should emit because component was just added (Changed)
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+
+        // Clear output and update again - should NOT emit because nothing changed
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when component has not changed"
+        );
+
+        // Mutate the component and update - should emit
+        app.world_mut().entity_mut(entity).get_mut::<TestData>().unwrap().0 = 100;
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(100)));
+
+        signal.cleanup(app.world_mut());
+
+        // Test component missing
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        let entity_without = app.world_mut().spawn_empty().id();
+        let signal_without = signal::from_component_changed::<TestData>(entity_without)
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when component is missing"
+        );
+        signal_without.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_component_changed_lazy() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        let lazy = LazyEntity::new();
+        let entity = app.world_mut().spawn(TestData(42)).id();
+        lazy.set(entity);
+
+        let signal = signal::from_component_changed_lazy::<TestData>(lazy)
+            .map(capture_output)
+            .register(app.world_mut());
+
+        // First update should emit because component was just added (Changed)
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+
+        // Clear output and update again - should NOT emit because nothing changed
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when component has not changed"
+        );
+
+        // Mutate the component and update - should emit
+        app.world_mut().entity_mut(entity).get_mut::<TestData>().unwrap().0 = 100;
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(100)));
+
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_from_resource_changed() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<TestData>>();
+
+        // Insert resource
+        app.insert_resource(TestData(42));
+        let signal = signal::from_resource_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+
+        // First update should emit because resource was just added (Changed)
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+
+        // Clear output and update again - should NOT emit because nothing changed
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when resource has not changed"
+        );
+
+        // Mutate the resource and update - should emit
+        app.world_mut().resource_mut::<TestData>().0 = 100;
+        app.update();
+        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(100)));
+
+        signal.cleanup(app.world_mut());
+
+        // Test resource missing
+        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.world_mut().remove_resource::<TestData>();
+        let signal_without = signal::from_resource_changed::<TestData>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<TestData>(app.world()),
+            None,
+            "Should terminate when resource is missing"
+        );
+        signal_without.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn test_signal_option() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<Option<i32>>>();
 
         // Test Some variant - signal wrapped in Some
-        let some_signal = crate::signal::option(Some(SignalBuilder::from_system(|_: In<()>| 42)))
+        let some_signal = crate::signal::option(Some(signal::from_system(|_: In<()>| 42)))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5239,14 +5417,13 @@ mod tests {
         // Test with dynamic signal
         app.world_mut().resource_mut::<SignalOutput<Option<i32>>>().0 = None;
         let counter = Arc::new(Mutex::new(0));
-        let dynamic_signal =
-            crate::signal::option(Some(SignalBuilder::from_system(clone!((counter) move |_: In<()>| {
-                let mut c = counter.lock().unwrap();
-                *c += 1;
-                *c
-            }))))
-            .map(capture_output)
-            .register(app.world_mut());
+        let dynamic_signal = crate::signal::option(Some(signal::from_system(clone!((counter) move |_: In<()>| {
+            let mut c = counter.lock().unwrap();
+            *c += 1;
+            *c
+        }))))
+        .map(capture_output)
+        .register(app.world_mut());
 
         app.update();
         assert_eq!(get_output::<Option<i32>>(app.world()), Some(Some(1)));
@@ -5264,12 +5441,12 @@ mod tests {
 
         // Test switching between Some and None based on a condition
         let condition = Arc::new(Mutex::new(true));
-        let signal = SignalBuilder::from_system(clone!((condition) move |_: In<()>| {
+        let signal = signal::from_system(clone!((condition) move |_: In<()>| {
             *condition.lock().unwrap()
         }))
         .map(move |In(use_signal): In<bool>| {
             if use_signal {
-                crate::signal::option(Some(SignalBuilder::from_system(|_: In<()>| 42)))
+                crate::signal::option(Some(signal::from_system(|_: In<()>| 42)))
             } else {
                 crate::signal::option(None)
             }
@@ -5310,7 +5487,7 @@ mod tests {
     #[test]
     fn simple_signal_lazy_outlives_handle() {
         let mut app = create_test_app();
-        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
+        let source_signal_struct = signal::from_system(|_: In<()>| 1);
         let handle = source_signal_struct.clone().register(app.world_mut());
         let system_entity = handle.0.entity();
         assert!(
@@ -5365,7 +5542,7 @@ mod tests {
         let mut app = create_test_app();
 
         // LS.state_refs = 1
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
+        let s1 = signal::from_system(|_: In<()>| 1);
 
         // LS.state_refs = 2
         let s2 = s1.clone();
@@ -5406,7 +5583,7 @@ mod tests {
         let mut app = create_test_app();
 
         // LS.state_refs = 1
-        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
+        let source_signal_struct = signal::from_system(|_: In<()>| 1);
 
         // LS.state_refs = 2 (struct, holder). RegCount = 1.
         let handle1 = source_signal_struct.clone().register(app.world_mut());
@@ -5439,7 +5616,7 @@ mod tests {
     #[test]
     fn chained_signals_cleanup() {
         let mut app = create_test_app();
-        let source_s = SignalBuilder::from_system(|_: In<()>| 1);
+        let source_s = signal::from_system(|_: In<()>| 1);
 
         // map_s holds source_s
         let map_s = source_s.map(|In(val)| val + 1);
@@ -5487,7 +5664,7 @@ mod tests {
         let mut app = create_test_app();
 
         // LS.state_refs = 1
-        let source_signal_struct = SignalBuilder::from_system(|_: In<()>| 1);
+        let source_signal_struct = signal::from_system(|_: In<()>| 1);
 
         // LS.state_refs = 2 (struct, holder). RegCount = 1.
         let handle1 = source_signal_struct.clone().register(app.world_mut());
@@ -5522,10 +5699,10 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<bool>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 1);
+        let s3 = signal::from_system(|_: In<()>| 1);
+        let s4 = signal::from_system(|_: In<()>| 2);
 
         // Test equality
         let eq_signal = crate::signal::eq!(s1.clone(), s2.clone(), s3.clone());
@@ -5545,8 +5722,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<bool>::default());
 
-        let t = SignalBuilder::from_system(|_: In<()>| true);
-        let f = SignalBuilder::from_system(|_: In<()>| false);
+        let t = signal::from_system(|_: In<()>| true);
+        let f = signal::from_system(|_: In<()>| false);
 
         // Test AND (all true)
         let all_signal = crate::signal::all!(t.clone(), t.clone(), t.clone());
@@ -5566,8 +5743,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<bool>::default());
 
-        let t = SignalBuilder::from_system(|_: In<()>| true);
-        let f = SignalBuilder::from_system(|_: In<()>| false);
+        let t = signal::from_system(|_: In<()>| true);
+        let f = signal::from_system(|_: In<()>| false);
 
         // Test OR (all false)
         let any_signal = crate::signal::any!(f.clone(), f.clone(), f.clone());
@@ -5587,9 +5764,9 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<bool>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 3);
 
         // Test distinct (all different)
         let distinct_signal = crate::signal::distinct!(s1.clone(), s2.clone(), s3.clone());
@@ -5601,8 +5778,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<bool>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
 
         let distinct_signal = crate::signal::distinct!(s1.clone(), s2.clone(), s1.clone());
         distinct_signal.map(capture_output::<bool>).register(app.world_mut());
@@ -5615,8 +5792,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
 
         // Test sum with 2 signals
         let sum_signal = crate::signal::sum!(s1, s2);
@@ -5628,10 +5805,10 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 3);
+        let s4 = signal::from_system(|_: In<()>| 4);
 
         let sum_signal = crate::signal::sum!(s1, s2, s3, s4);
         sum_signal.map(capture_output::<i32>).register(app.world_mut());
@@ -5644,8 +5821,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s1 = signal::from_system(|_: In<()>| 2);
+        let s2 = signal::from_system(|_: In<()>| 3);
 
         // Test product with 2 signals
         let product_signal = crate::signal::product!(s1, s2);
@@ -5657,10 +5834,10 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 1);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 3);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 4);
+        let s1 = signal::from_system(|_: In<()>| 1);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 3);
+        let s4 = signal::from_system(|_: In<()>| 4);
 
         let product_signal = crate::signal::product!(s1, s2, s3, s4);
         product_signal.map(capture_output::<i32>).register(app.world_mut());
@@ -5673,8 +5850,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s1 = signal::from_system(|_: In<()>| 5);
+        let s2 = signal::from_system(|_: In<()>| 2);
 
         // Test min with 2 signals
         let min_signal = crate::signal::min!(s1, s2);
@@ -5686,10 +5863,10 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s1 = signal::from_system(|_: In<()>| 10);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 7);
+        let s4 = signal::from_system(|_: In<()>| 3);
 
         let min_signal = crate::signal::min!(s1, s2, s3, s4);
         min_signal.map(capture_output::<i32>).register(app.world_mut());
@@ -5702,8 +5879,8 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 5);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
+        let s1 = signal::from_system(|_: In<()>| 5);
+        let s2 = signal::from_system(|_: In<()>| 2);
 
         // Test max with 2 signals
         let max_signal = crate::signal::max!(s1, s2);
@@ -5715,10 +5892,10 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let s1 = SignalBuilder::from_system(|_: In<()>| 10);
-        let s2 = SignalBuilder::from_system(|_: In<()>| 2);
-        let s3 = SignalBuilder::from_system(|_: In<()>| 7);
-        let s4 = SignalBuilder::from_system(|_: In<()>| 3);
+        let s1 = signal::from_system(|_: In<()>| 10);
+        let s2 = signal::from_system(|_: In<()>| 2);
+        let s3 = signal::from_system(|_: In<()>| 7);
+        let s4 = signal::from_system(|_: In<()>| 3);
 
         let max_signal = crate::signal::max!(s1, s2, s3, s4);
         max_signal.map(capture_output::<i32>).register(app.world_mut());
@@ -5731,7 +5908,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<&'static str>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<bool>| {
                 *state = !*state;
                 *state
@@ -5760,7 +5937,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<bool>| {
                 *state = !*state;
                 *state
@@ -5793,7 +5970,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<Option<i32>>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<bool>| {
                 *state = !*state;
                 *state
@@ -5821,7 +5998,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<Option<i32>>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<bool>| {
                 *state = !*state;
                 *state
@@ -5849,7 +6026,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<i32>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<Option<i32>>| {
                 *state = match *state {
                     None => Some(10),
@@ -5886,7 +6063,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<Option<i32>>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<Option<i32>>| {
                 *state = if state.is_some() { None } else { Some(42) };
                 *state
@@ -5914,7 +6091,7 @@ mod tests {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput::<Option<i32>>::default());
 
-        let signal = SignalBuilder::from_system({
+        let signal = signal::from_system({
             move |_: In<()>, mut state: Local<Option<i32>>| {
                 *state = if state.is_some() { None } else { Some(100) };
                 *state

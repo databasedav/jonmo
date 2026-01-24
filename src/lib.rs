@@ -14,14 +14,19 @@ use bevy_ecs::{
     schedule::{InternedScheduleLabel, ScheduleLabel},
 };
 
-#[cfg(feature = "builder")]
-pub mod builder;
 pub mod graph;
 pub mod signal;
 pub mod signal_map;
 pub mod signal_vec;
 #[allow(missing_docs)]
 pub mod utils;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "builder")] {
+        pub mod builder;
+        pub use builder::Builder;
+    }
+}
 
 /// Includes the systems required for [jonmo](crate) to function.
 ///
@@ -116,19 +121,15 @@ impl Plugin for JonmoPlugin {
 /// `use jonmo::prelude::*;` imports everything one needs to use start using [jonmo](crate).
 pub mod prelude {
     #[cfg(feature = "builder")]
-    pub use crate::builder::{JonmoBuilder, SignalMapTaskExt, SignalTask, SignalTaskExt, SignalVecTaskExt};
+    pub use crate::builder::{SignalMapTaskExt, SignalTask, SignalTaskExt, SignalVecTaskExt};
     pub use crate::{
         JonmoPlugin,
         graph::SignalHandles,
-        signal::{self, IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
+        signal::{self, IntoSignalEither, Signal, SignalEither, SignalExt},
         signal_map::{
-            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap,
-            SignalMapEither, SignalMapExt,
+            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapData, SignalMap, SignalMapEither, SignalMapExt,
         },
-        signal_vec::{
-            IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
-            SignalVecExt,
-        },
+        signal_vec::{IntoSignalVecEither, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
         utils::{LazyEntity, clone, deref_cloned, deref_copied},
     };
     #[doc(no_inline)]

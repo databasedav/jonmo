@@ -1,23 +1,21 @@
 //! Reactive entity builder ported from [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
 use super::{
     graph::{SignalHandle, SignalHandles},
-    signal::{Signal, SignalBuilder, SignalExt},
+    signal::{Signal, SignalExt},
     signal_map::{SignalMap, SignalMapExt},
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
-    utils::{LazyEntity, SSs, ancestor_map},
+    utils::{LazyEntity, SSs},
 };
 use bevy_ecs::{
     component::Mutable,
     lifecycle::HookContext,
     prelude::*,
     system::{IntoObserverSystem, RunSystemOnce},
-    world::DeferredWorld,
+    world::{DeferredWorld, error::EntityMutableFetchError},
 };
 use bevy_log::warn;
-use bevy_platform::{
-    prelude::*,
-    sync::{Arc, Mutex},
-};
+use bevy_platform::prelude::*;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // TODO: the fluent interface link breaks cargo fmt ??
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of
@@ -34,34 +32,33 @@ use bevy_platform::{
 /// # `Clone` semantics
 ///
 /// This type implements [`Clone`] **only** to satisfy trait bounds required by signal combinators.
-/// **Cloning [`JonmoBuilder`]s at runtime is a bug.** See [`JonmoBuilder::clone`] for
-/// details.
+/// **Cloning [`jonmo::Builder`](Builder)s at runtime is a bug.** See
+/// [`jonmo::Builder::clone`](Builder::clone) for details.
 #[derive(Default)]
-pub struct JonmoBuilder {
+pub struct Builder {
     #[allow(clippy::type_complexity)]
-    on_spawns: Arc<Mutex<Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>>>,
-    child_block_populations: Arc<Mutex<Vec<usize>>>,
+    on_spawns: Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>,
+    /// Counter for assigning block indices during builder construction.
+    /// Each child/children/child_signal/children_signal_vec call gets a unique block index.
+    next_block: AtomicUsize,
 }
 
-impl Clone for JonmoBuilder {
+impl Clone for Builder {
     /// # Warning
     ///
     /// This clone implementation exists **only** to satisfy trait bounds required by signal
     /// combinators (e.g., [`SignalExt::map`], [`SignalVecExt::filter_map`]). **Cloning
-    /// [`JonmoBuilder`]s at runtime is a bug and will lead to unexpected behavior.**
+    /// [`jonmo::Builder`](Builder)s at runtime is a bug and will lead to unexpected behavior.**
     ///
-    /// Clones share internal on-spawn hooks via [`Arc`]. These hooks are one-shot ([`FnOnce`])
-    /// and are consumed when the builder is spawned. Spawning one clone will affect all other
-    /// clones.
-    ///
-    /// Use factory functions instead if you need reusable UI templates:
+    /// Clones produce an empty builder with no on-spawn hooks. Use factory functions instead
+    /// if you need reusable UI templates:
     ///
     /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// fn my_widget(label: &str) -> JonmoBuilder {
-    ///     JonmoBuilder::new().insert(Name::new(label.to_string()))
+    /// fn my_widget(label: &str) -> jonmo::Builder {
+    ///     jonmo::Builder::new().insert(Name::new(label.to_string()))
     ///     // ... other configuration
     /// }
     ///
@@ -73,35 +70,34 @@ impl Clone for JonmoBuilder {
     #[track_caller]
     fn clone(&self) -> Self {
         warn!(
-            "Cloning `JonmoBuilder` at {} is a bug! `JonmoBuilder`'s `Clone` shares internal on-spawn \
-             hook queues via `Arc`. These hooks are one-shot (`FnOnce`) and are consumed on spawn. \
-             Spawning one clone will affect all other clones. Use factory functions instead if you \
-             need reusable UI templates.",
+            "Cloning `jonmo::Builder` at {} is a bug! Use a factory function instead.",
             core::panic::Location::caller()
         );
 
-        Self {
-            on_spawns: self.on_spawns.clone(),
-            child_block_populations: self.child_block_populations.clone(),
-        }
+        Self::default()
     }
 }
 
-impl<T: Bundle> From<T> for JonmoBuilder {
+impl<T: Bundle> From<T> for Builder {
     fn from(bundle: T) -> Self {
         Self::new().insert(bundle)
     }
 }
 
-impl JonmoBuilder {
+/// Component that tracks the population of each child block for offset calculation.
+/// Used internally by reactive child methods.
+#[derive(Component, Default)]
+struct ChildBlockPopulations(Vec<usize>);
+
+impl Builder {
     #[allow(missing_docs)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
-    pub fn on_spawn(self, on_spawn: impl FnOnce(&mut World, Entity) + SSs) -> Self {
-        self.on_spawns.lock().unwrap().push(Box::new(on_spawn));
+    pub fn on_spawn(mut self, on_spawn: impl FnOnce(&mut World, Entity) + SSs) -> Self {
+        self.on_spawns.push(Box::new(on_spawn));
         self
     }
 
@@ -135,18 +131,18 @@ impl JonmoBuilder {
     ///     value: i32,
     /// }
     ///
-    /// let my_signal_task = SignalBuilder::from_resource::<MyResource>()
+    /// let my_signal_task = signal::from_resource::<MyResource>()
     ///     .map_in(|r: MyResource| println!("{}", r.value))
     ///     .task();
     ///
     /// let mut world = World::new();
-    /// let my_mutable_vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
+    /// let my_mutable_vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
     /// let my_signal_vec_task = my_mutable_vec
     ///     .signal_vec()
     ///     .map_in(|item: i32| println!("{}", item))
     ///     .task();
     ///
-    /// JonmoBuilder::new().hold_tasks([my_signal_task, my_signal_vec_task]);
+    /// jonmo::Builder::new().hold_tasks([my_signal_task, my_signal_vec_task]);
     /// ```
     pub fn hold_tasks(self, tasks: impl IntoIterator<Item = Box<dyn SignalTask>> + SSs) -> Self {
         self.on_spawn(move |world, entity| {
@@ -158,9 +154,7 @@ impl JonmoBuilder {
     /// Run a function with this builder's [`EntityWorldMut`].
     pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
         self.on_spawn(move |world, entity| {
-            if let Ok(entity) = world.get_entity_mut(entity) {
-                f(entity);
-            }
+            f(world.entity_mut(entity));
         })
     }
 
@@ -187,9 +181,7 @@ impl JonmoBuilder {
         observer: impl IntoObserverSystem<E, B, Marker> + Sync,
     ) -> Self {
         self.on_spawn(|world, entity| {
-            if let Ok(mut entity) = world.get_entity_mut(entity) {
-                entity.observe(observer);
-            }
+            world.entity_mut(entity).observe(observer);
         })
     }
 
@@ -197,12 +189,11 @@ impl JonmoBuilder {
     /// [`DeferredWorld`] and this builder's [`Entity`].
     pub fn on_despawn(self, on_despawn: impl FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static) -> Self {
         self.on_spawn(|world, entity| {
-            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                if let Some(mut on_despawn_component) = entity_mut.get_mut::<OnDespawnCallbacks>() {
-                    on_despawn_component.0.push(Box::new(on_despawn));
-                } else {
-                    entity_mut.insert(OnDespawnCallbacks(vec![Box::new(on_despawn)]));
-                }
+            let mut entity_mut = world.entity_mut(entity);
+            if let Some(mut on_despawn_component) = entity_mut.get_mut::<OnDespawnCallbacks>() {
+                on_despawn_component.0.push(Box::new(on_despawn));
+            } else {
+                entity_mut.insert(OnDespawnCallbacks(vec![Box::new(on_despawn)]));
             }
         })
     }
@@ -242,9 +233,7 @@ impl JonmoBuilder {
         F: FnMut(EntityWorldMut, I) + SSs,
     {
         self.on_signal(signal, move |In((entity, value)), world: &mut World| {
-            if let Ok(entity) = world.get_entity_mut(entity) {
-                f(entity, value)
-            }
+            f(world.entity_mut(entity), value)
         })
     }
 
@@ -273,133 +262,6 @@ impl JonmoBuilder {
         self.on_spawn(on_spawn)
     }
 
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
-    /// [`Signal`].
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_entity<S, F>(self, f: F) -> Self
-    where
-        S: Signal,
-        F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
-    {
-        let on_spawn = move |world: &mut World, entity: Entity| {
-            let handle = Signal::register_signal(f(SignalBuilder::from_entity(entity)), world);
-            add_handles(world, entity, [handle]);
-        };
-        self.on_spawn(on_spawn)
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] and returns a [`Signal`]; if this builder's [`Entity`] does not have a `C`
-    /// [`Component`], the [`Signal`] chain will terminate for the frame.
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_component<C, S, F>(self, f: F) -> Self
-    where
-        C: Component + Clone,
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
-    {
-        self.signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&C>| components.get(entity).ok().cloned()))
-        })
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] wrapped in an [`Option`] and returns a [`Signal`]; if this builder's
-    /// [`Entity`] does not have a `C` [`Component`], the [`Signal`] will output [`None`] and
-    /// continue propagation.
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_component_option<C, S, F>(self, f: F) -> Self
-    where
-        C: Component + Clone,
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<C>>) -> S + SSs,
-    {
-        self.signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&C>| Some(components.get(entity).ok().cloned())))
-        })
-    }
-
-    // Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] on frames it has [`Changed`] and returns a [`Signal`]; if this builder's
-    /// [`Entity`] does not have a `C` [`Component`], the [`Signal`] chain will terminate for
-    /// the frame.
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_component_changed<C, S, F>(self, f: F) -> Self
-    where
-        C: Component + Clone,
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, C>) -> S + SSs,
-    {
-        self.signal_from_entity(|signal| {
-            f(signal
-                .map(|In(entity): In<Entity>, components: Query<&C, Changed<C>>| components.get(entity).ok().cloned()))
-        })
-    }
-
-    // TODO: ehh these could be useful but one should really just use LazyEntity ...
-    /* pub fn signal_from_ancestor_find<S, F, P, M>(self, f: F, predicate: P) -> Self
-    where
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>) -> S + SSs,
-        P: IntoSystem<In<Entity>, bool, M> + SSs
-    {
-        let system = Arc::new(OnceLock::new());
-        self.on_spawn(clone!((system) move|world, entity| {
-            let system_id = world.register_system(predicate);
-            world.entity_mut(entity).add_child(system_id.entity());
-            let _ =system.set(system_id);
-        }))
-        .signal_from_entity(move |signal| {
-            f(signal.map(move |In(entity): In<Entity>, world: &mut World| {
-                let mutancestors = SystemState::<Query<&ChildOf>>::new(world);
-                let ancestors = ancestors.get(world);
-                let ancestors = ancestors.iter_ancestors(entity).collect::<Vec<_>>();
-                ancestors.into_iter().find(|&ancestor| {
-                    world.run_system_with(system.get().copied().unwrap(), ancestor) .ok().unwrap_or(false)
-                })
-            }))
-        })
-    }
-
-    pub fn signal_from_ancestor_with_component<C, S, F>(self, f: F) -> Self
-    where
-        C: Component,
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<Entity>>)-> S + SSs
-    {
-        self.signal_from_ancestor_find(f, |In(entity), components:Query<&C>| components.contains(entity))
-    } */
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
-    /// `generations`-th generation ancestor if it exists (terminating for the frame otherwise) and
-    /// returns a [`Signal`]. Passing `0` to `generations` will output this builder's [`Entity`]
-    /// itself.
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_ancestor<S, F>(self, generations: usize, f: F) -> Self
-    where
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
-    {
-        self.signal_from_entity(move |signal| f(signal.map(ancestor_map(generations))))
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's parent's [`Entity`] if
-    /// it exists (terminating for the frame otherwise) and returns a [`Signal`].
-    ///
-    /// The resulting [`Signal`] will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn signal_from_parent<S, F>(self, f: F) -> Self
-    where
-        S: Signal,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
-    {
-        self.signal_from_ancestor(1, f)
-    }
-
     /// Reactively set this builder's [`Entity`]'s `C` [`Component`] with a [`Signal`] that outputs
     /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
     pub fn component_signal<C, S>(self, signal: S) -> Self
@@ -410,187 +272,65 @@ impl JonmoBuilder {
         self.on_signal(
             signal,
             move |In((entity, component_option)): In<(Entity, Option<C>)>, world: &mut World| {
-                if let Ok(mut entity) = world.get_entity_mut(entity) {
-                    if let Some(component) = component_option {
-                        entity.insert(component);
-                    } else {
-                        entity.remove::<C>();
-                    }
+                let mut entity = world.entity_mut(entity);
+                if let Some(component) = component_option {
+                    entity.insert(component);
+                } else {
+                    entity.remove::<C>();
                 }
             },
         )
     }
 
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`] and returns a
-    /// [`Signal`] that outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this
-    /// builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
-    /// [`Component`] is removed.
-    pub fn component_signal_from_entity<C, S, F>(self, f: F) -> Self
-    where
-        C: Component,
-        S: Signal<Item = Option<C>>,
-        F: FnOnce(super::signal::Source<Entity>) -> S + SSs,
-    {
-        let entity = LazyEntity::new();
-        self.lazy_entity(entity.clone()).signal_from_entity(move |signal| {
-            f(signal).map(move |In(component_option): In<Option<C>>, world: &mut World| {
-                if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
-                    if let Some(component) = component_option {
-                        entity.insert(component);
-                    } else {
-                        entity.remove::<C>();
-                    }
-                }
-            })
-        })
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s
-    /// `generations`-th generation ancestor's [`Entity`] if it exists (terminating for the frame
-    /// otherwise) and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
-    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the
-    /// [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
-    pub fn component_signal_from_ancestor<C, S, F>(self, generations: usize, f: F) -> Self
-    where
-        C: Component,
-        S: Signal<Item = Option<C>>,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
-    {
-        let entity = LazyEntity::new();
-        self.lazy_entity(entity.clone()).signal_from_entity(move |signal| {
-            f(signal.map(ancestor_map(generations))).map(
-                move |In(component_option): In<Option<C>>, world: &mut World| {
-                    if let Ok(mut entity) = world.get_entity_mut(entity.get()) {
-                        if let Some(component) = component_option {
-                            entity.insert(component);
-                        } else {
-                            entity.remove::<C>();
-                        }
-                    }
-                },
-            )
-        })
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s parent
-    /// [`Entity`] if it exists (terminating for the frame otherwise) and returns a [`Signal`] that
-    /// outputs an [`Option`]al `C`; this resulting [`Signal`] reactively sets this builder's
-    /// [`Entity`]'s `C` [`Component`]; if the [`Signal`] outputs [`None`], the `C`
-    /// [`Component`] is removed.
-    pub fn component_signal_from_parent<C, S, F>(self, f: F) -> Self
-    where
-        C: Component,
-        S: Signal<Item = Option<C>>,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Entity>) -> S + SSs,
-    {
-        self.component_signal_from_ancestor(1, f)
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
-    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`]
-    /// outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`] does not
-    /// have a `C` [`Component`], the [`Signal`]'s execution path will terminate for the frame.
-    pub fn component_signal_from_component<I, O, S, F>(self, f: F) -> Self
-    where
-        I: Component + Clone,
-        O: Component,
-        S: Signal<Item = Option<O>> + SSs,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
-    {
-        self.component_signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| components.get(entity).ok().cloned()))
-        })
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] and returns a [`Signal`] that outputs an [`Option`]al `C`; this resulting
-    /// [`Signal`] reactively sets this builder's [`Entity`]'s `C` [`Component`]; if the [`Signal`]
-    /// outputs [`None`], the `C` [`Component`] is removed. If this builder's [`Entity`] does not
-    /// have a `C` [`Component`], the input [`Signal`] will output [`None`] and continue
-    /// propagation.
-    pub fn component_signal_from_component_option<I, O, S, F>(self, f: F) -> Self
-    where
-        I: Component + Clone,
-        O: Component,
-        S: Signal<Item = Option<O>> + SSs,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, Option<I>>) -> S + SSs,
-    {
-        self.component_signal_from_entity(|signal| {
-            f(signal.map(|In(entity): In<Entity>, components: Query<&I>| Some(components.get(entity).ok().cloned())))
-        })
-    }
-
-    /// Run a function that takes a [`Signal`] which outputs this builder's [`Entity`]'s `C`
-    /// [`Component`] on frames it has [`Changed`] and returns a [`Signal`] that outputs an
-    /// [`Option`]al `O`; this resulting [`Signal`] reactively sets this builder's [`Entity`]'s `O`
-    /// [`Component`]; if the [`Signal`] outputs [`None`], the `O` [`Component`] is removed. If this
-    /// builder's [`Entity`] does not have a `C` [`Component`] or it has not [`Changed`], the
-    /// [`Signal`]'s execution path will terminate for the frame.
-    pub fn component_signal_from_component_changed<I, O, S, F>(self, f: F) -> Self
-    where
-        I: Component + Clone,
-        O: Component,
-        S: Signal<Item = Option<O>> + SSs,
-        F: FnOnce(super::signal::Map<super::signal::Source<Entity>, I>) -> S + SSs,
-    {
-        self.component_signal_from_entity(|signal| {
-            f(signal
-                .map(|In(entity): In<Entity>, components: Query<&I, Changed<I>>| components.get(entity).ok().cloned()))
-        })
-    }
-
     /// Declare a static child.
-    pub fn child(self, child: impl Into<JonmoBuilder>) -> Self {
-        let block = self.child_block_populations.lock().unwrap().len();
-        self.child_block_populations.lock().unwrap().push(1);
-        let offset = offset(block, &self.child_block_populations.lock().unwrap());
+    pub fn child(self, child: impl Into<Builder>) -> Self {
+        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
         let child = child.into();
         let on_spawn = move |world: &mut World, parent| {
             let child_entity = world.spawn_empty().id();
-            if let Ok(ref mut parent) = world.get_entity_mut(parent) {
-                // need to call like this to avoid type ambiguity
-                EntityWorldMut::insert_children(parent, offset, &[child_entity]);
-                child.spawn_on_entity(world, child_entity);
-            } else if let Ok(child) = world.get_entity_mut(child_entity) {
-                child.despawn();
+            // Ensure the populations vec is large enough and set this block's population
+            let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
+            if pops.0.len() <= block {
+                pops.0.resize(block + 1, 0);
             }
+            pops.0[block] = 1;
+            let insert_offset = offset(block, &pops.0);
+            // need to call like this to avoid type ambiguity
+            EntityWorldMut::insert_children(&mut world.entity_mut(parent), insert_offset, &[child_entity]);
+            child.spawn_on_entity(world, child_entity).unwrap();
         };
         self.on_spawn(on_spawn)
     }
 
     /// Declare a reactive child. When the [`Signal`] outputs [`None`], the child is removed.
-    pub fn child_signal(self, child_option: impl Signal<Item = Option<JonmoBuilder>>) -> Self {
-        let block = self.child_block_populations.lock().unwrap().len();
-        self.child_block_populations.lock().unwrap().push(0);
-        let child_block_populations = self.child_block_populations.clone();
+    pub fn child_signal(self, child_option: impl Signal<Item = Option<Builder>>) -> Self {
+        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
         let on_spawn = move |world: &mut World, parent: Entity| {
-            let system = move |In(child_option): In<Option<JonmoBuilder>>,
+            // Initialize this block's population to 0
+            let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
+            if pops.0.len() <= block {
+                pops.0.resize(block + 1, 0);
+            }
+
+            let system = move |In(child_option): In<Option<Builder>>,
                                world: &mut World,
                                mut existing_child_option: Local<Option<Entity>>| {
                 if let Some(child) = child_option {
-                    if let Some(existing_child) = existing_child_option.take()
-                        && let Ok(entity) = world.get_entity_mut(existing_child)
-                    {
-                        entity.despawn();
+                    if let Some(existing_child) = existing_child_option.take() {
+                        world.entity_mut(existing_child).despawn();
                     }
                     let child_entity = world.spawn_empty().id();
-                    if let Ok(mut parent) = world.get_entity_mut(parent) {
-                        let offset = offset(block, &child_block_populations.lock().unwrap());
-                        parent.insert_children(offset, &[child_entity]);
-                        child.spawn_on_entity(world, child_entity);
-                        *existing_child_option = Some(child_entity);
-                    } else if let Ok(child) = world.get_entity_mut(child_entity) {
-                        child.despawn();
-                    }
-                    child_block_populations.lock().unwrap()[block] = 1;
+                    let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                    let insert_offset = offset(block, &pops.0);
+                    world.entity_mut(parent).insert_children(insert_offset, &[child_entity]);
+                    child.spawn_on_entity(world, child_entity).unwrap();
+                    *existing_child_option = Some(child_entity);
+                    world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = 1;
                 } else {
-                    if let Some(existing_child) = existing_child_option.take()
-                        && let Ok(entity) = world.get_entity_mut(existing_child)
-                    {
-                        entity.despawn();
+                    if let Some(existing_child) = existing_child_option.take() {
+                        world.entity_mut(existing_child).despawn();
                     }
-                    child_block_populations.lock().unwrap()[block] = 0;
+                    world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = 0;
                 }
             };
             let handle = child_option.map(system).register(world);
@@ -600,120 +340,96 @@ impl JonmoBuilder {
     }
 
     /// Declare static children.
-    pub fn children(self, children: impl IntoIterator<Item = impl Into<JonmoBuilder>> + Send + 'static) -> Self {
-        let block = self.child_block_populations.lock().unwrap().len();
-        let children_vec: Vec<JonmoBuilder> = children.into_iter().map(Into::into).collect();
+    pub fn children(self, children: impl IntoIterator<Item = impl Into<Builder>> + Send + 'static) -> Self {
+        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
+        let children_vec: Vec<Builder> = children.into_iter().map(Into::into).collect();
         let population = children_vec.len();
-        self.child_block_populations.lock().unwrap().push(population);
-        let child_block_populations = self.child_block_populations.clone();
         let on_spawn = move |world: &mut World, parent: Entity| {
             let mut children_entities = Vec::with_capacity(children_vec.len());
             for _ in 0..children_vec.len() {
                 children_entities.push(world.spawn_empty().id());
             }
-            if let Ok(mut parent) = world.get_entity_mut(parent) {
-                let offset = offset(block, &child_block_populations.lock().unwrap());
-                parent.insert_children(offset, &children_entities);
-                for (child, child_entity) in children_vec.into_iter().zip(children_entities.iter().copied()) {
-                    child.spawn_on_entity(world, child_entity);
-                }
-            } else {
-                for child_entity in children_entities {
-                    if let Ok(child) = world.get_entity_mut(child_entity) {
-                        child.despawn(); // removes from parent
-                    }
-                }
+            // Set this block's population
+            let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
+            if pops.0.len() <= block {
+                pops.0.resize(block + 1, 0);
+            }
+            pops.0[block] = population;
+            let insert_offset = offset(block, &pops.0);
+            world
+                .entity_mut(parent)
+                .insert_children(insert_offset, &children_entities);
+            for (child, child_entity) in children_vec.into_iter().zip(children_entities.iter().copied()) {
+                child.spawn_on_entity(world, child_entity).unwrap();
             }
         };
         self.on_spawn(on_spawn)
     }
 
     /// Declare reactive children.
-    pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = JonmoBuilder>) -> Self {
-        let block = self.child_block_populations.lock().unwrap().len();
-        self.child_block_populations.lock().unwrap().push(0);
-        let child_block_populations = self.child_block_populations.clone();
+    pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = Builder>) -> Self {
+        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
         let on_spawn = move |world: &mut World, parent: Entity| {
-            let system = move |In(diffs): In<Vec<VecDiff<JonmoBuilder>>>,
+            // Initialize this block's population to 0
+            let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
+            if pops.0.len() <= block {
+                pops.0.resize(block + 1, 0);
+            }
+
+            let system = move |In(diffs): In<Vec<VecDiff<Builder>>>,
                                world: &mut World,
                                mut children_entities: Local<Vec<Entity>>| {
                 for diff in diffs {
                     match diff {
                         VecDiff::Replace { values: children } => {
                             for child_entity in children_entities.drain(..) {
-                                if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn();
-                                }
+                                world.entity_mut(child_entity).despawn();
                             }
                             *children_entities = children.iter().map(|_| world.spawn_empty().id()).collect();
-                            if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                let offset = offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset, &children_entities);
-                                for (child, child_entity) in children.into_iter().zip(children_entities.iter().copied())
-                                {
-                                    child.spawn_on_entity(world, child_entity);
-                                }
-                                child_block_populations.lock().unwrap()[block] = children_entities.len();
+                            let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                            let insert_offset = offset(block, &pops.0);
+                            world
+                                .entity_mut(parent)
+                                .insert_children(insert_offset, &children_entities);
+                            for (child, child_entity) in children.into_iter().zip(children_entities.iter().copied()) {
+                                child.spawn_on_entity(world, child_entity).unwrap();
                             }
+                            world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                         VecDiff::InsertAt { index, value: child } => {
                             let child_entity = world.spawn_empty().id();
-                            if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                let offset = offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset + index, &[child_entity]);
-                                child.spawn_on_entity(world, child_entity);
-                                children_entities.insert(index, child_entity);
-                                child_block_populations.lock().unwrap()[block] = children_entities.len();
-                            } else {
-                                // Parent despawned during child insertion
-                                if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn();
-                                }
-                            }
+                            let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                            let insert_offset = offset(block, &pops.0);
+                            world
+                                .entity_mut(parent)
+                                .insert_children(insert_offset + index, &[child_entity]);
+                            child.spawn_on_entity(world, child_entity).unwrap();
+                            children_entities.insert(index, child_entity);
+                            world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                         VecDiff::Push { value: child } => {
                             let child_entity = world.spawn_empty().id();
-                            let mut push_child_entity = false;
-                            {
-                                if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                    let offset = offset(block, &child_block_populations.lock().unwrap());
-                                    parent.insert_children(offset + children_entities.len(), &[child_entity]);
-                                    child.spawn_on_entity(world, child_entity);
-                                    push_child_entity = true;
-                                    child_block_populations.lock().unwrap()[block] = children_entities.len();
-                                } else {
-                                    // parent despawned during child spawning
-                                    if let Ok(child) = world.get_entity_mut(child_entity) {
-                                        child.despawn();
-                                    }
-                                }
-                            }
-                            if push_child_entity {
-                                children_entities.push(child_entity);
-                            }
+                            let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                            let insert_offset = offset(block, &pops.0);
+                            world
+                                .entity_mut(parent)
+                                .insert_children(insert_offset + children_entities.len(), &[child_entity]);
+                            child.spawn_on_entity(world, child_entity).unwrap();
+                            children_entities.push(child_entity);
+                            world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                         VecDiff::UpdateAt { index, value: node } => {
-                            if let Some(existing_child) = children_entities.get(index).copied()
-                                && let Ok(child) = world.get_entity_mut(existing_child)
-                            {
-                                child.despawn(); // removes from parent
+                            if let Some(existing_child) = children_entities.get(index).copied() {
+                                world.entity_mut(existing_child).despawn(); // removes from parent
                             }
                             let child_entity = world.spawn_empty().id();
-                            let mut set_child_entity = false;
-                            if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                set_child_entity = true;
-                                let offset = offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset + index, &[child_entity]);
-                                node.spawn_on_entity(world, child_entity);
-                            } else {
-                                // parent despawned during child spawning
-                                if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn();
-                                }
-                            }
-                            if set_child_entity {
-                                children_entities[index] = child_entity;
-                            }
+                            let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                            let insert_offset = offset(block, &pops.0);
+                            world
+                                .entity_mut(parent)
+                                .insert_children(insert_offset + index, &[child_entity]);
+                            node.spawn_on_entity(world, child_entity).unwrap();
+                            children_entities[index] = child_entity;
                         }
                         VecDiff::Move { old_index, new_index } => {
                             // First, update our local tracker to match the new logical order. This is the
@@ -722,42 +438,40 @@ impl JonmoBuilder {
                             children_entities.insert(new_index, moved_entity);
 
                             // Now, apply the same reordering to the actual parent entity in the world.
-                            if let Ok(mut parent) = world.get_entity_mut(parent) {
-                                // Bevy's `remove_children` finds the entity and removes it from its
-                                // current position, correctly shifting subsequent children.
-                                parent.remove_children(&[moved_entity]);
+                            let mut parent = world.entity_mut(parent);
+                            // Bevy's `remove_children` finds the entity and removes it from its
+                            // current position, correctly shifting subsequent children.
+                            parent.remove_children(&[moved_entity]);
+                            let parent_entity = parent.id();
 
-                                // The new insertion index must be calculated with the offset from any
-                                // preceding static children.
-                                let offset = offset(block, &child_block_populations.lock().unwrap());
-                                parent.insert_children(offset + new_index, &[moved_entity]);
-                            }
+                            // The new insertion index must be calculated with the offset from any
+                            // preceding static children.
+                            let pops = world.get::<ChildBlockPopulations>(parent_entity).unwrap();
+                            let insert_offset = offset(block, &pops.0);
+                            world
+                                .entity_mut(parent_entity)
+                                .insert_children(insert_offset + new_index, &[moved_entity]);
                         }
                         VecDiff::RemoveAt { index } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
-                                if let Ok(child) = world.get_entity_mut(existing_child) {
-                                    // removes from parent
-                                    child.despawn();
-                                }
+                                world.entity_mut(existing_child).despawn();
                                 children_entities.remove(index);
-                                child_block_populations.lock().unwrap()[block] = children_entities.len();
+                                world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] =
+                                    children_entities.len();
                             }
                         }
                         VecDiff::Pop => {
                             if let Some(child_entity) = children_entities.pop() {
-                                if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn();
-                                }
-                                child_block_populations.lock().unwrap()[block] = children_entities.len();
+                                world.entity_mut(child_entity).despawn();
+                                world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] =
+                                    children_entities.len();
                             }
                         }
                         VecDiff::Clear => {
                             for child_entity in children_entities.drain(..) {
-                                if let Ok(child) = world.get_entity_mut(child_entity) {
-                                    child.despawn();
-                                }
+                                world.entity_mut(child_entity).despawn();
                             }
-                            child_block_populations.lock().unwrap()[block] = children_entities.len();
+                            world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                     }
                 }
@@ -769,27 +483,32 @@ impl JonmoBuilder {
     }
 
     /// Spawn this builder on an existing [`Entity`].
-    pub fn spawn_on_entity(self, world: &mut World, entity: Entity) {
-        if let Ok(mut entity) = world.get_entity_mut(entity) {
-            let id = entity.id();
-            entity.insert(SignalHandles::default());
-            for on_spawn in self.on_spawns.lock().unwrap().drain(..) {
-                on_spawn(world, id);
-            }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entity does not exist in the world.
+    pub fn spawn_on_entity(self, world: &mut World, entity: Entity) -> Result<(), EntityMutableFetchError> {
+        let mut entity_mut = world.get_entity_mut(entity)?;
+        let id = entity_mut.id();
+        entity_mut.insert((SignalHandles::default(), ChildBlockPopulations::default()));
+        for on_spawn in self.on_spawns {
+            on_spawn(world, id);
         }
+        Ok(())
     }
 
     /// Spawn this builder into the [`World`].
     pub fn spawn(self, world: &mut World) -> Entity {
         let entity = world.spawn_empty().id();
-        self.spawn_on_entity(world, entity);
+        // SAFETY: We just created this entity, so it must exist
+        self.spawn_on_entity(world, entity).unwrap();
         entity
     }
 }
 
 /// A type-erased signal that can be managed as a free-floating "task".
 ///
-/// This trait enables [`JonmoBuilder::hold_tasks`] to accept signals that haven't
+/// This trait enables [`Builder::hold_tasks`] to accept signals that haven't
 /// been registered yet, deferring their registration until the entity is spawned.
 ///
 /// Use the [`.task()`](SignalTaskExt::task) method to convert a [`Signal`],
@@ -810,7 +529,7 @@ impl<S: Signal + SSs> SignalTask for SignalTaskSignal<S> {
 /// Extension trait for converting a [`Signal`] into a [`SignalTask`].
 pub trait SignalTaskExt: Signal + Sized + SSs {
     /// Convert this signal into a type-erased [`SignalTask`] for use with
-    /// [`JonmoBuilder::hold_tasks`].
+    /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
         Box::new(SignalTaskSignal(self))
     }
@@ -829,7 +548,7 @@ impl<S: SignalVec + SSs> SignalTask for SignalTaskSignalVec<S> {
 /// Extension trait for converting a [`SignalVec`] into a [`SignalTask`].
 pub trait SignalVecTaskExt: SignalVec + Sized + SSs {
     /// Convert this signal vec into a type-erased [`SignalTask`] for use with
-    /// [`JonmoBuilder::hold_tasks`].
+    /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
         Box::new(SignalTaskSignalVec(self))
     }
@@ -848,7 +567,7 @@ impl<S: SignalMap + SSs> SignalTask for SignalTaskSignalMap<S> {
 /// Extension trait for converting a [`SignalMap`] into a [`SignalTask`].
 pub trait SignalMapTaskExt: SignalMap + Sized + SSs {
     /// Convert this signal map into a type-erased [`SignalTask`] for use with
-    /// [`JonmoBuilder::hold_tasks`].
+    /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
         Box::new(SignalTaskSignalMap(self))
     }
@@ -878,12 +597,10 @@ fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
 where
     I: IntoIterator<Item = SignalHandle>,
 {
-    if let Ok(mut entity) = world.get_entity_mut(entity)
-        && let Some(mut existing_handles) = entity.get_mut::<SignalHandles>()
-    {
-        for handle in handles {
-            existing_handles.add(handle);
-        }
+    let mut entity = world.entity_mut(entity);
+    let mut existing_handles = entity.get_mut::<SignalHandles>().unwrap();
+    for handle in handles {
+        existing_handles.add(handle);
     }
 }
 
@@ -895,13 +612,16 @@ fn offset(i: usize, child_block_populations: &[usize]) -> usize {
 mod tests {
     use super::*;
     use crate::{
-        JonmoPlugin,
+        self as jonmo, JonmoPlugin,
         graph::STALE_SIGNALS,
-        signal::{SignalBuilder, SignalExt},
-        signal_vec::MutableVecBuilder,
+        signal::{self, SignalExt},
+        signal_vec::MutableVec,
     };
     use bevy::prelude::*;
-    use bevy_platform::collections::HashSet;
+    use bevy_platform::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     /// Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
@@ -945,12 +665,12 @@ mod tests {
 
         // The signal reads the resource, extracts the Option, and deduplicates.
         // It will only fire when the i32 value inside SignalSource actually changes.
-        let source_signal = SignalBuilder::from_resource::<SignalSource>()
+        let source_signal = signal::from_resource::<SignalSource>()
             .map_in(|source: SignalSource| source.0)
             .dedupe();
 
         // --- 2. Test Basic Execution & Correct Parameters ---
-        let builder1 = JonmoBuilder::new()
+        let builder1 = jonmo::Builder::new()
             .insert(Name::new("Entity 1"))
             .on_signal(source_signal.clone(), capturing_system);
 
@@ -976,7 +696,7 @@ mod tests {
         app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
 
         // --- 3. Test Multi-Entity Support ---
-        let builder2 = JonmoBuilder::new()
+        let builder2 = jonmo::Builder::new()
             .insert(Name::new("Entity 2"))
             .on_signal(source_signal.clone(), capturing_system);
 
@@ -1058,7 +778,7 @@ mod tests {
         app.init_resource::<SignalSource>();
 
         // The signal reads the resource and deduplicates it, so it only fires on change.
-        let source_signal = SignalBuilder::from_resource::<SignalSource>()
+        let source_signal = signal::from_resource::<SignalSource>()
             .map_in(|source: SignalSource| source.0)
             .dedupe();
 
@@ -1069,7 +789,7 @@ mod tests {
         };
 
         // --- 2. Test Basic Functionality ---
-        let builder1 = JonmoBuilder::new()
+        let builder1 = jonmo::Builder::new()
             .insert(TestComponent(10))
             .on_signal_with_component(source_signal.clone(), mutator_closure);
 
@@ -1084,7 +804,7 @@ mod tests {
         assert_eq!(component1.0, 15, "Component should be 10 + 5 = 15.");
 
         // --- 3. Test Graceful Failure (Component Missing) ---
-        let builder_no_comp = JonmoBuilder::new()
+        let builder_no_comp = jonmo::Builder::new()
             // IMPORTANT: We do *not* insert TestComponent here.
             .on_signal_with_component(source_signal.clone(), mutator_closure);
 
@@ -1104,7 +824,7 @@ mod tests {
         assert_eq!(component1.0, 25, "Existing entity should be updated (15 + 10).");
 
         // --- 4. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
+        let builder2 = jonmo::Builder::new()
             .insert(TestComponent(100))
             .on_signal_with_component(source_signal.clone(), mutator_closure);
 
@@ -1142,569 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn test_signal_from_entity() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // A resource to capture the final output of the created signal chains.
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-
-        app.init_resource::<TestOutput>();
-
-        // The component that the signal chain will read from.
-        #[derive(Component, Clone)]
-        struct TestComponent(String);
-
-        // A system to capture the final output of the signal chain.
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
-        }
-
-        // The factory closure that will be passed to `signal_from_entity`.
-        // This represents the user's logic.
-        let signal_chain_factory = |entity_signal: crate::signal::Source<Entity>| {
-            // The user takes the entity signal...
-            entity_signal
-                // ...maps it to get a component from that entity...
-                .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned()) // ...extracts the inner string...
-                .map_in(|component: TestComponent| component.0)
-                // ...and finally pipes it to our capturing system.
-                .map(capturing_system)
-        };
-
-        // --- 2. Test Basic Functionality ---
-        let builder1 = JonmoBuilder::new()
-            .insert(TestComponent("Data A".to_string()))
-            .signal_from_entity(signal_chain_factory);
-
-        let entity1 = builder1.spawn(app.world_mut());
-        app.update();
-
-        // Verify the output.
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Signal chain should have run once.");
-        assert_eq!(output_guard[0], "Data A", "Signal chain produced incorrect output.");
-        drop(output_guard);
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        // --- 3. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(TestComponent("Data B".to_string()))
-            .signal_from_entity(signal_chain_factory);
-
-        let entity2 = builder2.spawn(app.world_mut());
-        app.update();
-
-        // Verify that both signal chains ran independently. Order is not guaranteed.
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 2, "Both signal chains should have run.");
-        let received_set: HashSet<String> = output_guard.iter().cloned().collect();
-        let expected_set: HashSet<String> = ["Data A".to_string(), "Data B".to_string()].into();
-        assert_eq!(
-            received_set, expected_set,
-            "Multi-entity test produced incorrect or incomplete output."
-        );
-        drop(output_guard);
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        // --- 4. Test Automatic Cleanup ---
-        // Despawn the first entity.
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update(); // This update processes the despawn AND runs the graph for entity2.
-
-        // Clear the output from the update call above to isolate the next frame's result.
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        // Update again to run the signal graph, now that entity1's signal is gone.
-        app.update();
-
-        // Verify that only the signal for the second entity ran in this last frame.
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Only the signal for the remaining entity should have run."
-        );
-        assert_eq!(
-            output_guard[0], "Data B",
-            "The remaining signal produced incorrect output."
-        );
-        drop(output_guard);
-
-        // Despawn the second entity.
-        app.world_mut().entity_mut(entity2).despawn();
-        app.update();
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        // Update again. Nothing should run now.
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "No signals should run after all entities are despawned."
-        );
-    }
-
-    #[test]
-    fn test_signal_from_component() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-        app.init_resource::<TestOutput>();
-
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TestComponent(String);
-
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
-        }
-
-        let signal_chain_factory =
-            |component_signal: crate::signal::Map<crate::signal::Source<Entity>, TestComponent>| {
-                component_signal
-                    .map_in(|component: TestComponent| component.0)
-                    .dedupe()
-                    .map(capturing_system)
-            };
-
-        // --- 2. Test Basic Functionality & Reactivity ---
-        let builder1 = JonmoBuilder::new()
-            .insert(TestComponent("Initial A".to_string()))
-            .signal_from_component(signal_chain_factory);
-
-        let entity1 = builder1.spawn(app.world_mut());
-
-        app.update();
-        let output = app.world_mut().resource_mut::<TestOutput>();
-        let mut output_guard = output.0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Initial A");
-        output_guard.clear();
-        drop(output_guard);
-
-        app.update();
-        assert!(app.world().resource::<TestOutput>().0.lock().unwrap().is_empty());
-
-        app.world_mut().get_mut::<TestComponent>(entity1).unwrap().0 = "Updated A".to_string();
-        app.update();
-        let output = app.world_mut().resource_mut::<TestOutput>();
-        let mut output_guard = output.0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Updated A");
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 3. Test Graceful Failure (Component Missing) ---
-        let builder_no_comp = JonmoBuilder::new().signal_from_component(signal_chain_factory);
-        let _entity_no_comp = builder_no_comp.spawn(app.world_mut());
-        app.update();
-        assert!(app.world().resource::<TestOutput>().0.lock().unwrap().is_empty());
-
-        // --- 4. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(TestComponent("Initial B".to_string()))
-            .signal_from_component(signal_chain_factory);
-
-        let entity2 = builder2.spawn(app.world_mut());
-
-        // CORRECTED: To ensure both signals fire, we must change entity1's data again
-        // so that its `dedupe` operator will allow the signal to pass.
-        app.world_mut().get_mut::<TestComponent>(entity1).unwrap().0 = "Final A".to_string();
-        app.update();
-
-        let output = app.world_mut().resource_mut::<TestOutput>();
-        let mut output_guard = output.0.lock().unwrap();
-        // assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard.len(), 2, "Both signals should have run.");
-        let received_set: HashSet<String> = output_guard.iter().cloned().collect();
-        let expected_set: HashSet<String> = ["Final A".to_string(), "Initial B".to_string()].into();
-        assert_eq!(received_set, expected_set);
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 5. Test Automatic Cleanup ---
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update();
-
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        app.world_mut().get_mut::<TestComponent>(entity2).unwrap().0 = "Updated B".to_string();
-        app.update();
-
-        let output = app.world_mut().resource_mut::<TestOutput>();
-        let mut output_guard = output.0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Only the signal for the remaining entity should run."
-        );
-        assert_eq!(output_guard[0], "Updated B");
-        output_guard.clear();
-    }
-
-    #[test]
-    fn test_signal_from_component_option() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // Resource to capture the final string output of the signal chains.
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-        app.init_resource::<TestOutput>();
-
-        // The component that the signal chain will read from.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TestComponent(String);
-
-        // System to capture the final output.
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
-        }
-
-        // The factory closure that will be passed to `signal_from_component_option`.
-        // It defines the signal logic after the component is read.
-        let signal_chain_factory =
-            |component_opt_signal: crate::signal::Map<crate::signal::Source<Entity>, Option<TestComponent>>| {
-                component_opt_signal
-                    .dedupe() // Use dedupe to test reactivity correctly.
-                    .map_in(|opt_component: Option<TestComponent>| {
-                        // This logic is key: we transform both Some and None cases into a string.
-                        match opt_component {
-                            Some(component) => format!("Some({})", component.0),
-                            None => "None".to_string(),
-                        }
-                    })
-                    .map(capturing_system)
-            };
-
-        // --- 2. Test Case: Component Present ---
-        let builder_with_comp = JonmoBuilder::new()
-            .insert(TestComponent("Data A".to_string()))
-            .signal_from_component_option(signal_chain_factory);
-
-        let entity_with_comp = builder_with_comp.spawn(app.world_mut());
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Some(Data A)");
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 3. Test Case: Component Missing ---
-        // This is the main difference from `signal_from_component`. The chain should still run.
-        let builder_without_comp = JonmoBuilder::new().signal_from_component_option(signal_chain_factory);
-
-        let entity_without_comp = builder_without_comp.spawn(app.world_mut());
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Signal for entity without component should have run."
-        );
-        assert_eq!(
-            output_guard[0], "None",
-            "Signal should have received None for the missing component."
-        );
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 4. Test Case: Reactivity ---
-        // Change the component on the first entity.
-        app.world_mut().get_mut::<TestComponent>(entity_with_comp).unwrap().0 = "Updated A".to_string();
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Signal should re-run on component change.");
-        assert_eq!(output_guard[0], "Some(Updated A)");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Run again without changes. Due to `.dedupe()`, it shouldn't fire.
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run when component is unchanged due to dedupe."
-        );
-        drop(output_guard);
-
-        // --- 5. Test Case: Automatic Cleanup ---
-        // Despawn the entity with the component.
-        app.world_mut().entity_mut(entity_with_comp).despawn();
-        app.update(); // Process despawn commands.
-
-        // To verify cleanup, we'll add the component to the *other* entity.
-        // Only its signal should run, proving the first one was cleaned up.
-        app.world_mut()
-            .entity_mut(entity_without_comp)
-            .insert(TestComponent("Data B".to_string()));
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Only the signal for the remaining entity should run."
-        );
-        assert_eq!(output_guard[0], "Some(Data B)");
-        output_guard.clear();
-        drop(output_guard);
-    }
-
-    #[test]
-    fn test_signal_from_ancestor() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-        app.init_resource::<TestOutput>();
-
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TestComponent(String);
-
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
-        }
-
-        // A reusable factory for the signal logic. It takes a signal of an ancestor's
-        // entity, gets its TestComponent, and sends the inner string to the output.
-        let signal_chain_factory =
-            |ancestor_entity_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
-                ancestor_entity_signal
-                    // Map the ancestor entity to its component. This will terminate if the
-                    // ancestor doesn't have the component.
-                    .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned())
-                    .map_in(|component: TestComponent| component.0) // Extract the string
-                    .map(capturing_system)
-            };
-
-        // Create a 3-level entity hierarchy for testing: Grandparent -> Parent -> Child
-        let grandparent = app.world_mut().spawn(TestComponent("Grandparent".to_string())).id();
-        let parent = app.world_mut().spawn(TestComponent("Parent".to_string())).id();
-        app.world_mut().entity_mut(grandparent).add_child(parent);
-
-        // --- 2. Test Case: generations = 0 (Self) ---
-        // The builder should target its own entity.
-        let child_for_self_test = app
-            .world_mut()
-            .spawn(TestComponent("Child".to_string())) // Give the child its own component
-            .id();
-        app.world_mut().entity_mut(parent).add_child(child_for_self_test);
-
-        let builder_self = JonmoBuilder::new().signal_from_ancestor(0, signal_chain_factory);
-        builder_self.spawn_on_entity(app.world_mut(), child_for_self_test);
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Child");
-        output_guard.clear();
-        drop(output_guard);
-        app.world_mut().entity_mut(child_for_self_test).despawn();
-        app.update();
-
-        // --- 3. Test Case: generations = 1 (Parent) ---
-        let child_for_parent_test = app.world_mut().spawn_empty().id();
-        app.world_mut().entity_mut(parent).add_child(child_for_parent_test);
-        let builder_parent = JonmoBuilder::new().signal_from_ancestor(1, signal_chain_factory);
-        builder_parent.spawn_on_entity(app.world_mut(), child_for_parent_test);
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Parent");
-        output_guard.clear();
-        drop(output_guard);
-        app.world_mut().entity_mut(child_for_parent_test).despawn();
-        app.update();
-
-        // --- 4. Test Case: generations = 2 (Grandparent) ---
-        let child_for_gp_test = app.world_mut().spawn_empty().id();
-        app.world_mut().entity_mut(parent).add_child(child_for_gp_test);
-        let builder_gp = JonmoBuilder::new().signal_from_ancestor(2, signal_chain_factory);
-        builder_gp.spawn_on_entity(app.world_mut(), child_for_gp_test);
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1);
-        assert_eq!(output_guard[0], "Grandparent");
-        output_guard.clear();
-        drop(output_guard);
-        app.world_mut().entity_mut(child_for_gp_test).despawn();
-        app.update();
-
-        // --- 5. Test Case: Invalid Ancestor (Too many generations) ---
-        let child_for_invalid_test = app.world_mut().spawn_empty().id();
-        app.world_mut().entity_mut(parent).add_child(child_for_invalid_test);
-        let builder_invalid = JonmoBuilder::new().signal_from_ancestor(3, signal_chain_factory);
-        builder_invalid.spawn_on_entity(app.world_mut(), child_for_invalid_test);
-        app.update();
-
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run for an invalid ancestor."
-        );
-        drop(output_guard);
-        app.world_mut().entity_mut(child_for_invalid_test).despawn();
-        app.update();
-
-        // --- 6. Test Case: Reactivity ---
-        let child_for_reactivity_test = app.world_mut().spawn_empty().id();
-        app.world_mut().entity_mut(parent).add_child(child_for_reactivity_test);
-        let builder_reactivity = JonmoBuilder::new().signal_from_ancestor(1, signal_chain_factory);
-        builder_reactivity.spawn_on_entity(app.world_mut(), child_for_reactivity_test);
-        app.update(); // Initial run
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear(); // Clear initial output
-
-        // Modify the parent's component
-        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent Updated".to_string();
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Signal did not re-run on ancestor change.");
-        assert_eq!(output_guard[0], "Parent Updated");
-        output_guard.clear();
-        drop(output_guard);
-
-        // --- 7. Test Case: Automatic Cleanup ---
-        // Despawn the child entity that holds the signal
-        app.world_mut().entity_mut(child_for_reactivity_test).despawn();
-        app.update(); // Process despawn commands
-
-        // Modify the parent's component again
-        app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent Updated Again".to_string();
-        app.update();
-
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not run after its entity is despawned."
-        );
-    }
-
-    #[test]
-    fn test_signal_from_parent() {
-        {
-            // --- 1. Setup ---
-            let mut app = create_test_app();
-
-            // A resource to capture the final output of the signal chains.
-            #[derive(Resource, Default, Clone)]
-            struct TestOutput(Arc<Mutex<Vec<String>>>);
-            app.init_resource::<TestOutput>();
-
-            // The component that the signal chain will read from the parent.
-            #[derive(Component, Clone, Debug, PartialEq)]
-            struct TestComponent(String);
-
-            // A system to capture the final output of the signal chain.
-            fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-                output.0.lock().unwrap().push(value);
-            }
-
-            // The factory closure that will be passed to `signal_from_parent`.
-            // This represents the user's logic. It gets a signal for the parent entity,
-            // reads its TestComponent, extracts the string, and sends it to be captured.
-            let signal_chain_factory =
-                |parent_entity_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
-                    parent_entity_signal
-                        // Map the parent entity to its component. This will terminate if the
-                        // parent doesn't have the component.
-                        .map(|In(entity): In<Entity>, query: Query<&TestComponent>| query.get(entity).ok().cloned())
-                        .map_in(|component: TestComponent| component.0) // Extract the string
-                        .dedupe() // Add dedupe for robust reactivity testing
-                        .map(capturing_system)
-                };
-
-            // --- 2. Test Case: Basic Functionality & Reactivity ---
-            let parent = app.world_mut().spawn(TestComponent("Parent A".to_string())).id();
-            let child = app.world_mut().spawn_empty().id();
-            app.world_mut().entity_mut(parent).add_child(child);
-
-            let builder_with_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
-            builder_with_parent.spawn_on_entity(app.world_mut(), child);
-
-            // Initial run
-            app.update();
-            let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-            assert_eq!(output_guard.len(), 1, "Signal should run on initialization.");
-            assert_eq!(output_guard[0], "Parent A");
-            output_guard.clear();
-            drop(output_guard);
-
-            // Reactivity test
-            app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent B".to_string();
-            app.update();
-            let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-            assert_eq!(
-                output_guard.len(),
-                1,
-                "Signal should re-run on parent component change."
-            );
-            assert_eq!(output_guard[0], "Parent B");
-            output_guard.clear();
-            drop(output_guard);
-
-            // --- 3. Test Case: No Parent ---
-            // A top-level entity with this signal should not run the chain.
-            let _top_level_entity = JonmoBuilder::new()
-                .signal_from_parent(signal_chain_factory)
-                .spawn(app.world_mut());
-            app.update();
-            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-            assert!(
-                output_guard.is_empty(),
-                "Signal should not run for an entity with no parent."
-            );
-            drop(output_guard);
-
-            // --- 4. Test Case: Parent Without Component ---
-            // The signal chain should terminate gracefully if the parent is missing the component.
-            let parent_no_comp = app.world_mut().spawn_empty().id();
-            let child_of_plain_parent = app.world_mut().spawn_empty().id();
-            app.world_mut()
-                .entity_mut(parent_no_comp)
-                .add_child(child_of_plain_parent);
-
-            let builder_plain_parent = JonmoBuilder::new().signal_from_parent(signal_chain_factory);
-            builder_plain_parent.spawn_on_entity(app.world_mut(), child_of_plain_parent);
-            app.update();
-            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-            assert!(
-                output_guard.is_empty(),
-                "Signal should not run if parent is missing the target component."
-            );
-            drop(output_guard);
-
-            // --- 5. Test Case: Automatic Cleanup ---
-            // Despawn the child entity that holds the signal.
-            app.world_mut().entity_mut(child).despawn();
-            app.update(); // Process despawn commands.
-
-            // Modify the parent's component again. The signal should no longer be active.
-            app.world_mut().get_mut::<TestComponent>(parent).unwrap().0 = "Parent C".to_string();
-            app.update();
-
-            let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-            assert!(
-                output_guard.is_empty(),
-                "Signal should not run after its entity is despawned."
-            );
-        }
-
-        STALE_SIGNALS.lock().unwrap().clear();
-    }
-
-    #[test]
     fn test_component_signal() {
         // --- 1. Setup ---
         let mut app = create_test_app();
@@ -1722,14 +879,14 @@ mod tests {
 
         // The signal reads the resource and maps its value to the target component.
         // `.dedupe()` is important to ensure we only process actual changes.
-        let source_signal = SignalBuilder::from_resource::<SignalSource>()
+        let source_signal = signal::from_resource::<SignalSource>()
             .dedupe()
             .map_in(|source: SignalSource| {
                 source.0.map(TargetComponent) // Option<String> -> Option<TargetComponent>
             });
 
         // --- 2. Test Initial Insertion ---
-        let builder = JonmoBuilder::new().component_signal(source_signal.clone());
+        let builder = jonmo::Builder::new().component_signal(source_signal.clone());
         let entity1 = builder.spawn(app.world_mut());
 
         // The signal hasn't run yet, so the component should not be present.
@@ -1782,7 +939,7 @@ mod tests {
         );
 
         // --- 6. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new().component_signal(source_signal.clone());
+        let builder2 = jonmo::Builder::new().component_signal(source_signal.clone());
         let entity2 = builder2.spawn(app.world_mut());
 
         // The new entity should not have the component yet (signal will fire next update).
@@ -1828,872 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn test_signal_from_component_changed() {
-        // --- 1. Setup ---
-        // Create the standard test app with the JonmoPlugin.
-        let mut app = create_test_app();
-
-        // A resource to capture the final string output of the signal chains.
-        #[derive(Resource, Default, Clone)]
-        struct TestOutput(Arc<Mutex<Vec<String>>>);
-        app.init_resource::<TestOutput>();
-
-        // A system to capture the final output of the signal chain.
-        fn capturing_system(In(value): In<String>, output: Res<TestOutput>) {
-            output.0.lock().unwrap().push(value);
-        }
-
-        // The component that will be tracked for changes.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TrackedComponent(String);
-
-        // The factory closure that will be passed to `signal_from_component_changed`.
-        // This represents the user's logic: it takes the signal of the changed component,
-        // extracts its inner string, and sends it to the capturing system.
-        let signal_chain_factory =
-            |component_signal: crate::signal::Map<crate::signal::Source<Entity>, TrackedComponent>| {
-                component_signal
-                    .map_in(|component: TrackedComponent| component.0)
-                    // Note: `.dedupe()` is not needed here, as the `Changed<C>` filter
-                    // in the implementation already prevents firing on unchanged frames.
-                    .map(capturing_system)
-            };
-
-        // --- 2. Test Initial State & No-Change Frame ---
-        let builder1 = JonmoBuilder::new()
-            .insert(TrackedComponent("Initial".to_string()))
-            .signal_from_component_changed(signal_chain_factory);
-
-        let entity1 = builder1.spawn(app.world_mut());
-
-        // Frame 1: The component is newly added (`Added<C>`), which counts as `Changed<C>`.
-        // The signal should fire.
-        app.update();
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Signal should fire on initial component insertion."
-        );
-        assert_eq!(output_guard[0], "Initial");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Frame 2: No changes were made to the component. The signal should NOT fire.
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not fire when component is unchanged."
-        );
-        drop(output_guard);
-
-        // --- 3. Test Component Changed ---
-        // Explicitly mutate the component to mark it as `Changed`.
-        app.world_mut().get_mut::<TrackedComponent>(entity1).unwrap().0 = "Updated".to_string();
-
-        // Frame 3: The component is now `Changed`. The signal should fire again.
-        app.update();
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Signal should fire after component is mutated.");
-        assert_eq!(output_guard[0], "Updated");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Frame 4: No changes were made in this frame. The signal should NOT fire.
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not fire on the frame after a change."
-        );
-        drop(output_guard);
-
-        // --- 4. Test Graceful Failure (Component Missing) ---
-        // Spawn an entity with the signal but without the component.
-        // The signal chain should terminate gracefully and not panic or produce output.
-        let builder_no_comp = JonmoBuilder::new().signal_from_component_changed(signal_chain_factory);
-        let _entity_no_comp = builder_no_comp.spawn(app.world_mut());
-
-        app.update();
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert!(
-            output_guard.is_empty(),
-            "Signal should not fire for an entity missing the component."
-        );
-        drop(output_guard);
-
-        // --- 5. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(TrackedComponent("Entity 2 Initial".to_string()))
-            .signal_from_component_changed(signal_chain_factory);
-        let entity2 = builder2.spawn(app.world_mut());
-
-        // Frame 5: Only entity2's component is new. Only its signal should fire.
-        app.update();
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 1, "Only the new entity's signal should fire.");
-        assert_eq!(output_guard[0], "Entity 2 Initial");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Frame 6: Mutate both entities' components in the same frame.
-        app.world_mut().get_mut::<TrackedComponent>(entity1).unwrap().0 = "Entity 1 Final".to_string();
-        app.world_mut().get_mut::<TrackedComponent>(entity2).unwrap().0 = "Entity 2 Final".to_string();
-        app.update();
-
-        let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            2,
-            "Both signals should fire when both components change."
-        );
-        // Use a HashSet because the order of execution is not guaranteed.
-        let received_set: HashSet<String> = output_guard.iter().cloned().collect();
-        let expected_set: HashSet<String> = ["Entity 1 Final".to_string(), "Entity 2 Final".to_string()].into();
-        assert_eq!(
-            received_set, expected_set,
-            "Multi-entity change produced incorrect output."
-        );
-        drop(output_guard);
-
-        // --- 6. Test Automatic Cleanup ---
-        // Despawn the first entity.
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update(); // Process the despawn command.
-
-        // Clear output from the last update cycle.
-        app.world_mut().resource_mut::<TestOutput>().0.lock().unwrap().clear();
-
-        // Mutate the remaining entity's component.
-        app.world_mut().get_mut::<TrackedComponent>(entity2).unwrap().0 = "Entity 2 Post-Despawn".to_string();
-        app.update();
-
-        let mut output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(
-            output_guard.len(),
-            1,
-            "Only the remaining entity's signal should fire after despawn."
-        );
-        assert_eq!(output_guard[0], "Entity 2 Post-Despawn");
-        output_guard.clear();
-        drop(output_guard);
-
-        // Verify entity1 is truly gone.
-        assert!(
-            app.world().get_entity(entity1).is_err(),
-            "Despawned entity should not exist."
-        );
-    }
-
-    #[test]
-    fn test_component_signal_from_entity() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The component that will be reactively added, updated, and removed.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TargetComponent(String);
-
-        // A resource to act as the signal's external trigger. Its Option<String>
-        // will be mapped to Option<TargetComponent>.
-        #[derive(Resource, Default, Clone, PartialEq)]
-        struct SignalSource(Option<String>);
-        app.init_resource::<SignalSource>();
-
-        // The factory closure that defines the signal logic.
-        // It demonstrates that the closure correctly receives the entity signal
-        // by using the entity's `Name` component in its logic.
-        let signal_factory = |entity_signal: crate::signal::Source<Entity>| {
-            // Combine the entity signal with the global source signal.
-            entity_signal
-                .with(SignalBuilder::from_resource::<SignalSource>().dedupe())
-                // The `.map` combinator gives us access to other `SystemParam`s, like `Query`.
-                .map(
-                    |In((entity, source)): In<(Entity, SignalSource)>, names: Query<&Name>| {
-                        // Get the name from the specific entity this signal is for.
-                        let name = names.get(entity).map_or("Unnamed", |n| n.as_str());
-                        // Map the source data into the target component, including the entity's name.
-                        source.0.map(|s| TargetComponent(format!("{s} for {name}")))
-                    },
-                )
-        };
-
-        // --- 2. Test Initial Insertion ---
-        let builder1 = JonmoBuilder::new()
-            .insert(Name::new("Entity1"))
-            .component_signal_from_entity(signal_factory);
-
-        // Set the source *before* spawning.
-        app.world_mut().resource_mut::<SignalSource>().0 = Some("Initial".to_string());
-        let entity1 = builder1.spawn(app.world_mut());
-
-        // The signal chain runs on the first update after spawning.
-        app.update();
-
-        // Verify the component was inserted correctly.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Initial for Entity1".to_string())),
-            "Component should be inserted on first run."
-        );
-
-        // --- 3. Test Reactive Update ---
-        app.world_mut().resource_mut::<SignalSource>().0 = Some("Updated".to_string());
-        app.update();
-
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Updated for Entity1".to_string())),
-            "Component should be updated on signal change."
-        );
-
-        // --- 4. Test Reactive Removal ---
-        app.world_mut().resource_mut::<SignalSource>().0 = None;
-        app.update();
-
-        assert!(
-            app.world().get::<TargetComponent>(entity1).is_none(),
-            "Component should be removed when signal emits None."
-        );
-
-        // --- 5. Test Reactive Re-insertion ---
-        app.world_mut().resource_mut::<SignalSource>().0 = Some("Reinserted".to_string());
-        app.update();
-
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Reinserted for Entity1".to_string())),
-            "Component should be re-inserted after being removed."
-        );
-
-        // --- 6. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(Name::new("Entity2"))
-            .component_signal_from_entity(signal_factory);
-
-        let entity2 = builder2.spawn(app.world_mut());
-
-        // Trigger an update for both.
-        app.world_mut().resource_mut::<SignalSource>().0 = Some("Multi".to_string());
-        app.update();
-
-        // Verify both entities were updated correctly and independently.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Multi for Entity1".to_string())),
-            "Entity 1 should be updated in multi-entity test."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Multi for Entity2".to_string())),
-            "Entity 2 should be updated in multi-entity test."
-        );
-
-        // --- 7. Test Automatic Cleanup ---
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update(); // Process despawn command.
-
-        // Trigger another update.
-        app.world_mut().resource_mut::<SignalSource>().0 = Some("Post-Despawn".to_string());
-        app.update();
-
-        // Verify the despawned entity is gone and its signal didn't run.
-        assert!(
-            app.world().get_entity(entity1).is_err(),
-            "Despawned entity should not exist."
-        );
-
-        // Verify that only the second entity was updated.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Post-Despawn for Entity2".to_string())),
-            "Only the remaining entity should have been updated."
-        );
-    }
-
-    // Add the components required for the new test
-    #[derive(Component, Clone, Debug, PartialEq)]
-    struct SourceComponent(String);
-
-    #[derive(Component, Clone, Debug, PartialEq)]
-    struct TargetComponent(String);
-
-    #[test]
-    fn test_component_signal_from_ancestor() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The factory closure defines the reusable signal logic.
-        // It takes a signal of an ancestor's entity, gets its `SourceComponent`,
-        // and maps it to an `Option<TargetComponent>`. The final `Option` is crucial,
-        // as `None` will trigger the removal of the `TargetComponent`.
-        let signal_factory = |ancestor_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
-            ancestor_signal
-                // Map the ancestor entity to its `SourceComponent`.
-                // This produces `None` if the component doesn't exist, which is desired.
-                .map(|In(entity): In<Entity>, query: Query<&SourceComponent>| query.get(entity).ok().cloned())
-                // Map the `Option<SourceComponent>` to `Option<TargetComponent>`.
-                .map_in(|opt_source: Option<SourceComponent>| opt_source.map(|source| TargetComponent(source.0)))
-                // Dedupe to avoid    unnecessary updates if the source value doesn't change.
-                .dedupe()
-        };
-
-        // Create a 3-level entity hierarchy for testing different `generations`.
-        let grandparent = app.world_mut().spawn(SourceComponent("Grandparent".to_string())).id();
-        let parent = app.world_mut().spawn(SourceComponent("Parent".to_string())).id();
-        app.world_mut().entity_mut(grandparent).add_child(parent);
-
-        // --- 2. Test Parent (`generations = 1`) ---
-        let child_from_parent = JonmoBuilder::new()
-            .component_signal_from_ancestor(1, signal_factory)
-            .spawn(app.world_mut());
-        app.world_mut().entity_mut(parent).add_child(child_from_parent);
-
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child_from_parent),
-            Some(&TargetComponent("Parent".to_string())),
-            "Child should get component from parent (gen 1)."
-        );
-
-        // --- 3. Test Grandparent (`generations = 2`) ---
-        let child_from_gp = JonmoBuilder::new()
-            .component_signal_from_ancestor(2, signal_factory)
-            .spawn(app.world_mut());
-        app.world_mut().entity_mut(parent).add_child(child_from_gp);
-
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child_from_gp),
-            Some(&TargetComponent("Grandparent".to_string())),
-            "Child should get component from grandparent (gen 2)."
-        );
-
-        // --- 4. Test Self (`generations = 0`) ---
-        let child_from_self = JonmoBuilder::new()
-            .insert(SourceComponent("Self".to_string()))
-            .component_signal_from_ancestor(0, signal_factory)
-            .spawn(app.world_mut());
-        app.world_mut().entity_mut(parent).add_child(child_from_self);
-
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child_from_self),
-            Some(&TargetComponent("Self".to_string())),
-            "Child should get component from itself (gen 0)."
-        );
-
-        // --- 5. Test Reactivity (Update, Remove, Re-add) ---
-        // Use the `child_from_parent` for this test.
-
-        // Update the parent's source component.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Parent Updated".to_string();
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child_from_parent),
-            Some(&TargetComponent("Parent Updated".to_string())),
-            "Child's component should update when parent's component changes."
-        );
-
-        // Remove the source component from the parent. This should cause the signal to emit `None`.
-        app.world_mut().entity_mut(parent).remove::<SourceComponent>();
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(child_from_parent).is_none(),
-            "Child's component should be removed when parent's source component is removed."
-        );
-
-        // Re-add the source component to the parent.
-        app.world_mut()
-            .entity_mut(parent)
-            .insert(SourceComponent("Parent Restored".to_string()));
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child_from_parent),
-            Some(&TargetComponent("Parent Restored".to_string())),
-            "Child's component should be re-added when parent's source component is re-added."
-        );
-
-        // --- 6. Test Failure (Invalid Ancestor) ---
-        // Create a top-level builder (no parent) that asks for an ancestor.
-        // The signal chain should terminate gracefully.
-        let top_level_child = JonmoBuilder::new()
-            .component_signal_from_ancestor(1, signal_factory)
-            .spawn(app.world_mut());
-
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(top_level_child).is_none(),
-            "Top-level child should not have target component when asking for a non-existent parent."
-        );
-
-        // --- 7. Test Automatic Cleanup ---
-        // Despawn the child entity.
-        app.world_mut().entity_mut(child_from_parent).despawn();
-        app.update(); // Process the despawn command.
-
-        // Verify it's gone.
-        assert!(
-            app.world().get_entity(child_from_parent).is_err(),
-            "Child entity should be despawned."
-        );
-
-        // Mutate the parent's component again. If the signal was not cleaned up,
-        // this could panic when trying to access the despawned child.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn Update".to_string();
-        app.update();
-
-        // The test passes if the previous update didn't panic.
-    }
-
-    #[test]
-    fn test_component_signal_from_parent() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The factory closure defines the reusable signal logic.
-        // It takes a signal of a parent's entity, gets its `SourceComponent`,
-        // and maps it to an `Option<TargetComponent>`.
-        let signal_factory = |parent_signal: crate::signal::Map<crate::signal::Source<Entity>, Entity>| {
-            parent_signal
-                // Map the parent entity to its `SourceComponent`.
-                .map(|In(entity): In<Entity>, query: Query<&SourceComponent>| query.get(entity).ok().cloned()) // Map the `Option<SourceComponent>` to `Option<TargetComponent>`.
-                .map_in(|opt_source: Option<SourceComponent>| opt_source.map(|source| TargetComponent(source.0)))
-                .dedupe()
-        };
-
-        // Create a parent-child hierarchy.
-        let parent = app.world_mut().spawn(SourceComponent("Parent Data".to_string())).id();
-
-        // --- 2. Test Basic Functionality ---
-        let child = JonmoBuilder::new()
-            .component_signal_from_parent(signal_factory)
-            .spawn(app.world_mut());
-        app.world_mut().entity_mut(parent).add_child(child);
-
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child),
-            Some(&TargetComponent("Parent Data".to_string())),
-            "Child should get component from its direct parent."
-        );
-
-        // --- 3. Test Reactivity (Update, Remove, Re-add) ---
-        // Update the parent's source component.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Parent Updated".to_string();
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child),
-            Some(&TargetComponent("Parent Updated".to_string())),
-            "Child's component should update when parent's component changes."
-        );
-
-        // Remove the source component from the parent.
-        app.world_mut().entity_mut(parent).remove::<SourceComponent>();
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(child).is_none(),
-            "Child's component should be removed when parent's source component is removed."
-        );
-
-        // Re-add the source component to the parent.
-        app.world_mut()
-            .entity_mut(parent)
-            .insert(SourceComponent("Parent Restored".to_string()));
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(child),
-            Some(&TargetComponent("Parent Restored".to_string())),
-            "Child's component should be re-added when parent's source component is re-added."
-        );
-
-        // --- 4. Test Failure Case (No Parent) ---
-        // Create a top-level builder (no parent). The signal should not run.
-        let top_level_child = JonmoBuilder::new()
-            .component_signal_from_parent(signal_factory)
-            .spawn(app.world_mut());
-
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(top_level_child).is_none(),
-            "Top-level child should not have target component as it has no parent."
-        );
-
-        // --- 5. Test Automatic Cleanup ---
-        // Despawn the child entity.
-        app.world_mut().entity_mut(child).despawn();
-        app.update(); // Process the despawn command.
-
-        // Verify it's gone.
-        assert!(
-            app.world().get_entity(child).is_err(),
-            "Child entity should be despawned."
-        );
-
-        // Mutate the parent's component again. If the signal was not cleaned up,
-        // this could panic when trying to access the despawned child.
-        app.world_mut().get_mut::<SourceComponent>(parent).unwrap().0 = "Post-Despawn Update".to_string();
-        app.update();
-
-        // The test passes if the previous update didn't panic.
-    }
-
-    #[test]
-    fn test_component_signal_from_component() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The component that acts as the data source for the signal.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct SourceComponent(i32);
-
-        // The component that will be reactively managed by the signal's output.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TargetComponent(String);
-
-        // The factory closure that defines the signal logic.
-        // It receives a signal of the `SourceComponent` and transforms its value
-        // into an `Option<TargetComponent>`.
-        let signal_factory = |source_signal: crate::signal::Map<crate::signal::Source<Entity>, SourceComponent>| {
-            source_signal
-                // The signal from `component_signal_from_component` is already deduplicated
-                // by the `Changed<C>` filter in its upstream `signal_from_component_changed`,
-                // but adding one here is a good practice for robustness.
-                .dedupe()
-                // Map the source value to the target component's value.
-                .map_in(|source: SourceComponent| TargetComponent(format!("Value is {}", source.0)))
-                // The final signal must produce an `Option`.
-                .map_in(Some)
-        };
-
-        // --- 2. Test Initial State & Reactivity ---
-        let builder1 = JonmoBuilder::new()
-            .insert(SourceComponent(10))
-            .component_signal_from_component(signal_factory);
-
-        let entity1 = builder1.spawn(app.world_mut());
-
-        // Frame 1: The `SourceComponent` is newly added, which counts as `Changed`.
-        // The signal should fire and insert the `TargetComponent`.
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 10".to_string())),
-            "TargetComponent should be inserted on initial spawn."
-        );
-
-        // Frame 2: No change to `SourceComponent`. The signal should not fire again.
-        // We can test this by trying to remove the TargetComponent and seeing if it
-        // gets re-added. It should not.
-        app.world_mut().entity_mut(entity1).remove::<TargetComponent>();
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(entity1).is_none(),
-            "TargetComponent should not be re-inserted on an unchanged frame."
-        );
-
-        // Frame 3: Mutate the `SourceComponent`. The signal should fire and update the
-        // `TargetComponent`.
-        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 20;
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 20".to_string())),
-            "TargetComponent should be updated after SourceComponent changes."
-        );
-
-        // --- 3. Test Failure Case: No SourceComponent ---
-        // Spawn an entity with the signal but without the `SourceComponent`.
-        // The signal chain should terminate gracefully and not insert the `TargetComponent`.
-        let builder_no_source = JonmoBuilder::new().component_signal_from_component(signal_factory);
-        let entity_no_source = builder_no_source.spawn(app.world_mut());
-
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(entity_no_source).is_none(),
-            "TargetComponent should not be inserted if SourceComponent is missing."
-        );
-
-        // --- 4. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(SourceComponent(100))
-            .component_signal_from_component(signal_factory);
-        let entity2 = builder2.spawn(app.world_mut());
-
-        // Frame 4: Update both entities.
-        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 30;
-        // The update for entity2 happens implicitly on spawn.
-        app.update();
-
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 30".to_string())),
-            "Entity 1 failed to update in multi-entity test."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Value is 100".to_string())),
-            "Entity 2 failed to initialize in multi-entity test."
-        );
-
-        // --- 5. Test Automatic Cleanup ---
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update(); // Process despawn command.
-
-        // Mutate the `SourceComponent` of the remaining entity.
-        app.world_mut().get_mut::<SourceComponent>(entity2).unwrap().0 = 200;
-        app.update();
-
-        // The test passes if the app doesn't panic. We also verify the state.
-        assert!(
-            app.world().get_entity(entity1).is_err(),
-            "Despawned entity should not exist."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Value is 200".to_string())),
-            "Remaining entity failed to update after other was despawned."
-        );
-    }
-
-    #[test]
-    fn test_component_signal_from_component_option() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The factory closure defines the signal logic. It receives a signal that
-        // *always* emits an `Option<SourceComponent>`. This is the key difference
-        // from `component_signal_from_component`.
-        let signal_factory =
-            |source_opt_signal: crate::signal::Map<crate::signal::Source<Entity>, Option<SourceComponent>>| {
-                source_opt_signal
-                    .dedupe()
-                    // Map the Option<SourceComponent> to an Option<TargetComponent>.
-                    // This logic explicitly handles both the Some and None cases.
-                    .map_in(|opt_source: Option<SourceComponent>| match opt_source {
-                        // If the source exists, create a target component with its data.
-                        Some(source) => Some(TargetComponent(format!("Source: {}", source.0))),
-                        // If the source is missing, create a target component with a default value.
-                        None => Some(TargetComponent("Source: None".to_string())),
-                    })
-            };
-
-        // --- 2. Test Case: Source Component is PRESENT ---
-        let builder_with_comp = JonmoBuilder::new()
-            .insert(SourceComponent("Data A".to_string()))
-            .component_signal_from_component_option(signal_factory);
-
-        let entity_with_comp = builder_with_comp.spawn(app.world_mut());
-        app.update();
-
-        // The factory should have received `Some(SourceComponent)` and produced the corresponding
-        // target.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_with_comp),
-            Some(&TargetComponent("Source: Data A".to_string())),
-            "TargetComponent should be created from the present SourceComponent."
-        );
-
-        // --- 3. Test Case: Source Component is MISSING ---
-        // This is the primary test for this function's unique behavior.
-        let builder_without_comp = JonmoBuilder::new().component_signal_from_component_option(signal_factory);
-
-        let entity_without_comp = builder_without_comp.spawn(app.world_mut());
-        app.update();
-
-        // The factory should have received `None` and produced the default target.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_without_comp),
-            Some(&TargetComponent("Source: None".to_string())),
-            "TargetComponent should be created from the missing SourceComponent (None path)."
-        );
-
-        // --- 4. Test Reactivity of Component PRESENCE ---
-        // We will use `entity_with_comp` for this test.
-
-        // Step 4a: Remove the source component. The signal should re-run and update the target.
-        app.world_mut().entity_mut(entity_with_comp).remove::<SourceComponent>();
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_with_comp),
-            Some(&TargetComponent("Source: None".to_string())),
-            "TargetComponent should update to 'None' state after source is removed."
-        );
-
-        // Step 4b: Re-add the source component. The signal should re-run again.
-        app.world_mut()
-            .entity_mut(entity_with_comp)
-            .insert(SourceComponent("Data B".to_string()));
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_with_comp),
-            Some(&TargetComponent("Source: Data B".to_string())),
-            "TargetComponent should update after source is re-added."
-        );
-
-        // Step 4c: No change frame. Due to `.dedupe()`, the signal should not cause a write.
-        // (This is harder to assert directly, but is an implicit part of the logic).
-        app.update(); // Run again without changes.
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_with_comp),
-            Some(&TargetComponent("Source: Data B".to_string())),
-            "TargetComponent should remain unchanged on a no-op frame."
-        );
-
-        // --- 5. Test Automatic Cleanup ---
-        app.world_mut().entity_mut(entity_with_comp).despawn();
-        app.update();
-
-        assert!(
-            app.world().get_entity(entity_with_comp).is_err(),
-            "Entity should be despawned."
-        );
-
-        // The test passes if the app doesn't panic on subsequent updates, proving
-        // the signal isn't trying to access a despawned entity.
-        app.update();
-    }
-
-    #[test]
-    fn test_component_signal_from_component_changed() {
-        // --- 1. Setup ---
-        let mut app = create_test_app();
-
-        // The component that acts as the data source for the signal.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct SourceComponent(i32);
-
-        // The component that will be reactively managed by the signal's output.
-        #[derive(Component, Clone, Debug, PartialEq)]
-        struct TargetComponent(String);
-
-        // The factory closure that defines the signal logic.
-        // It receives a signal of the `SourceComponent` (only on changed frames)
-        // and transforms its value into an `Option<TargetComponent>`.
-        let signal_factory = |source_signal: crate::signal::Map<crate::signal::Source<Entity>, SourceComponent>| {
-            source_signal
-                // Map the source value to the target component's value.
-                .map_in(|source: SourceComponent| TargetComponent(format!("Value is {}", source.0)))
-                // The final signal must produce an `Option`.
-                .map_in(Some)
-        };
-
-        // --- 2. Test Initial State & Reactivity on Changed Frames ---
-        let builder1 = JonmoBuilder::new()
-            .insert(SourceComponent(10))
-            .component_signal_from_component_changed(signal_factory);
-
-        let entity1 = builder1.spawn(app.world_mut());
-
-        // Frame 1: The `SourceComponent` is newly added, which counts as `Changed`.
-        // The signal should fire and insert the `TargetComponent`.
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 10".to_string())),
-            "TargetComponent should be inserted on initial spawn."
-        );
-
-        // Frame 2: No change to `SourceComponent`. The signal should not fire.
-        // Remove the TargetComponent to verify it doesn't get re-added.
-        app.world_mut().entity_mut(entity1).remove::<TargetComponent>();
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(entity1).is_none(),
-            "TargetComponent should not be re-inserted on an unchanged frame."
-        );
-
-        // Frame 3: Mutate the `SourceComponent`. The signal should fire and update the
-        // `TargetComponent`.
-        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 20;
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 20".to_string())),
-            "TargetComponent should be updated after SourceComponent changes."
-        );
-
-        // Frame 4: Mutate again to verify continued reactivity.
-        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 30;
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 30".to_string())),
-            "TargetComponent should be updated on subsequent changes."
-        );
-
-        // --- 3. Test Failure Case: No SourceComponent ---
-        // Spawn an entity with the signal but without the `SourceComponent`.
-        // The signal chain should terminate gracefully and not insert the `TargetComponent`.
-        let builder_no_source = JonmoBuilder::new().component_signal_from_component_changed(signal_factory);
-        let entity_no_source = builder_no_source.spawn(app.world_mut());
-
-        app.update();
-        assert!(
-            app.world().get::<TargetComponent>(entity_no_source).is_none(),
-            "TargetComponent should not be inserted if SourceComponent is missing."
-        );
-
-        // Add the SourceComponent later and verify the signal starts working.
-        app.world_mut()
-            .entity_mut(entity_no_source)
-            .insert(SourceComponent(100));
-        app.update();
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_no_source),
-            Some(&TargetComponent("Value is 100".to_string())),
-            "TargetComponent should be inserted after SourceComponent is added."
-        );
-
-        // --- 4. Test Multi-Entity Independence ---
-        let builder2 = JonmoBuilder::new()
-            .insert(SourceComponent(200))
-            .component_signal_from_component_changed(signal_factory);
-        let entity2 = builder2.spawn(app.world_mut());
-
-        // Frame: Update entity2 (on spawn) and entity1 (manual change).
-        app.world_mut().get_mut::<SourceComponent>(entity1).unwrap().0 = 40;
-        app.update();
-
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity1),
-            Some(&TargetComponent("Value is 40".to_string())),
-            "Entity 1 failed to update in multi-entity test."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Value is 200".to_string())),
-            "Entity 2 failed to initialize in multi-entity test."
-        );
-
-        // --- 5. Test Automatic Cleanup ---
-        app.world_mut().entity_mut(entity1).despawn();
-        app.update(); // Process despawn command.
-
-        // Mutate the `SourceComponent` of the remaining entities.
-        app.world_mut().get_mut::<SourceComponent>(entity2).unwrap().0 = 300;
-        app.world_mut().get_mut::<SourceComponent>(entity_no_source).unwrap().0 = 150;
-        app.update();
-
-        // The test passes if the app doesn't panic. We also verify the state.
-        assert!(
-            app.world().get_entity(entity1).is_err(),
-            "Despawned entity should not exist."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity2),
-            Some(&TargetComponent("Value is 300".to_string())),
-            "Entity 2 failed to update after entity1 was despawned."
-        );
-        assert_eq!(
-            app.world().get::<TargetComponent>(entity_no_source),
-            Some(&TargetComponent("Value is 150".to_string())),
-            "Entity no_source failed to update after entity1 was despawned."
-        );
-    }
-
-    #[test]
     fn test_child() {
         {
             // --- 1. Setup ---
@@ -2720,8 +1011,8 @@ mod tests {
             struct TargetComp(i32);
 
             // --- 2. Test: Simple Parent-Child Relationship ---
-            let child_builder_simple = JonmoBuilder::new().insert((ChildCompA, Name::new("SimpleChild")));
-            let parent_builder_simple = JonmoBuilder::new().insert(ParentComp).child(child_builder_simple);
+            let child_builder_simple = jonmo::Builder::new().insert((ChildCompA, Name::new("SimpleChild")));
+            let parent_builder_simple = jonmo::Builder::new().insert(ParentComp).child(child_builder_simple);
 
             let parent_entity_simple = parent_builder_simple.spawn(app.world_mut());
             app.update();
@@ -2746,10 +1037,10 @@ mod tests {
             app.update();
 
             // --- 3. Test: Multiple Chained Children & Correct Order ---
-            let parent_builder_chained = JonmoBuilder::new()
+            let parent_builder_chained = jonmo::Builder::new()
                 .insert(ParentComp)
-                .child(JonmoBuilder::new().insert(ChildCompA))
-                .child(JonmoBuilder::new().insert(ChildCompB));
+                .child(jonmo::Builder::new().insert(ChildCompA))
+                .child(jonmo::Builder::new().insert(ChildCompB));
 
             let parent_entity_chained = parent_builder_chained.spawn(app.world_mut());
             app.update();
@@ -2774,9 +1065,11 @@ mod tests {
             app.update();
 
             // --- 4. Test: Nested Hierarchy ---
-            let grandchild_builder = JonmoBuilder::new().insert(Name::new("Grandchild"));
-            let child_builder_nested = JonmoBuilder::new().insert(Name::new("Child")).child(grandchild_builder);
-            let grandparent_builder = JonmoBuilder::new()
+            let grandchild_builder = jonmo::Builder::new().insert(Name::new("Grandchild"));
+            let child_builder_nested = jonmo::Builder::new()
+                .insert(Name::new("Child"))
+                .child(grandchild_builder);
+            let grandparent_builder = jonmo::Builder::new()
                 .insert(Name::new("Grandparent"))
                 .child(child_builder_nested);
 
@@ -2805,21 +1098,24 @@ mod tests {
             struct SignalTrigger(bool);
             app.init_resource::<SignalTrigger>();
 
-            let child_a = JonmoBuilder::new().insert(ChildCompA);
-            let child_b = JonmoBuilder::new().insert(ChildCompB);
-            let child_c = JonmoBuilder::new().insert(ChildCompC);
-            let child_d = JonmoBuilder::new().insert(ChildCompD);
-            let child_e = JonmoBuilder::new().insert(ChildCompE);
+            let child_a = jonmo::Builder::new().insert(ChildCompA);
+            let child_b = jonmo::Builder::new().insert(ChildCompB);
+            let child_c = jonmo::Builder::new().insert(ChildCompC);
+            let child_d = jonmo::Builder::new().insert(ChildCompD);
+            // Use a factory function instead of cloning
+            fn make_child_e() -> jonmo::Builder {
+                jonmo::Builder::new().insert(ChildCompE)
+            }
 
-            let parent_builder_mixed = JonmoBuilder::new()
+            let parent_builder_mixed = jonmo::Builder::new()
                 .insert(ParentComp)
                 .child(child_a) // Block 0, offset 0
-                .children([child_b.clone(), child_c.clone()]) // Block 1, offset 1
+                .children([child_b, child_c]) // Block 1, offset 1
                 .child(child_d) // Block 2, offset 3
                 .child_signal(
                     // Block 3, offset 4
-                    SignalBuilder::from_resource::<SignalTrigger>().map_in::<Option<JonmoBuilder>, _, _>(
-                        move |trigger: SignalTrigger| if trigger.0 { Some(child_e.clone()) } else { None },
+                    signal::from_resource::<SignalTrigger>().map_in::<Option<Builder>, _, _>(
+                        move |trigger: SignalTrigger| if trigger.0 { Some(make_child_e()) } else { None },
                     ),
                 );
 
@@ -2859,13 +1155,24 @@ mod tests {
             app.update();
 
             // --- 6. Test: Child's Signals Function Correctly ---
-            let child_builder_with_signal = JonmoBuilder::new().component_signal_from_parent(|parent_signal| {
-                parent_signal
+            // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+            let child_entity = LazyEntity::new();
+            let child_builder_with_signal = jonmo::Builder::new().lazy_entity(child_entity.clone()).on_signal(
+                signal::from_parent_lazy(child_entity.clone())
                     .component::<SourceComp>()
-                    .map_in(|source: SourceComp| Some(TargetComp(source.0 * 2)))
-            });
+                    .map_in(|source: SourceComp| Some(TargetComp(source.0 * 2))),
+                |In((entity, comp_opt)): In<(Entity, Option<TargetComp>)>, world: &mut World| {
+                    if let Ok(mut e) = world.get_entity_mut(entity) {
+                        if let Some(comp) = comp_opt {
+                            e.insert(comp);
+                        } else {
+                            e.remove::<TargetComp>();
+                        }
+                    }
+                },
+            );
 
-            let parent_builder_with_signal = JonmoBuilder::new()
+            let parent_builder_with_signal = jonmo::Builder::new()
                 .insert(SourceComp(10))
                 .child(child_builder_with_signal);
 
@@ -2945,20 +1252,20 @@ mod tests {
             app.init_resource::<SignalSource>();
 
             // A factory function to create reactive child builders based on a number
-            let reactive_child_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
+            let reactive_child_factory = |id: u32| jonmo::Builder::new().insert(ReactiveChild(id));
 
-            // The signal that maps the resource to an Option<JonmoBuilder>
-            let source_signal = SignalBuilder::from_resource::<SignalSource>()
+            // The signal that maps the resource to an Option<jonmo::Builder>
+            let source_signal = signal::from_resource::<SignalSource>()
                 .dedupe()
                 .map_in(move |source: SignalSource| source.0.map(reactive_child_factory));
 
             // --- 2. Build the Parent Entity ---
             // This builder has static children sandwiching the reactive one to test ordering.
-            let parent_builder = JonmoBuilder::new()
+            let parent_builder = jonmo::Builder::new()
                 .insert(ParentComp)
-                .child(JonmoBuilder::new().insert(StaticChildBefore)) // Child in block 0
+                .child(jonmo::Builder::new().insert(StaticChildBefore)) // Child in block 0
                 .child_signal(source_signal) // Child in block 1
-                .child(JonmoBuilder::new().insert(StaticChildAfter)); // Child in block 2
+                .child(jonmo::Builder::new().insert(StaticChildAfter)); // Child in block 2
 
             let parent_entity = parent_builder.spawn(app.world_mut());
 
@@ -3105,11 +1412,11 @@ mod tests {
             // specified order.
             {
                 let child_builders = vec![
-                    JonmoBuilder::new().insert(ChildCompA),
-                    JonmoBuilder::new().insert(ChildCompB),
-                    JonmoBuilder::new().insert(ChildCompC),
+                    jonmo::Builder::new().insert(ChildCompA),
+                    jonmo::Builder::new().insert(ChildCompB),
+                    jonmo::Builder::new().insert(ChildCompC),
                 ];
-                let parent_builder = JonmoBuilder::new().insert(ParentComp).children(child_builders);
+                let parent_builder = jonmo::Builder::new().insert(ParentComp).children(child_builders);
 
                 let parent_entity = parent_builder.spawn(app.world_mut());
                 app.update();
@@ -3153,9 +1460,9 @@ mod tests {
             // Verifies that providing an empty iterator results in no children being added.
             {
                 // The type hint is needed for an empty vec.
-                let parent_builder_empty = JonmoBuilder::new()
+                let parent_builder_empty = jonmo::Builder::new()
                     .insert(ParentComp)
-                    .children(vec![] as Vec<JonmoBuilder>);
+                    .children(vec![] as Vec<Builder>);
                 let parent_entity_empty = parent_builder_empty.spawn(app.world_mut());
                 app.update();
                 assert!(
@@ -3171,17 +1478,28 @@ mod tests {
             // Verifies that children can have their own complex logic (signals, hierarchy) and that
             // they are properly cleaned up when the parent is despawned.
             {
-                let complex_child_builder = JonmoBuilder::new()
+                // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+                let complex_child_entity = LazyEntity::new();
+                let complex_child_builder = jonmo::Builder::new()
+                    .lazy_entity(complex_child_entity.clone())
                     .insert(ChildCompD)
-                    .child(JonmoBuilder::new().insert(GrandchildComp)) // Nested child
-                    .component_signal_from_parent(|parent_signal| {
-                        // Signal reading from parent
-                        parent_signal
+                    .child(jonmo::Builder::new().insert(GrandchildComp)) // Nested child
+                    .on_signal(
+                        signal::from_parent_lazy(complex_child_entity.clone())
                             .component::<SourceComp>()
-                            .map_in(|source: SourceComp| Some(TargetComp(source.0 * 10)))
-                    });
+                            .map_in(|source: SourceComp| Some(TargetComp(source.0 * 10))),
+                        |In((entity, comp_opt)): In<(Entity, Option<TargetComp>)>, world: &mut World| {
+                            if let Ok(mut e) = world.get_entity_mut(entity) {
+                                if let Some(comp) = comp_opt {
+                                    e.insert(comp);
+                                } else {
+                                    e.remove::<TargetComp>();
+                                }
+                            }
+                        },
+                    );
 
-                let parent_builder_complex = JonmoBuilder::new()
+                let parent_builder_complex = jonmo::Builder::new()
                     .insert((ParentComp, SourceComp(5)))
                     .children(vec![complex_child_builder]);
 
@@ -3189,23 +1507,23 @@ mod tests {
                 app.update();
 
                 let complex_children = app.world().get::<Children>(parent_entity_complex).unwrap();
-                let complex_child_entity = complex_children[0];
+                let complex_child_entity_id = complex_children[0];
 
                 // Verify signal ran correctly
                 assert_eq!(
-                    app.world().get::<TargetComp>(complex_child_entity),
+                    app.world().get::<TargetComp>(complex_child_entity_id),
                     Some(&TargetComp(50))
                 );
 
                 // Verify nested hierarchy
-                let grandchild_entity = app.world().get::<Children>(complex_child_entity).unwrap()[0];
+                let grandchild_entity = app.world().get::<Children>(complex_child_entity_id).unwrap()[0];
                 assert!(app.world().entity(grandchild_entity).contains::<GrandchildComp>());
 
                 // Test reactivity
                 app.world_mut().get_mut::<SourceComp>(parent_entity_complex).unwrap().0 = 7;
                 app.update();
                 assert_eq!(
-                    app.world().get::<TargetComp>(complex_child_entity),
+                    app.world().get::<TargetComp>(complex_child_entity_id),
                     Some(&TargetComp(70)),
                     "Signal did not react to parent's component change."
                 );
@@ -3215,7 +1533,7 @@ mod tests {
                 app.update();
 
                 assert!(
-                    app.world().get_entity(complex_child_entity).is_err(),
+                    app.world().get_entity(complex_child_entity_id).is_err(),
                     "Complex child should be despawned with parent."
                 );
                 assert!(
@@ -3264,19 +1582,19 @@ mod tests {
                 struct SignalTrigger(bool);
                 app.init_resource::<SignalTrigger>();
 
-                let parent_builder = JonmoBuilder::new()
+                let parent_builder = jonmo::Builder::new()
                     .insert(ParentComp)
-                    .child(JonmoBuilder::new().insert(ChildCompA)) // Block 0, size 1
+                    .child(jonmo::Builder::new().insert(ChildCompA)) // Block 0, size 1
                     .children([
                         // Block 1, size 2
-                        JonmoBuilder::new().insert(ChildCompB),
-                        JonmoBuilder::new().insert(ChildCompC),
+                        jonmo::Builder::new().insert(ChildCompB),
+                        jonmo::Builder::new().insert(ChildCompC),
                     ])
                     .child_signal(
                         // Block 2, size 0 -> 1
-                        SignalBuilder::from_resource::<SignalTrigger>().map_in(|trigger: SignalTrigger| {
+                        signal::from_resource::<SignalTrigger>().map_in(|trigger: SignalTrigger| {
                             if trigger.0 {
-                                Some(JonmoBuilder::new().insert(ChildCompD))
+                                Some(jonmo::Builder::new().insert(ChildCompD))
                             } else {
                                 None
                             }
@@ -3284,11 +1602,11 @@ mod tests {
                     )
                     .children(vec![
                         // Block 3, size 3
-                        JonmoBuilder::new().insert(ChildCompE),
-                        JonmoBuilder::new().insert(ChildCompF),
-                        JonmoBuilder::new().insert(ChildCompG),
+                        jonmo::Builder::new().insert(ChildCompE),
+                        jonmo::Builder::new().insert(ChildCompF),
+                        jonmo::Builder::new().insert(ChildCompG),
                     ])
-                    .child(JonmoBuilder::new().insert(ChildCompH)); // Block 4, size 1
+                    .child(jonmo::Builder::new().insert(ChildCompH)); // Block 4, size 1
 
                 let parent_entity = parent_builder.spawn(app.world_mut());
 
@@ -3362,20 +1680,20 @@ mod tests {
         {
             // --- 1. SETUP ---
             let mut app = create_test_app();
-            let source_vec = MutableVecBuilder::from([10u32, 20u32]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([10u32, 20u32]).spawn(app.world_mut());
 
-            // A factory function to create a simple JonmoBuilder for a reactive child.
-            let child_builder_factory = |id: u32| JonmoBuilder::new().insert(ReactiveChild(id));
+            // A factory function to create a simple jonmo::Builder for a reactive child.
+            let child_builder_factory = |id: u32| jonmo::Builder::new().insert(ReactiveChild(id));
 
             // The SignalVec that will drive the children.
             let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
 
             // The parent builder, with static children sandwiching the reactive ones to test ordering.
-            let parent_builder = JonmoBuilder::new()
+            let parent_builder = jonmo::Builder::new()
                 .insert(ParentComp)
-                .child(JonmoBuilder::new().insert(StaticChildBefore))
+                .child(jonmo::Builder::new().insert(StaticChildBefore))
                 .children_signal_vec(children_signal)
-                .child(JonmoBuilder::new().insert(StaticChildAfter));
+                .child(jonmo::Builder::new().insert(StaticChildAfter));
 
             let parent_entity = parent_builder.spawn(app.world_mut());
 
@@ -3558,7 +1876,7 @@ mod tests {
 
         // --- 2. Test Basic Callback Execution ---
         let tracker = app.world().resource::<DespawnTracker>().clone();
-        let builder1 = JonmoBuilder::new().on_despawn({
+        let builder1 = jonmo::Builder::new().on_despawn({
             let tracker = tracker.clone();
             move |_world, entity| {
                 tracker.0.lock().unwrap().push((entity, "callback1".to_string()));
@@ -3586,7 +1904,7 @@ mod tests {
         tracker.0.lock().unwrap().clear();
 
         // --- 3. Test Multiple Callbacks on Same Entity ---
-        let builder2 = JonmoBuilder::new()
+        let builder2 = jonmo::Builder::new()
             .on_despawn({
                 let tracker = tracker.clone();
                 move |_world, entity| {
@@ -3624,7 +1942,7 @@ mod tests {
         tracker.0.lock().unwrap().clear();
 
         // --- 4. Test Multi-Entity Independence ---
-        let builder3 = JonmoBuilder::new().on_despawn({
+        let builder3 = jonmo::Builder::new().on_despawn({
             let tracker = tracker.clone();
             move |_world, entity| {
                 tracker.0.lock().unwrap().push((entity, "entity3".to_string()));
@@ -3632,7 +1950,7 @@ mod tests {
         });
         let entity3 = builder3.spawn(app.world_mut());
 
-        let builder4 = JonmoBuilder::new().on_despawn({
+        let builder4 = jonmo::Builder::new().on_despawn({
             let tracker = tracker.clone();
             move |_world, entity| {
                 tracker.0.lock().unwrap().push((entity, "entity4".to_string()));
@@ -3670,7 +1988,7 @@ mod tests {
 
         app.init_resource::<DespawnCounter>();
 
-        let builder5 = JonmoBuilder::new().on_despawn(|world, _entity| {
+        let builder5 = jonmo::Builder::new().on_despawn(|world, _entity| {
             world.resource_mut::<DespawnCounter>().0 += 1;
         });
 
@@ -3693,7 +2011,7 @@ mod tests {
         );
 
         // Spawn and despawn another entity to verify counter increments again.
-        let builder6 = JonmoBuilder::new().on_despawn(|world, _entity| {
+        let builder6 = jonmo::Builder::new().on_despawn(|world, _entity| {
             world.resource_mut::<DespawnCounter>().0 += 10;
         });
         let entity6 = builder6.spawn(app.world_mut());
@@ -3718,12 +2036,12 @@ mod tests {
         let child_tracker = child_despawn_tracker.clone();
         let parent_tracker = parent_despawn_tracker.clone();
 
-        let builder_parent = JonmoBuilder::new()
+        let builder_parent = jonmo::Builder::new()
             .insert(TestMarker)
             .on_despawn(move |_world, entity| {
                 parent_tracker.lock().unwrap().push(entity);
             })
-            .child(JonmoBuilder::new().on_despawn(move |_world, entity| {
+            .child(jonmo::Builder::new().on_despawn(move |_world, entity| {
                 child_tracker.lock().unwrap().push(entity);
             }));
 

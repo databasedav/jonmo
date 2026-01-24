@@ -6,13 +6,19 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### changed
 
-- `JonmoBuilder::hold_tasks` renamed to `JonmoBuilder::hold_signals` and takes `Box<dyn SignalTask>`s instead of `SignalHandles`
-- removed output `Clone` bound from `SignalExt::filter_map`
+- signal graph processed in deterministic topological order instead of the previous nondeterministic depth first order
+- renamed `SignalExt::combine` to `SignalExt::with`
+- `JonmoBuilder` renamed to `jonmo::Builder`
+- `jonmo::Builder::hold_signals` renamed to `jonmo::Builder::hold_tasks` and takes `Box<dyn SignalTask>`s instead of `SignalHandles`
+- removed self item `Clone` bound from `SignalVecExt::map_signal` and `SignalVecExt::filter_map`
+- `SignalBuilder::*` methods moved to free functions in `signal` module (e.g. `SignalBuilder::always` -> `signal::always`)
 
 ### added
 - `SignalExt::take`
+- `signal::zip!`, a variadic flattened version of `SignalExt::with`
+- `SignalVecExt::flatten`
 - `track_caller` derive for panicking `LazyEntity` methods
-- warning that cloning `JonmoBuilder`s at runtime is a bug
+- warning that cloning `jonmo::Builder`s at runtime is a bug
 
 ### fixed
 

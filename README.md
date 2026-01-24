@@ -8,7 +8,7 @@
 in bengali, jonmo means "birth"
 ```
 
-[jonmo](https://github.com/databasedav/jonmo) provides an ergonomic, functional, and declarative API for specifying Bevy [system](https://docs.rs/bevy/latest/bevy/ecs/system/index.html) dependency graphs, where "output" handles to nodes of the graph are canonically referred to as "signals". Building upon these signals, jonmo offers a high level [entity builder](https://docs.rs/jonmo/latest/jonmo/builder/struct.JonmoBuilder.html) which enables one to declare reactive entities, components, and children using a familiar fluent syntax with semantics and API ported from the incredible [FRP](https://en.wikipedia.org/wiki/Functional_reactive_programming) signals of [futures-signals](https://github.com/Pauan/rust-signals) and its web UI dependents [MoonZoon](https://github.com/MoonZoon/MoonZoon) and [Dominator](https://github.com/Pauan/rust-dominator).
+[jonmo](https://github.com/databasedav/jonmo) provides an ergonomic, functional, and declarative API for specifying Bevy [system](https://docs.rs/bevy/latest/bevy/ecs/system/index.html) dependency graphs, where "output" handles to nodes of the graph are canonically referred to as "signals". Building upon these signals, jonmo offers a high level [entity builder](https://docs.rs/jonmo/latest/jonmo/builder/struct.Builder.html) which enables one to declare reactive entities, components, and children using a familiar fluent syntax with semantics and API ported from the incredible [FRP](https://en.wikipedia.org/wiki/Functional_reactive_programming) signals of [futures-signals](https://github.com/Pauan/rust-signals) and its web UI dependents [MoonZoon](https://github.com/MoonZoon/MoonZoon) and [Dominator](https://github.com/Pauan/rust-dominator).
 
 The runtime of jonmo is quite simple; every frame, the outputs of systems are forwarded to their dependants, recursively. The complexity and power of jonmo really emerges from its monadic signal combinators, defined within the [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html), [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/signal_vec/trait.SignalVecExt.html), and [`SignalMapExt`](https://docs.rs/jonmo/latest/jonmo/signal_map/trait.SignalMapExt.html) traits (ported from futures-signals' traits of the same name), which internally manage special Bevy systems that allow for the declarative composition of complex data flows with minimalistic, high-level, signals-oriented methods.
 
@@ -51,10 +51,10 @@ fn main() {
 #[derive(Component, Clone, Deref, DerefMut)]
 struct Counter(i32);
 
-fn ui_root() -> JonmoBuilder {
+fn ui_root() -> jonmo::Builder {
     let counter_holder = LazyEntity::new();
 
-    JonmoBuilder::from(Node {
+    jonmo::Builder::from(Node {
         width: Val::Percent(100.0),
         height: Val::Percent(100.0),
         justify_content: JustifyContent::Center,
@@ -62,7 +62,7 @@ fn ui_root() -> JonmoBuilder {
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node {
+        jonmo::Builder::from(Node {
             flex_direction: FlexDirection::Row,
             column_gap: Val::Px(15.0),
             align_items: AlignItems::Center,
@@ -73,11 +73,10 @@ fn ui_root() -> JonmoBuilder {
         .lazy_entity(counter_holder.clone())
         .child(counter_button(counter_holder.clone(), PINK, "-", -1))
         .child(
-            JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
+            jonmo::Builder::from((Node::default(), TextFont::from_font_size(25.)))
                 .component_signal(
-                    SignalBuilder::from_component_lazy(counter_holder.clone())
-                        .map_in(|counter: Counter| *counter)
-                        .dedupe()
+                    signal::from_component_changed_lazy::<Counter>(counter_holder.clone())
+                        .map_in(deref_copied)
                         .map_in_ref(ToString::to_string)
                         .map_in(Text)
                         .map_in(Some),
@@ -87,8 +86,8 @@ fn ui_root() -> JonmoBuilder {
     )
 }
 
-fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str, step: i32) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str, step: i32) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             width: Val::Px(45.0),
             justify_content: JustifyContent::Center,
@@ -99,11 +98,9 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         BackgroundColor(color),
     ))
     .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
-        if let Ok(mut counter) = counters.get_mut(*counter_holder) {
-            **counter += step;
-        }
+        **counters.get_mut(*counter_holder).unwrap() += step;
     })
-    .child(JonmoBuilder::from((Text::from(label), TextFont::from_font_size(25.))))
+    .child(jonmo::Builder::from((Text::from(label), TextFont::from_font_size(25.))))
 }
 
 fn camera(mut commands: Commands) {

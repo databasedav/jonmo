@@ -34,14 +34,15 @@ fn ui(world: &mut World) {
     });
     ui_root.add_child(text);
 
-    JonmoBuilder::new()
-        .component_signal_from_component(|signal| {
-            signal
-                .dedupe()
-                .map(|In(value): In<Value>| Text(value.0.to_string()))
-                .map_in(Some)
-        })
-        .spawn_on_entity(world, text);
+    jonmo::Builder::new()
+        .component_signal(
+            signal::from_component_changed::<Value>(text)
+                .map_in(|value| value.0.to_string())
+                .map_in(Text)
+                .map_in(Some),
+        )
+        .spawn_on_entity(world, text)
+        .unwrap();
 }
 
 fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {

@@ -121,21 +121,22 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
         error!("cycle detected when attempting to pipe {:?} → {:?}", source, target);
         return;
     }
-    if let Ok(mut upstream) = world.get_entity_mut(*source) {
-        if let Some(mut downstream) = upstream.get_mut::<Downstream>() {
-            downstream.0.insert(target);
-        } else {
-            upstream.insert(Downstream(HashSet::from([target])));
-        }
+    let mut upstream = world.entity_mut(*source);
+    if let Some(mut downstream) = upstream.get_mut::<Downstream>() {
+        downstream.0.insert(target);
+    } else {
+        upstream.insert(Downstream(HashSet::from([target])));
     }
-    if let Ok(mut downstream) = world.get_entity_mut(*target) {
-        if let Some(mut upstream) = downstream.get_mut::<Upstream>() {
-            upstream.0.insert(source);
-        } else {
-            downstream.insert(Upstream(HashSet::from([source])));
-        }
+    let mut downstream = world.entity_mut(*target);
+    if let Some(mut upstream) = downstream.get_mut::<Upstream>() {
+        upstream.0.insert(source);
+    } else {
+        downstream.insert(Upstream(HashSet::from([source])));
     }
-    world.resource_mut::<SignalGraphState>().edge_change_seeds.insert(target);
+    world
+        .resource_mut::<SignalGraphState>()
+        .edge_change_seeds
+        .insert(target);
 }
 
 #[derive(Component, Clone)]
@@ -200,7 +201,6 @@ clone_trait_object!(AnyClone);
 
 impl<T: Clone + 'static> AnyClone for T {}
 
-
 /// Tracks signal graph topology for level-based processing.
 #[derive(Resource, Default)]
 pub(crate) struct SignalGraphState {
@@ -216,7 +216,8 @@ pub(crate) struct SignalGraphState {
     is_processing: bool,
 }
 
-// Fan out a signal output to downstream input queues. When there is exactly one downstream, move the value without cloning.
+// Fan out a signal output to downstream input queues. When there is exactly one downstream, move
+// the value without cloning.
 fn enqueue_inputs(
     world: &World,
     inputs: &mut HashMap<SignalSystem, VecDeque<Box<dyn AnyClone>>>,
@@ -230,19 +231,13 @@ fn enqueue_inputs(
 
     if downstreams.len() == 1 {
         // avoid cloning if there's only a single downstream
-        inputs
-            .entry(downstreams[0])
-            .or_default()
-            .push_back(value);
+        inputs.entry(downstreams[0]).or_default().push_back(value);
         return;
     }
 
     if let Some((last, rest)) = downstreams.split_last() {
         for downstream in rest {
-            inputs
-                .entry(*downstream)
-                .or_default()
-                .push_back(value.clone());
+            inputs.entry(*downstream).or_default().push_back(value.clone());
         }
         inputs.entry(*last).or_default().push_back(value);
     }
@@ -263,13 +258,11 @@ fn get_downstreams(world: &World, signal: SignalSystem) -> Vec<SignalSystem> {
 }
 
 fn insert_sorted_by_index(bucket: &mut Vec<SignalSystem>, signal: SignalSystem) {
-    if bucket.iter().any(|s| *s == signal) {
+    if bucket.contains(&signal) {
         return;
     }
     let key = signal.index();
-    let index = bucket
-        .binary_search_by_key(&key, |s| s.index())
-        .unwrap_or_else(|i| i);
+    let index = bucket.binary_search_by_key(&key, |s| s.index()).unwrap_or_else(|i| i);
     bucket.insert(index, signal);
 }
 
@@ -277,10 +270,7 @@ fn insert_sorted_by_index(bucket: &mut Vec<SignalSystem>, signal: SignalSystem) 
 // from `seeds`. This intentionally does NOT use `SignalGraphState` because it only
 // needs a lightweight traversal for the provided subset and should not mutate or
 // depend on the global cached topology.
-fn downstream_levels_from_seeds(
-    world: &World,
-    seeds: &[SignalSystem],
-) -> Vec<Vec<SignalSystem>> {
+fn downstream_levels_from_seeds(world: &World, seeds: &[SignalSystem]) -> Vec<Vec<SignalSystem>> {
     let mut levels: HashMap<SignalSystem, u32> = HashMap::new();
     let mut by_level: Vec<HashSet<SignalSystem>> = Vec::new();
     let mut queue: VecDeque<SignalSystem> = VecDeque::new();
@@ -325,19 +315,14 @@ fn downstream_levels_from_seeds(
 // - Roots (in-degree 0) start at level 0.
 // - Each node's level is 1 + max(level of its upstreams).
 // - Nodes are bucketed by level for deterministic per-level iteration.
-// - If a cycle or inconsistent edges are detected (not all nodes processed),
-//   this panics because the graph invariants were violated.
+// - If a cycle or inconsistent edges are detected (not all nodes processed), this panics because
+//   the graph invariants were violated.
 fn rebuild_levels(world: &mut World, state: &mut SignalGraphState) {
     state.levels.clear();
     state.by_level.clear();
 
-    let mut all_signals =
-        SystemState::<Query<Entity, (With<SystemRunner>, Allow<Internal>)>>::new(world);
-    let signals = all_signals
-        .get(world)
-        .iter()
-        .map(SignalSystem)
-        .collect::<Vec<_>>();
+    let mut all_signals = SystemState::<Query<Entity, (With<SystemRunner>, Allow<Internal>)>>::new(world);
+    let signals = all_signals.get(world).iter().map(SignalSystem).collect::<Vec<_>>();
 
     let mut in_degree: HashMap<SignalSystem, usize> = HashMap::new();
     let mut upstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
@@ -419,10 +404,7 @@ fn update_levels_incremental(world: &mut World, state: &mut SignalGraphState) ->
 
     for signal in affected.iter().copied() {
         let upstreams = get_upstreams(world, signal);
-        let local_in_degree = upstreams
-            .iter()
-            .filter(|u| affected.contains(&(**u)))
-            .count();
+        let local_in_degree = upstreams.iter().filter(|u| affected.contains(&(**u))).count();
         in_degree.insert(signal, local_in_degree);
         upstreams_map.insert(signal, upstreams);
     }
@@ -469,12 +451,11 @@ fn update_levels_incremental(world: &mut World, state: &mut SignalGraphState) ->
     }
 
     for signal in affected {
-        if let Some(old_level) = state.levels.get(&signal).copied() {
-            if let Some(bucket) = state.by_level.get_mut(old_level as usize) {
-                if let Some(pos) = bucket.iter().position(|s| *s == signal) {
-                    bucket.remove(pos);
-                }
-            }
+        if let Some(old_level) = state.levels.get(&signal).copied()
+            && let Some(bucket) = state.by_level.get_mut(old_level as usize)
+            && let Some(pos) = bucket.iter().position(|s| *s == signal)
+        {
+            bucket.remove(pos);
         }
 
         if let Some(new_level) = new_levels.get(&signal).copied() {
@@ -509,12 +490,11 @@ fn update_edge_change_levels(world: &mut World, state: &mut SignalGraphState) {
 }
 
 fn remove_signal_from_graph_state_internal(state: &mut SignalGraphState, signal: SignalSystem) {
-    if let Some(level) = state.levels.remove(&signal) {
-        if let Some(bucket) = state.by_level.get_mut(level as usize) {
-            if let Some(pos) = bucket.iter().position(|s| *s == signal) {
-                bucket.remove(pos);
-            }
-        }
+    if let Some(level) = state.levels.remove(&signal)
+        && let Some(bucket) = state.by_level.get_mut(level as usize)
+        && let Some(pos) = bucket.iter().position(|s| *s == signal)
+    {
+        bucket.remove(pos);
     }
     state.edge_change_seeds.remove(&signal);
 }
@@ -555,9 +535,7 @@ fn process_signal(
             let downstreams = get_downstreams(world, signal);
             panic!(
                 "missing SystemRunner for signal {:?} during processing (entity exists). upstreams={:?}, downstreams={:?}",
-                signal,
-                upstreams,
-                downstreams
+                signal, upstreams, downstreams
             );
         }
     };
@@ -579,11 +557,7 @@ fn process_signal(
     }
 }
 
-pub(crate) fn process_signals(
-    world: &mut World,
-    signals: impl AsRef<[SignalSystem]>,
-    input: Box<dyn AnyClone>,
-) {
+pub(crate) fn process_signals(world: &mut World, signals: impl AsRef<[SignalSystem]>, input: Box<dyn AnyClone>) {
     let signals = signals.as_ref();
     if signals.is_empty() {
         return;
@@ -596,12 +570,7 @@ pub(crate) fn process_signals(
             let runner = world
                 .get::<SystemRunner>(*signal)
                 .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "missing SystemRunner for signal {:?} during processing",
-                        signal
-                    )
-                });
+                .unwrap_or_else(|| panic!("missing SystemRunner for signal {:?} during processing", signal));
             if let Some(output) = runner.run(world, input) {
                 enqueue_inputs(world, &mut inputs, signal, output);
             }
@@ -664,7 +633,7 @@ pub(crate) fn process_signal_graph(world: &mut World) {
 /// called on a corresponding [`SignalHandle`] or a downstream [`SignalHandle`].
 /// Adding [`SignalHandle`]s to the [`SignalHandles`] [`Component`] will take care
 /// of this when the corresponding [`Entity`] is despawned, and using the
-/// [`JonmoBuilder`](super::builder::JonmoBuilder) will manage this internally.
+/// [`jonmo::Builder`](super::builder::Builder) will manage this internally.
 #[derive(Clone, Deref, Debug)]
 pub struct SignalHandle(pub SignalSystem);
 
@@ -688,15 +657,16 @@ impl SignalHandle {
 }
 
 fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    if let Some(handles) = world.get_entity_mut(entity).ok().and_then(|mut entity| {
-        entity
-            .get_mut::<SignalHandles>()
-            .map(|mut handles| handles.0.drain(..).collect::<Vec<_>>())
-    }) {
-        let mut commands = world.commands();
-        for handle in handles {
-            commands.queue(|world: &mut World| handle.cleanup(world));
-        }
+    let handles: Vec<_> = world
+        .entity_mut(entity)
+        .get_mut::<SignalHandles>()
+        .unwrap()
+        .0
+        .drain(..)
+        .collect();
+    let mut commands = world.commands();
+    for handle in handles {
+        commands.queue(|world: &mut World| handle.cleanup(world));
     }
 }
 
@@ -767,11 +737,11 @@ impl LazySystem {
                 signal
             }
             LazySystem::Registered(signal) => {
-                if let Ok(mut system) = world.get_entity_mut(**signal)
-                    && let Some(mut registration_count) = system.get_mut::<SignalRegistrationCount>()
-                {
-                    registration_count.increment();
-                }
+                world
+                    .entity_mut(**signal)
+                    .get_mut::<SignalRegistrationCount>()
+                    .unwrap()
+                    .increment();
                 *signal
             }
         }
@@ -794,9 +764,8 @@ impl LazySignal {
 
     pub(crate) fn register(self, world: &mut World) -> SignalSystem {
         let signal = self.inner.system.write().unwrap().register(world);
-        if let Ok(mut entity) = world.get_entity_mut(*signal)
-            && !entity.contains::<LazySignalHolder>()
-        {
+        let mut entity = world.entity_mut(*signal);
+        if !entity.contains::<LazySignalHolder>() {
             entity.insert(LazySignalHolder(self));
         }
         signal
@@ -839,9 +808,10 @@ fn unlink_downstreams_and_mark(world: &mut World, signal: SignalSystem) {
                     downstream_entity.remove::<Upstream>();
                 }
             }
-            if let Some(mut state) = world.get_resource_mut::<SignalGraphState>() {
-                state.edge_change_seeds.insert(downstream);
-            }
+            world
+                .resource_mut::<SignalGraphState>()
+                .edge_change_seeds
+                .insert(downstream);
         }
     }
 }
@@ -856,9 +826,7 @@ pub(crate) fn despawn_stale_signals(world: &mut World) {
         if should_despawn {
             unlink_downstreams_and_mark(world, signal);
             remove_signal_from_graph_state(world, signal);
-            if let Ok(entity) = world.get_entity_mut(*signal) {
-                entity.despawn();
-            }
+            world.entity_mut(*signal).despawn();
         }
     }
 }
@@ -1028,12 +996,7 @@ fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Opti
         let runner = world
             .get::<SystemRunner>(*node)
             .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing SystemRunner for signal {:?} during processing",
-                    node
-                )
-            });
+            .unwrap_or_else(|| panic!("missing SystemRunner for signal {:?} during processing", node));
         let upstreams: Vec<SignalSystem> = world
             .get::<Upstream>(*node)
             .map(|u| {
@@ -1082,7 +1045,7 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
 /// use jonmo::{prelude::*, graph::*};
 ///
 /// let mut world = World::new();
-/// let signal = *SignalBuilder::from_system(|_: In<()>| 1).register(&mut world);
+/// let signal = *signal::from_system(|_: In<()>| 1).register(&mut world);
 /// poll_signal(&mut world, signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
 /// ```
 pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {

@@ -20,12 +20,13 @@ fn main() {
         .map(|save_char| {
             (
                 save_char,
-                MutableBTreeMapBuilder::from(
-                    ROWS.iter()
-                        .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
-                        .collect::<BTreeMap<_, _>>(),
-                )
-                .spawn(app.world_mut()),
+                MutableBTreeMap::builder()
+                    .values(
+                        ROWS.iter()
+                            .flat_map(|row| row.chars().map(|letter| (letter, LetterData::default())))
+                            .collect::<BTreeMap<_, _>>(),
+                    )
+                    .spawn(app.world_mut()),
             )
         })
         .collect();
@@ -66,17 +67,17 @@ fn get_active_map(save_states: &SaveStates, active_save: ActiveSave) -> MutableB
 
 const LETTER_SIZE: f32 = 60.;
 
-fn ui_root() -> JonmoBuilder {
-    let active_save_signal = SignalBuilder::from_resource::<ActiveSave>().dedupe();
+fn ui_root() -> jonmo::Builder {
+    let active_save = signal::from_resource_changed::<ActiveSave>();
 
-    JonmoBuilder::from(Node {
+    jonmo::Builder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
         justify_content: JustifyContent::Center,
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node {
+        jonmo::Builder::from(Node {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(GAP * 2.),
             padding: UiRect::all(Val::Px(GAP * 4.)),
@@ -85,19 +86,19 @@ fn ui_root() -> JonmoBuilder {
             ..default()
         })
         .child(
-            JonmoBuilder::from(Node {
+            jonmo::Builder::from(Node {
                 align_self: AlignSelf::Center,
                 width: Val::Percent(100.),
                 ..default()
             })
             .child(
-                JonmoBuilder::from(Node {
+                jonmo::Builder::from(Node {
                     flex_direction: FlexDirection::Row,
                     column_gap: Val::Px(GAP * 2.),
                     ..default()
                 })
-                .children(SAVE_CHARS.chars().map(clone!((active_save_signal) move |save_char| {
-                    save_card(save_char, active_save_signal.clone())
+                .children(SAVE_CHARS.chars().map(clone!((active_save) move |save_char| {
+                    save_card(save_char, active_save.clone())
                 }))),
             )
             .child(
@@ -107,7 +108,7 @@ fn ui_root() -> JonmoBuilder {
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .with_component::<Node>(|mut node| node.height = Val::Px(100.))
                         .component_signal(
-                            active_save_signal
+                            active_save
                                 .clone()
                                 .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
                                     get_active_map(&save_states, active_save).signal_vec_entries()
@@ -122,15 +123,15 @@ fn ui_root() -> JonmoBuilder {
                 ),
             ),
         )
-        .children(ROWS.into_iter().map(clone!((active_save_signal) move |row| {
-            JonmoBuilder::from(Node {
+        .children(ROWS.into_iter().map(clone!((active_save) move |row| {
+            jonmo::Builder::from(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(GAP * 2.),
                 ..default()
             })
             .children(row.chars().map(
-                clone!((active_save_signal) move |l| {
-                    let letter_data = active_save_signal
+                clone!((active_save) move |l| {
+                    let letter_data = active_save
                         .clone()
                         .switch_signal_map(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
                             get_active_map(&save_states, active_save).signal_map()
@@ -146,7 +147,7 @@ fn ui_root() -> JonmoBuilder {
                     text_node()
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .component_signal(
-                            active_save_signal
+                            active_save
                                 .clone()
                                 .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
                                     get_active_map(&save_states, active_save).signal_vec_entries()
@@ -167,8 +168,8 @@ fn ui_root() -> JonmoBuilder {
 
 const GAP: f32 = 5.;
 
-fn sum_container() -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn sum_container() -> jonmo::Builder {
+    jonmo::Builder::from(Node {
         align_self: AlignSelf::Center,
         justify_content: JustifyContent::FlexEnd,
         flex_grow: 1.,
@@ -177,8 +178,8 @@ fn sum_container() -> JonmoBuilder {
     })
 }
 
-fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             width: Val::Px(100.),
             height: Val::Px(100.),
@@ -210,8 +211,8 @@ fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave>
     )))
 }
 
-fn text_node() -> JonmoBuilder {
-    JonmoBuilder::from((
+fn text_node() -> jonmo::Builder {
+    jonmo::Builder::from((
         Node::default(),
         TextColor(Color::WHITE),
         TextLayout::new_with_justify(Justify::Center),
@@ -219,8 +220,8 @@ fn text_node() -> JonmoBuilder {
     ))
 }
 
-fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(GAP * 2.),

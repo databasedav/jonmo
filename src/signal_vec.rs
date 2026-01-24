@@ -5,7 +5,7 @@ use super::{
         LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system,
         pipe_signal, poll_signal, process_signals, register_signal,
     },
-    signal::{Signal, SignalBuilder, SignalExt},
+    signal::{self, Signal, SignalExt},
     utils::{LazyEntity, SSs},
 };
 use crate::prelude::clone;
@@ -23,7 +23,7 @@ use core::{
     fmt,
     marker::PhantomData,
     ops::Deref,
-    sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    sync::atomic::{self, AtomicUsize},
 };
 use dyn_clone::{DynClone, clone_trait_object};
 
@@ -991,10 +991,12 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(ShowFiltered(true));
     ///
-    /// let list = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(&mut world);
+    /// let list = MutableVec::builder()
+    ///     .values([1, 2, 3, 4, 5])
+    ///     .spawn(&mut world);
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ShowFiltered>| res.0)
-    ///     .switch_signal_vec(move |In(show_filtered): In<bool>, world: &mut World| {
+    /// let signal = signal::from_system(|_: In<()>, res: Res<ShowFiltered>| res.0).switch_signal_vec(
+    ///     move |In(show_filtered): In<bool>, world: &mut World| {
     ///         if show_filtered {
     ///             list.signal_vec()
     ///                 .filter(|In(x): In<i32>| x % 2 == 0)
@@ -1002,7 +1004,8 @@ where
     ///         } else {
     ///             list.signal_vec().right_either()
     ///         }
-    ///     });
+    ///     },
+    /// );
     /// // both branches produce compatible SignalVecEither types
     /// ```
     fn left_either<R>(self) -> SignalVecEither<Self, R>
@@ -1030,17 +1033,20 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(ListMode(0));
     ///
-    /// let list_a = MutableVecBuilder::from([10, 20]).spawn(&mut world);
-    /// let list_b = MutableVecBuilder::from([100, 200, 300]).spawn(&mut world);
+    /// let list_a = MutableVec::builder().values([10, 20]).spawn(&mut world);
+    /// let list_b = MutableVec::builder()
+    ///     .values([100, 200, 300])
+    ///     .spawn(&mut world);
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<ListMode>| res.0)
-    ///     .switch_signal_vec(move |In(mode): In<u8>, world: &mut World| {
+    /// let signal = signal::from_system(|_: In<()>, res: Res<ListMode>| res.0).switch_signal_vec(
+    ///     move |In(mode): In<u8>, world: &mut World| {
     ///         if mode == 0 {
     ///             list_a.signal_vec().map_in(|x: i32| x * 2).left_either()
     ///         } else {
     ///             list_b.signal_vec().right_either()
     ///         }
-    ///     });
+    ///     },
+    /// );
     /// // both branches produce compatible SignalVecEither types
     /// ```
     fn right_either<L>(self) -> SignalVecEither<L, Self>
@@ -1086,7 +1092,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .map(|In(x): In<i32>| x * 2); // outputs `SignalVec -> [2, 4, 6]`
@@ -1169,7 +1176,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .map_in(|x: i32| x * 2); // outputs `SignalVec -> [2, 4, 6]`
@@ -1197,7 +1205,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .map_in_ref(ToString::to_string); // outputs `SignalVec -> ["1", "2", "3"]`
@@ -1222,11 +1231,11 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder().values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .map_signal(|In(x): In<i32>|
-    ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
+    ///         signal::from_system(move |_: In<()>| x * 2).dedupe()
     ///     ); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
@@ -1254,16 +1263,16 @@ pub trait SignalVecExt: SignalVec {
             temp_handle.cleanup(world);
             let processor_entity = LazyEntity::new();
             let processor_logic = clone!((processor_entity) move |In(value): In<Item>, world: &mut World| {
-                if let Some(item_index_comp) = world.get::<ItemIndex>(processor_entity.get()) {
-                    let current_index = item_index_comp.0;
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<Item>>(*output_signal) {
-                        queue.0.push(VecDiff::UpdateAt {
-                            index: current_index,
-                            value,
-                        });
-                        process_signals(world, [output_signal], Box::new(()));
-                    }
-                }
+                let current_index = world.get::<ItemIndex>(*processor_entity).unwrap().0;
+                world
+                    .get_mut::<QueuedVecDiffs<Item>>(*output_signal)
+                    .unwrap()
+                    .0
+                    .push(VecDiff::UpdateAt {
+                        index: current_index,
+                        value,
+                    });
+                process_signals(world, [output_signal], Box::new(()));
             });
             let processor_handle = inner_signal.map(processor_logic).register(world);
             processor_entity.set(**processor_handle);
@@ -1274,16 +1283,13 @@ pub trait SignalVecExt: SignalVec {
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
             let output_signal_entity = LazyEntity::new();
-            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
+            let output_signal = *signal::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
                 clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<S::Item>>(output_signal_entity.get()) {
-                        if diffs.0.is_empty() {
-                            None
-                        } else {
-                            Some(diffs.0.drain(..).collect())
-                        }
-                    } else {
+                    let mut diffs = world.get_mut::<QueuedVecDiffs<S::Item>>(*output_signal_entity).unwrap();
+                    if diffs.0.is_empty() {
                         None
+                    } else {
+                        Some(diffs.0.drain(..).collect())
                     }
                 }),
             )
@@ -1465,9 +1471,11 @@ pub trait SignalVecExt: SignalVec {
                     }
                 }
                 if !new_diffs.is_empty() {
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<S::Item>>(*output_signal) {
-                        queue.0.extend(new_diffs);
-                    }
+                    world
+                        .get_mut::<QueuedVecDiffs<S::Item>>(*output_signal)
+                        .unwrap()
+                        .0
+                        .extend(new_diffs);
                     process_signals(world, [output_signal], Box::new(()));
                 }
             };
@@ -1502,7 +1510,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3, 4])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3, 4])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .filter(|In(x): In<i32>| x % 2 == 0); // outputs `SignalVec -> [2, 4]`
@@ -1543,7 +1552,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from(["1", "two", "NaN", "four", "5"])
+    /// MutableVec::builder().values(["1", "two", "NaN", "four", "5"])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .filter_map(|In(s): In<&'static str>| s.parse::<u32>().ok()); // outputs `SignalVec -> [1, 5]`
@@ -1588,11 +1597,11 @@ pub trait SignalVecExt: SignalVec {
     /// struct Even(bool);
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3, 4])
+    /// MutableVec::builder().values([1, 2, 3, 4])
     ///      .spawn(&mut world)
     ///      .signal_vec()
     ///      .filter_signal(|In(x): In<i32>| {
-    ///          SignalBuilder::from_resource().map_in(move |even: Even| x % 2 == if even.0 { 0 } else { 1 })
+    ///          signal::from_resource().map_in(move |even: Even| x % 2 == if even.0 { 0 } else { 1 })
     ///      }); // outputs `SignalVec -> [2, 4]` when `Even(true)` and `SignalVec -> [1, 3]` when `Even(false)`
     /// ```
     fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
@@ -1640,20 +1649,15 @@ pub trait SignalVecExt: SignalVec {
             let processor_system = clone!((entity) move |In(filter): In<bool>, world: &mut World| {
                 let self_entity = *entity;
 
-                // The processor might run after its parent has been cleaned up.
-                let Ok(signal_index_comp) = world.query_filtered::<&FilterSignalIndex, Allow<Internal>>().get(world, self_entity) else {
-                    return;
-                };
-                let item_index = signal_index_comp.0;
-                let Ok(mut filter_signal_data) = world.query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>().get_mut(world, parent) else {
-                    return;
-                };
-
-                // This item_index might be stale if other items were removed in the same frame.
-                // Ensure we don't panic.
-                if item_index >= filter_signal_data.items.len() {
-                    return;
-                }
+                let item_index = world
+                    .query_filtered::<&FilterSignalIndex, Allow<Internal>>()
+                    .get(world, self_entity)
+                    .unwrap()
+                    .0;
+                let mut filter_signal_data = world
+                    .query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>()
+                    .get_mut(world, parent)
+                    .unwrap();
                 let old_filtered_state = filter_signal_data.items[item_index].filtered;
                 if old_filtered_state == filter {
                     // No change, do nothing.
@@ -1714,7 +1718,7 @@ pub trait SignalVecExt: SignalVec {
                         clone!(
                             (parent_entity) move |In(source_diffs): In<Vec<VecDiff<Self::Item>>>,
                             world: & mut World | {
-                                let parent = parent_entity.get();
+                                let parent =* parent_entity;
                                 let mut generated_diffs = vec![];
                                 for diff in source_diffs.into_iter() {
                                     match diff {
@@ -1790,10 +1794,7 @@ pub trait SignalVecExt: SignalVec {
                                                     );
                                                 if let Some(to_update) = signals_to_update {
                                                     for signal in to_update {
-                                                        if let Some(mut signal_index) =
-                                                            world.get_mut::<FilterSignalIndex>(**signal) {
-                                                            **signal_index += 1;
-                                                        }
+                                                        world.get_mut::<FilterSignalIndex>(**signal).unwrap().0 += 1;
                                                     }
                                                 }
                                                 if filtered {
@@ -1879,10 +1880,7 @@ pub trait SignalVecExt: SignalVec {
                                             signal.cleanup(world);
                                             if let Some(to_update) = signals_to_update {
                                                 for signal in to_update {
-                                                    if let Some(mut signal_index) =
-                                                        world.get_mut::<FilterSignalIndex>(**signal) {
-                                                        **signal_index -= 1;
-                                                    }
+                                                    world.get_mut::<FilterSignalIndex>(**signal).unwrap().0 -= 1;
                                                 }
                                             }
                                             if filtered {
@@ -1959,10 +1957,7 @@ pub trait SignalVecExt: SignalVec {
                                             // Now that the borrow from with_filter_signal_data is over, we can mutably access
                                             // world.
                                             for (i, signal) in items_to_update.into_iter().enumerate() {
-                                                if let Some(mut signal_index) =
-                                                    world.get_mut::<FilterSignalIndex>(**signal) {
-                                                    **signal_index = i;
-                                                }
+                                                world.get_mut::<FilterSignalIndex>(**signal).unwrap().0 = i;
                                             }
                                             if filtered {
                                                 generated_diffs.push(VecDiff::Move {
@@ -2040,7 +2035,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVecBuilder::from([1, 2, 5]).spawn(&mut world);
+    /// let mut vec = MutableVec::builder().values([1, 2, 5]).spawn(&mut world);
     /// let signal = vec.signal_vec().enumerate();
     /// // signal outputs `SignalVec -> [(Signal -> Some(0), 1), (Signal -> Some(1), 2), (Signal -> Some(2), 5)]`
     /// vec.write(&mut world).remove(1);
@@ -2063,7 +2058,7 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!(
                 (processor_entity_handle) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
-                    let processor_entity = processor_entity_handle.get();
+                    let processor_entity =* processor_entity_handle;
                     let mut state = world.get_mut::<EnumerateState>(processor_entity).unwrap();
                     let mut out_diffs = vec![];
 
@@ -2078,11 +2073,11 @@ pub trait SignalVecExt: SignalVec {
                     }
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
-                        SignalBuilder::from_system(
+                        signal::from_system(
                             clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
                                 Some(
                                     query
-                                        .get(processor_entity_handle.get())
+                                        .get(*processor_entity_handle)
                                         .ok()
                                         .and_then(|s| s.key_to_index.get(&key).copied()),
                                 )
@@ -2219,7 +2214,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .to_signal()
@@ -2275,7 +2271,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVecBuilder::from([1]).spawn(&mut world);
+    /// let mut vec = MutableVec::builder().values([1]).spawn(&mut world);
     /// let signal = vec.signal_vec().is_empty();
     /// // `signal` outputs `false`
     /// vec.write(&mut world).pop();
@@ -2301,7 +2297,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVecBuilder::from([1]).spawn(&mut world);
+    /// let mut vec = MutableVec::builder().values([1]).spawn(&mut world);
     /// let signal = vec.signal_vec().len();
     /// // `signal` outputs `1`
     /// vec.write(&mut world).pop();
@@ -2326,7 +2322,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
+    /// let mut vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
     /// let signal = vec.signal_vec().sum();
     /// // `signal` outputs `6`
     /// vec.write(&mut world).push(4);
@@ -2355,11 +2351,13 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .chain(
-    ///         MutableVecBuilder::from([2, 4])
+    ///         MutableVec::builder()
+    ///             .values([2, 4])
     ///             .spawn(&mut world)
     ///             .signal_vec(),
     ///     ); // outputs `SignalVec -> [1, 3, 2, 4]`
@@ -2522,7 +2520,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3])
+    /// MutableVec::builder()
+    ///     .values([1, 2, 3])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .intersperse(0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
@@ -2662,7 +2661,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::signal::{Dedupe, Source};
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// MutableVec::builder().values([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where
@@ -2674,8 +2673,8 @@ pub trait SignalVecExt: SignalVec {
         struct IntersperseState<T> {
             /// The original, non-interspersed values. We need this to know the length.
             local_values: Vec<T>,
-            /// Stable keys for the separators. The key at index `i` corresponds to the separator that comes
-            /// _after_ `local_values[i]`.
+            /// Stable keys for the separators. The key at index `i` corresponds to the separator
+            /// that comes _after_ `local_values[i]`.
             separator_keys: Vec<usize>,
             /// Maps a separator's stable key to its current logical index (0, 1, 2...).
             key_to_index: HashMap<usize, usize>,
@@ -2704,13 +2703,13 @@ pub trait SignalVecExt: SignalVec {
             // 3. Define the helper to create an index signal for a given separator key. This signal reads from
             //    the central state component.
             let create_index_signal = clone!((state_entity_handle) move | key: usize | {
-                SignalBuilder::from_system(
+                signal::from_system(
                     clone!(
                         (state_entity_handle) move |_: In<()>,
                         query: Query<&IntersperseState<Self::Item>, Allow<Internal>>| {
                             Some(
                                 query
-                                    .get(state_entity_handle.get())
+                                    .get(*state_entity_handle)
                                     .ok()
                                     .and_then(|s| s.key_to_index.get(&key).copied()),
                             )
@@ -2723,7 +2722,7 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!(
                 (state_entity_handle, create_index_signal) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
-                    let state_entity = state_entity_handle.get();
+                    let state_entity =* state_entity_handle;
                     let mut out_diffs = Vec::new();
                     for diff in diffs {
                         match diff {
@@ -2987,7 +2986,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([3, 2, 1]).spawn(&mut world).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right)); // outputs `SignalVec -> [1, 2, 3]`
+    /// MutableVec::builder().values([3, 2, 1]).spawn(&mut world).signal_vec().sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right)); // outputs `SignalVec -> [1, 2, 3]`
     /// ```
     fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
     where
@@ -3170,7 +3169,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([3, 2, 1])
+    /// MutableVec::builder()
+    ///     .values([3, 2, 1])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .sort_by_cmp(); // outputs `SignalVec -> [1, 2, 3]`
@@ -3194,7 +3194,8 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableVecBuilder::from([3, 2, 1])
+    /// MutableVec::builder()
+    ///     .values([3, 2, 1])
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .sort_by_key(|In(x): In<i32>| -x); // outputs `SignalVec -> [1, 2, 3]`
@@ -3386,13 +3387,12 @@ pub trait SignalVecExt: SignalVec {
     ///
     /// let mut world = World::new();
     ///
-    /// let inner1 = MutableVecBuilder::from([1, 2]).spawn(&mut world);
-    /// let inner2 = MutableVecBuilder::from([3, 4, 5]).spawn(&mut world);
+    /// let inner1 = MutableVec::builder().values([1, 2]).spawn(&mut world);
+    /// let inner2 = MutableVec::builder().values([3, 4, 5]).spawn(&mut world);
     ///
-    /// let outer = MutableVecBuilder::from([
-    ///     inner1.signal_vec(),
-    ///     inner2.signal_vec(),
-    /// ]).spawn(&mut world);
+    /// let outer = MutableVec::builder()
+    ///     .values([inner1.signal_vec(), inner2.signal_vec()])
+    ///     .spawn(&mut world);
     ///
     /// let flattened = outer.signal_vec().flatten();
     /// // flattened outputs `[1, 2, 3, 4, 5]`
@@ -3419,16 +3419,13 @@ pub trait SignalVecExt: SignalVec {
             let output_signal_entity = LazyEntity::new();
 
             // The output signal just drains and emits any queued diffs
-            let output_signal = *SignalBuilder::from_system::<Vec<VecDiff<InnerItem<Self>>>, _, _, _>(
+            let output_signal = *signal::from_system::<Vec<VecDiff<InnerItem<Self>>>, _, _, _>(
                 clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(output_signal_entity.get()) {
-                        if diffs.0.is_empty() {
-                            None
-                        } else {
-                            Some(diffs.0.drain(..).collect())
-                        }
-                    } else {
+                    let mut diffs = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal_entity).unwrap();
+                    if diffs.0.is_empty() {
                         None
+                    } else {
+                        Some(diffs.0.drain(..).collect())
                     }
                 }),
             )
@@ -3461,9 +3458,10 @@ pub trait SignalVecExt: SignalVec {
                 }
             }
 
-            /// Creates a processor for an inner SignalVec that translates its diffs to the flattened output.
-            /// Returns (processor handle, replay triggers to call later).
-            /// NOTE: The caller should add the entry to FlattenState.items and THEN call trigger_replays.
+            /// Creates a processor for an inner SignalVec that translates its diffs to the
+            /// flattened output. Returns (processor handle, replay triggers to call
+            /// later). NOTE: The caller should add the entry to FlattenState.items and
+            /// THEN call trigger_replays.
             fn create_inner_processor<O: Clone + SSs>(
                 world: &mut World,
                 output_signal: SignalSystem,
@@ -3474,23 +3472,13 @@ pub trait SignalVecExt: SignalVec {
 
                 // Processor that handles diffs from the inner SignalVec
                 let processor_logic = clone!((processor_entity) move |In(diffs): In<Vec<VecDiff<O>>>, world: &mut World| {
-                    let self_entity = processor_entity.get();
+                    let self_entity =* processor_entity;
 
                     // Get our current index
-                    let Some(item_index_comp) = world.get::<FlattenItemIndex>(self_entity) else {
-                        return;
-                    };
-                    let item_index = item_index_comp.0;
+                    let item_index = world.get::<FlattenItemIndex>(self_entity).unwrap().0;
 
                     // Get the flatten state
-                    let Some(mut state) = world.get_mut::<FlattenState>(*output_signal) else {
-                        return;
-                    };
-
-                    // Bounds check (should not happen if used correctly, but defensive)
-                    if item_index >= state.items.len() {
-                        return;
-                    }
+                    let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
 
                     // Calculate offset (sum of lengths of all inner vecs before this one)
                     let offset: usize = state.items[..item_index]
@@ -3572,9 +3560,11 @@ pub trait SignalVecExt: SignalVec {
 
                     // Queue the translated diffs
                     if !out_diffs.is_empty() {
-                        if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<O>>(*output_signal) {
-                            queue.0.extend(out_diffs);
-                        }
+                        world
+                            .get_mut::<QueuedVecDiffs<O>>(*output_signal)
+                            .unwrap()
+                            .0
+                            .extend(out_diffs);
                         process_signals(world, [output_signal], Box::new(()));
                     }
                 });
@@ -3592,7 +3582,7 @@ pub trait SignalVecExt: SignalVec {
 
             // Main manager that handles outer SignalVec diffs
             let manager_logic = clone!((output_signal_entity) move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
-                let output_signal: SignalSystem = output_signal_entity.get().into();
+                let output_signal: SignalSystem = (*output_signal_entity).into();
                 let mut out_diffs: Vec<VecDiff<InnerItem<Self>>> = Vec::new();
 
                 for diff in diffs {
@@ -3611,9 +3601,11 @@ pub trait SignalVecExt: SignalVec {
                             // Note: The inner processors will emit InsertAt diffs for their initial values,
                             // so we need Clear to come BEFORE those. We'll queue it directly now.
                             if had_old_items {
-                                if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal) {
-                                    queue.0.push(VecDiff::Clear);
-                                }
+                                world
+                                    .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+                                    .unwrap()
+                                    .0
+                                    .push(VecDiff::Clear);
                             }
 
                             // Create processors and collect their replay triggers
@@ -3641,9 +3633,7 @@ pub trait SignalVecExt: SignalVec {
                                         .collect()
                                 };
                                 for (handle_entity, new_index) in handles_to_update {
-                                    if let Some(mut idx) = world.get_mut::<FlattenItemIndex>(*handle_entity) {
-                                        idx.0 = new_index;
-                                    }
+                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_index;
                                 }
                             }
 
@@ -3676,9 +3666,11 @@ pub trait SignalVecExt: SignalVec {
                                 for _ in 0..old_len {
                                     remove_diffs.push(VecDiff::RemoveAt { index: offset });
                                 }
-                                if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal) {
-                                    queue.0.extend(remove_diffs);
-                                }
+                                world
+                                    .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+                                    .unwrap()
+                                    .0
+                                    .extend(remove_diffs);
                             }
 
                             // Create new processor
@@ -3714,9 +3706,7 @@ pub trait SignalVecExt: SignalVec {
                                         .collect()
                                 };
                                 for (handle_entity, new_index) in handles_to_update {
-                                    if let Some(mut idx) = world.get_mut::<FlattenItemIndex>(*handle_entity) {
-                                        idx.0 = new_index;
-                                    }
+                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_index;
                                 }
                             }
 
@@ -3749,9 +3739,7 @@ pub trait SignalVecExt: SignalVec {
                                         .collect()
                                 };
                                 for (handle_entity, new_idx) in handles_to_update {
-                                    if let Some(mut idx) = world.get_mut::<FlattenItemIndex>(*handle_entity) {
-                                        idx.0 = new_idx;
-                                    }
+                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_idx;
                                 }
                             }
 
@@ -3833,9 +3821,11 @@ pub trait SignalVecExt: SignalVec {
 
                 // Queue the diffs
                 if !out_diffs.is_empty() {
-                    if let Some(mut queue) = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal) {
-                        queue.0.extend(out_diffs);
-                    }
+                    world
+                        .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+                        .unwrap()
+                        .0
+                        .extend(out_diffs);
                     process_signals(world, [output_signal], Box::new(()));
                 }
             });
@@ -3873,7 +3863,7 @@ pub trait SignalVecExt: SignalVec {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut vec = MutableVecBuilder::from([1, 2, 3]).spawn(&mut world);
+    /// let mut vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
     /// let signal = vec.signal_vec().debug();
     /// // signal logs `[ Replace { values: [ 1, 2, 3 ] } ]`
     /// vec.write(&mut world).push(4);
@@ -3905,13 +3895,15 @@ pub trait SignalVecExt: SignalVec {
     /// let mut world = World::new();
     /// let condition = true;
     /// let signal = if condition {
-    ///     MutableVecBuilder::from([1, 2, 3])
+    ///     MutableVec::builder()
+    ///         .values([1, 2, 3])
     ///         .spawn(&mut world)
     ///         .signal_vec()
     ///         .map_in(|x: i32| x * 2)
     ///         .boxed() // this is a `Map<Source<i32>>`
     /// } else {
-    ///     MutableVecBuilder::from([1, 2, 3])
+    ///     MutableVec::builder()
+    ///         .values([1, 2, 3])
     ///         .spawn(&mut world)
     ///         .signal_vec()
     ///         .filter(|In(x): In<i32>| x % 2 == 0)
@@ -3935,16 +3927,18 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| true).switch_signal_vec(
+    /// signal::from_system(|_: In<()>| true).switch_signal_vec(
     ///     |In(condition): In<bool>, world: &mut World| {
     ///         if condition {
-    ///             MutableVecBuilder::from([1, 2, 3])
+    ///             MutableVec::builder()
+    ///                 .values([1, 2, 3])
     ///                 .spawn(world)
     ///                 .signal_vec()
     ///                 .map_in(|x: i32| x * 2)
     ///                 .boxed_clone() // this is a `Map<Source<i32>>`
     ///         } else {
-    ///             MutableVecBuilder::from([1, 2, 3])
+    ///             MutableVec::builder()
+    ///                 .values([1, 2, 3])
     ///                 .spawn(world)
     ///                 .signal_vec()
     ///                 .filter(|In(x): In<i32>| x % 2 == 0)
@@ -4121,7 +4115,7 @@ pub struct MutableVec<T> {
 
 impl<T> Clone for MutableVec<T> {
     fn clone(&self) -> Self {
-        self.references.fetch_add(1, AtomicOrdering::SeqCst);
+        self.references.fetch_add(1, atomic::Ordering::Relaxed);
         Self {
             entity: self.entity,
             references: self.references.clone(),
@@ -4132,13 +4126,35 @@ impl<T> Clone for MutableVec<T> {
 
 impl<T> Drop for MutableVec<T> {
     fn drop(&mut self) {
-        if self.references.fetch_sub(1, AtomicOrdering::SeqCst) == 1 {
+        if self.references.fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
             STALE_MUTABLE_VECS.lock().unwrap().push(self.entity);
         }
     }
 }
 
 impl<T> MutableVec<T> {
+    /// Creates a [`Builder`] for constructing a [`MutableVec`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// // Empty MutableVec
+    /// let vec = MutableVec::<i32>::builder().spawn(&mut world);
+    /// // With initial values
+    /// let vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
+    /// // With custom initialization
+    /// let vec = MutableVec::builder()
+    ///     .with_values(|v| v.extend(0..10))
+    ///     .spawn(&mut world);
+    /// ```
+    pub fn builder() -> Builder<T> {
+        Builder::new()
+    }
+
     /// Provides read-only access to the underlying [`Vec`] via either a `&World` or a
     /// `&Query<MutableVecData<T>>`.
     pub fn read<'s>(&self, mutable_vec_data_reader: impl ReadMutableVecData<'s, T>) -> MutableVecReadGuard<'s, T>
@@ -4175,15 +4191,12 @@ impl<T> MutableVec<T> {
                 if replay_onces.contains(*replay_entity) {
                     let first_replay = !core::mem::replace(&mut *has_replayed, true);
                     if first_replay && was_initially_empty {
-                        // Initial replay with empty vec - just forward upstream diffs
                         if upstream_diffs.is_empty() {
                             None
                         } else {
                             Some(upstream_diffs)
                         }
                     } else {
-                        // Either non-empty initial state, or subsequent replay (e.g., switch_signal_vec)
-                        // Always emit Replace with current state
                         let current_vec = self_.read(&mutable_vec_datas).to_vec();
                         if current_vec.is_empty() {
                             None
@@ -4273,11 +4286,70 @@ where
     }
 }
 
-/// Builder for constructing a [`MutableVec`] with initial values, e.g. `MutableVecBuilder::from([0,
-/// 1, 2]).spawn(&mut World)`.
-pub struct MutableVecBuilder<T>(Vec<T>);
+/// Builder for constructing a [`MutableVec`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::prelude::*;
+///
+/// let mut world = World::new();
+/// let vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
+/// ```
+pub struct Builder<T>(Vec<T>);
 
-impl<T, A> From<A> for MutableVecBuilder<T>
+impl<T> Default for Builder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Builder<T> {
+    /// Creates a new empty builder.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Sets the initial values of the [`MutableVec`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// let vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
+    /// ```
+    pub fn values(mut self, values: impl Into<Vec<T>>) -> Self {
+        self.0 = values.into();
+        self
+    }
+
+    /// Mutably access the inner [`Vec`] for custom initialization.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// let vec = MutableVec::builder()
+    ///     .with_values(|v| {
+    ///         v.extend(0..10);
+    ///         v.push(100);
+    ///     })
+    ///     .spawn(&mut world);
+    /// ```
+    pub fn with_values(mut self, f: impl FnOnce(&mut Vec<T>)) -> Self {
+        f(&mut self.0);
+        self
+    }
+}
+
+impl<T, A> From<A> for Builder<T>
 where
     Vec<T>: From<A>,
 {
@@ -4286,7 +4358,7 @@ where
     }
 }
 
-impl<T: SSs + Clone> MutableVecBuilder<T> {
+impl<T: SSs + Clone> Builder<T> {
     /// Spawns a [`MutableVec`] using a `&mut World`.
     pub fn spawn(self, world: &mut World) -> MutableVec<T> {
         let (data, data_entity) = new_mutable_vec_data::<T>(self.0);
@@ -4556,7 +4628,9 @@ pub(crate) mod tests {
 
             // The output of our `for_each` system will be the full, reconstructed vector.
             app.init_resource::<FinalSignalOutput<Vec<String>>>();
-            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values(["a".to_string(), "b".to_string()])
+                .spawn(app.world_mut());
 
             // This system reconstructs the state of the vec by applying the diffs it
             // receives. It then outputs the complete, current state. This allows us to
@@ -4686,7 +4760,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<i32>>();
 
             // Start with a vec containing initial values
-            let source_vec = MutableVecBuilder::from([1, 2, 3]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([1, 2, 3]).spawn(app.world_mut());
 
             // Create a signal_vec and register it
             let signal = source_vec.signal_vec();
@@ -4730,7 +4804,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<String>>();
 
             // The source vector that we will mutate.
-            let source_vec = MutableVecBuilder::from([1, 10]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([1, 10]).spawn(app.world_mut());
 
             // Define a resource that the mapping system will depend on. This allows us to
             // test system failure by removing the resource.
@@ -4937,7 +5011,7 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<String>>();
 
-            let source_vec = MutableVecBuilder::from([1, 10, 100]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([1, 10, 100]).spawn(app.world_mut());
 
             // A variable to be captured by the `map_in` closure.
             // We'll use this to demonstrate that the closure's captured state is respected
@@ -5130,7 +5204,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<String>>();
 
             // The source vector contains integers.
-            let source_vec = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([10, 20]).spawn(app.world_mut());
 
             // The signal chain under test, using `map_in_ref` with a function pointer
             // that operates on a reference (`&i32`). This is an idiomatic use case.
@@ -5298,11 +5372,13 @@ pub(crate) mod tests {
 
             // The source vec contains entities. The goal is to create a derived vec that
             // contains the _names_ of these entities.
-            let entity_vec = MutableVecBuilder::from([entity_a, entity_b]).spawn(app.world_mut());
+            let entity_vec = MutableVec::builder()
+                .values([entity_a, entity_b])
+                .spawn(app.world_mut());
 
             // This "factory" system takes an entity and creates a signal that tracks its
             // `Name`.
-            let factory_system = |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity).dedupe();
+            let factory_system = |In(entity): In<Entity>| signal::from_component::<Name>(entity).dedupe();
 
             // Apply `map_signal` to transform the SignalVec`<Entity>` into a
             // SignalVec`<Name>`.
@@ -5483,7 +5559,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<i32>>();
 
             // The source vector contains a mix of values to be filtered.
-            let source_vec = MutableVecBuilder::from([1, 2, 3, 4]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([1, 2, 3, 4]).spawn(app.world_mut());
 
             // The filter predicate: only allow even numbers.
             let is_even = |In(x): In<i32>| x % 2 == 0;
@@ -5614,7 +5690,9 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<u32>>();
 
             // The source vector contains strings, some of which are parsable as numbers.
-            let source_vec = MutableVecBuilder::from(["10", "foo", "20", "bar"]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values(["10", "foo", "20", "bar"])
+                .spawn(app.world_mut());
 
             // The filter_map predicate: parse strings to u32, returning Some on success
             // and None on failure.
@@ -5760,9 +5838,9 @@ pub(crate) mod tests {
 
             // --- Setup --- Initially, filter for even numbers.
             app.insert_resource(FilterMode(true));
-            let source_vec = MutableVecBuilder::from([1, 2, 3, 4]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([1, 2, 3, 4]).spawn(app.world_mut());
             let filtered_signal = source_vec.signal_vec().filter_signal(|In(val): In<i32>| {
-                SignalBuilder::from_resource::<FilterMode>().map(move |In(mode): In<FilterMode>| {
+                signal::from_resource::<FilterMode>().map(move |In(mode): In<FilterMode>| {
                     // even or odd
                     if mode.0 { val % 2 == 0 } else { val % 2 != 0 }
                 })
@@ -5893,19 +5971,19 @@ pub(crate) mod tests {
             app.insert_resource(IsEven(true));
 
             // The source vector
-            let source_vec = MutableVecBuilder::from([-2, -1, 0, 1, 2]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([-2, -1, 0, 1, 2]).spawn(app.world_mut());
 
             // --- The Signal Chain ---
             let final_signal = source_vec
                 .signal_vec()
                 // Filter 1: controlled by IsPositive resource.
                 .filter_signal(|In(val): In<i32>| {
-                    SignalBuilder::from_resource::<IsPositive>()
+                    signal::from_resource::<IsPositive>()
                         .map(move |In(res): In<IsPositive>| if res.0 { val > 0 } else { val <= 0 })
                 })
                 // Filter 2: controlled by IsEven resource.
                 .filter_signal(|In(val): In<i32>| {
-                    SignalBuilder::from_resource::<IsEven>()
+                    signal::from_resource::<IsEven>()
                         .map(move |In(res): In<IsEven>| if res.0 { val % 2 == 0 } else { val % 2 != 0 })
                 });
             let handle = final_signal
@@ -5979,7 +6057,9 @@ pub(crate) mod tests {
             // --- 1. Setup ---
             let mut app = create_test_app();
             app.init_resource::<FinalSignalOutput<Vec<String>>>();
-            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values(["a".to_string(), "b".to_string()])
+                .spawn(app.world_mut());
 
             // The signal chain under test.
             let state_signal = source_vec.signal_vec().to_signal();
@@ -6098,7 +6178,9 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<FinalSignalOutput<bool>>();
             // Start with a non-empty vec to test the `false` state first.
-            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values(["a".to_string(), "b".to_string()])
+                .spawn(app.world_mut());
 
             let is_empty_signal = source_vec.signal_vec().is_empty();
             let handle = is_empty_signal
@@ -6217,7 +6299,9 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<FinalSignalOutput<usize>>();
             // Start with a non-empty vec.
-            let source_vec = MutableVecBuilder::from(["a".to_string(), "b".to_string()]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values(["a".to_string(), "b".to_string()])
+                .spawn(app.world_mut());
 
             let len_signal = source_vec.signal_vec().len();
             let handle = len_signal.map(capture_final_output::<usize>).register(app.world_mut());
@@ -6345,7 +6429,7 @@ pub(crate) mod tests {
             // --- 1. Setup ---
             let mut app = create_test_app();
             app.init_resource::<FinalSignalOutput<i32>>();
-            let source_vec = MutableVecBuilder::from([10, 20]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([10, 20]).spawn(app.world_mut());
 
             let sum_signal = source_vec.signal_vec().sum();
             let handle = sum_signal.map(capture_final_output::<i32>).register(app.world_mut());
@@ -6461,8 +6545,12 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<String>>();
 
-            let left_vec = MutableVecBuilder::from(["L1".to_string(), "L2".to_string()]).spawn(app.world_mut());
-            let right_vec = MutableVecBuilder::from(["R1".to_string(), "R2".to_string()]).spawn(app.world_mut());
+            let left_vec = MutableVec::builder()
+                .values(["L1".to_string(), "L2".to_string()])
+                .spawn(app.world_mut());
+            let right_vec = MutableVec::builder()
+                .values(["R1".to_string(), "R2".to_string()])
+                .spawn(app.world_mut());
 
             let chained_signal = left_vec.signal_vec().chain(right_vec.signal_vec());
             let handle = chained_signal
@@ -7020,7 +7108,7 @@ pub(crate) mod tests {
             // Use `insert_resource` with an explicit value, as `ItemOrSep` doesn't have a Default.
             app.insert_resource(SignalVecOutput::<ItemOrSep>(Vec::new()));
 
-            let source_vec = MutableVecBuilder::from([10u32, 20, 30]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([10u32, 20, 30]).spawn(app.world_mut());
 
             // CORRECTION: The closure's input parameter must be the concrete type
             // `signal::Source<Option<usize>>`, not a generic `impl Signal`. This satisfies
@@ -7046,7 +7134,7 @@ pub(crate) mod tests {
 
             // CORRECTION: Use the correct `signal::Source` for the placeholder.
             // We also need to provide the type hint for the closure to resolve ambiguity.
-            let placeholder_sep = ItemOrSep::Sep(SignalBuilder::from_system(|_: In<()>| None::<usize>));
+            let placeholder_sep = ItemOrSep::Sep(signal::from_system(|_: In<()>| None::<usize>));
             assert_eq!(
                 current_state,
                 vec![
@@ -7162,7 +7250,9 @@ pub(crate) mod tests {
             // --- 1. Setup ---
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<(u32, char)>>();
-            let source_vec = MutableVecBuilder::from([(3, 'c'), (1, 'a'), (4, 'd')]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values([(3, 'c'), (1, 'a'), (4, 'd')])
+                .spawn(app.world_mut());
             let compare_system = |In((left, right)): In<((u32, char), (u32, char))>| left.0.cmp(&right.0);
             let sorted_signal = source_vec.signal_vec().sort_by(compare_system);
             let handle = sorted_signal
@@ -7287,7 +7377,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<i32>>();
 
             // The source vector, intentionally unsorted.
-            let source_vec = MutableVecBuilder::from([5, 1, 4, -2, 3]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([5, 1, 4, -2, 3]).spawn(app.world_mut());
 
             // The signal chain under test, using the convenience method.
             let sorted_signal = source_vec.signal_vec().sort_by_cmp();
@@ -7374,12 +7464,13 @@ pub(crate) mod tests {
 
             app.init_resource::<SignalVecOutput<DataItem>>();
 
-            let source_vec = MutableVecBuilder::from([
-                DataItem { id: 3, name: "C" },
-                DataItem { id: 1, name: "A" },
-                DataItem { id: 4, name: "D" },
-            ])
-            .spawn(app.world_mut());
+            let source_vec = MutableVec::builder()
+                .values([
+                    DataItem { id: 3, name: "C" },
+                    DataItem { id: 1, name: "A" },
+                    DataItem { id: 4, name: "D" },
+                ])
+                .spawn(app.world_mut());
 
             let key_system = |In(item): In<DataItem>| item.id;
             let sorted_signal = source_vec.signal_vec().sort_by_key(key_system);
@@ -7517,7 +7608,7 @@ pub(crate) mod tests {
 
             app.init_resource::<EnumOutput>();
 
-            let source_vec = MutableVecBuilder::from([10, 20, 30]).spawn(app.world_mut());
+            let source_vec = MutableVec::builder().values([10, 20, 30]).spawn(app.world_mut());
 
             let enumerated = source_vec.signal_vec().enumerate();
 
@@ -7769,18 +7860,15 @@ pub(crate) mod tests {
 
             // --- Setup ---
             // Create the inner vectors that will be the items of our outer vector.
-            let vec_a = MutableVecBuilder::from([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVecBuilder::from([20u32]).spawn(app.world_mut());
-            let vec_c = MutableVecBuilder::<u32>::from([]).spawn(app.world_mut()); // Start with an empty inner vec
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+            let vec_c = MutableVec::<u32>::builder().spawn(app.world_mut()); // Start with an empty inner vec
 
             // Create the outer vector, which holds SignalVecs.
             // No need for boxed_clone() since all inner vecs are the same concrete type (Source<u32>)
-            let source_of_vecs = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_b.signal_vec(),
-                vec_c.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source_of_vecs = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
+                .spawn(app.world_mut());
 
             // The signal chain under test.
             let flattened_signal = source_of_vecs.signal_vec().flatten();
@@ -7877,11 +7965,7 @@ pub(crate) mod tests {
             assert_eq!(diffs.len(), 1, "Removing vec_b should produce 1 diff.");
             apply_diffs(&mut current_state, diffs);
             // The final state should no longer contain 20.
-            assert_eq!(
-                current_state,
-                vec![111, 12],
-                "State after removing vec_b is incorrect."
-            );
+            assert_eq!(current_state, vec![111, 12], "State after removing vec_b is incorrect.");
             // Note: vec_c is now at index 1 in the outer vec.
 
             // --- 8. Cleanup Verification ---
@@ -7892,7 +7976,7 @@ pub(crate) mod tests {
             assert!(diffs.is_empty(), "Should ignore diffs from the removed vec_b.");
 
             // --- 9. Outer Vec Change: Push a new vector ---
-            let vec_d = MutableVecBuilder::from([40u32, 41]).spawn(app.world_mut());
+            let vec_d = MutableVec::builder().values([40u32, 41]).spawn(app.world_mut());
             source_of_vecs.write(app.world_mut()).push(vec_d.signal_vec());
             app.update();
 
@@ -7938,7 +8022,7 @@ pub(crate) mod tests {
             );
 
             // --- 12. Outer Vec Change: UpdateAt (replace vec_c with a new vec) ---
-            let vec_e = MutableVecBuilder::from([50u32, 51, 52]).spawn(app.world_mut());
+            let vec_e = MutableVec::builder().values([50u32, 51, 52]).spawn(app.world_mut());
             source_of_vecs.write(app.world_mut()).set(2, vec_e.signal_vec()); // Replace vec_c
             app.update();
 
@@ -7975,12 +8059,11 @@ pub(crate) mod tests {
             assert!(current_state.is_empty(), "Final state should be empty after clear.");
 
             // --- 15. Outer Vec Change: Replace (re-populate after clear) ---
-            let vec_f = MutableVecBuilder::from([60u32]).spawn(app.world_mut());
-            let vec_g = MutableVecBuilder::from([70u32, 71]).spawn(app.world_mut());
-            source_of_vecs.write(app.world_mut()).replace(vec![
-                vec_f.signal_vec(),
-                vec_g.signal_vec(),
-            ]);
+            let vec_f = MutableVec::builder().values([60u32]).spawn(app.world_mut());
+            let vec_g = MutableVec::builder().values([70u32, 71]).spawn(app.world_mut());
+            source_of_vecs
+                .write(app.world_mut())
+                .replace(vec![vec_f.signal_vec(), vec_g.signal_vec()]);
             app.update();
 
             let diffs = get_and_clear_output::<u32>(app.world_mut());
@@ -8040,14 +8123,12 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let vec_a = MutableVecBuilder::from([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVecBuilder::from([30u32, 31]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([30u32, 31]).spawn(app.world_mut());
 
-            let source = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_b.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec()])
+                .spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8062,7 +8143,7 @@ pub(crate) mod tests {
             assert_eq!(current_state, vec![10, 11, 30, 31], "Initial state");
 
             // Insert a new inner vec in the middle
-            let vec_mid = MutableVecBuilder::from([20u32, 21, 22]).spawn(app.world_mut());
+            let vec_mid = MutableVec::builder().values([20u32, 21, 22]).spawn(app.world_mut());
             source.write(app.world_mut()).insert(1, vec_mid.signal_vec());
             app.update();
 
@@ -8104,14 +8185,12 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let vec_a = MutableVecBuilder::from([10u32]).spawn(app.world_mut());
-            let vec_b = MutableVecBuilder::from([20u32]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
 
-            let source = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_b.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec()])
+                .spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8148,7 +8227,7 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let source = MutableVecBuilder::<Source<u32>>::from([]).spawn(app.world_mut());
+            let source = MutableVec::<Source<u32>>::builder().spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8163,7 +8242,7 @@ pub(crate) mod tests {
             assert!(current_state.is_empty(), "Initial state should be empty");
 
             // Push first inner vec
-            let vec_a = MutableVecBuilder::from([10u32, 11]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
             source.write(app.world_mut()).push(vec_a.signal_vec());
             app.update();
 
@@ -8172,7 +8251,7 @@ pub(crate) mod tests {
             assert_eq!(current_state, vec![10, 11], "Push to empty outer vec");
 
             // Push second inner vec
-            let vec_b = MutableVecBuilder::from([20u32]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
             source.write(app.world_mut()).push(vec_b.signal_vec());
             app.update();
 
@@ -8184,20 +8263,58 @@ pub(crate) mod tests {
         }
 
         {
+            // --- 21b. Replace outer vec with empty (should emit Clear) ---
+            let mut app = create_test_app();
+            app.init_resource::<SignalVecOutput<u32>>();
+
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec()])
+                .spawn(app.world_mut());
+
+            let handle = source
+                .signal_vec()
+                .flatten()
+                .for_each(capture_signal_vec_output)
+                .register(app.world_mut());
+
+            // Initial state should populate
+            app.update();
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            let mut current_state: Vec<u32> = vec![];
+            apply_diffs(&mut current_state, diffs);
+            assert_eq!(current_state, vec![10, 11, 20], "Initial state");
+
+            // Replace with empty outer vec should emit Clear
+            source.write(app.world_mut()).replace(Vec::<Source<u32>>::new());
+            app.update();
+
+            let diffs = get_and_clear_output::<u32>(app.world_mut());
+            assert_eq!(diffs.len(), 1, "Replace to empty should produce one diff.");
+            assert!(matches!(diffs[0], VecDiff::Clear), "Expected Clear diff.");
+            apply_diffs(&mut current_state, diffs);
+            assert!(
+                current_state.is_empty(),
+                "State should be empty after Replace to empty."
+            );
+
+            handle.cleanup(app.world_mut());
+        }
+
+        {
             // --- 22. Move forward on outer vec (index 0 -> 2) ---
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let vec_a = MutableVecBuilder::from([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVecBuilder::from([20u32]).spawn(app.world_mut());
-            let vec_c = MutableVecBuilder::from([30u32, 31, 32]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+            let vec_c = MutableVec::builder().values([30u32, 31, 32]).spawn(app.world_mut());
 
-            let source = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_b.signal_vec(),
-                vec_c.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
+                .spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8242,16 +8359,13 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let vec_a = MutableVecBuilder::from([10u32]).spawn(app.world_mut());
-            let vec_empty = MutableVecBuilder::<u32>::from([]).spawn(app.world_mut());
-            let vec_c = MutableVecBuilder::from([30u32]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
+            let vec_empty = MutableVec::<u32>::builder().spawn(app.world_mut());
+            let vec_c = MutableVec::builder().values([30u32]).spawn(app.world_mut());
 
-            let source = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_empty.signal_vec(),
-                vec_c.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_empty.signal_vec(), vec_c.signal_vec()])
+                .spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8293,14 +8407,12 @@ pub(crate) mod tests {
             let mut app = create_test_app();
             app.init_resource::<SignalVecOutput<u32>>();
 
-            let vec_a = MutableVecBuilder::from([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVecBuilder::from([20u32]).spawn(app.world_mut());
+            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
 
-            let source = MutableVecBuilder::from([
-                vec_a.signal_vec(),
-                vec_b.signal_vec(),
-            ])
-            .spawn(app.world_mut());
+            let source = MutableVec::builder()
+                .values([vec_a.signal_vec(), vec_b.signal_vec()])
+                .spawn(app.world_mut());
 
             let handle = source
                 .signal_vec()
@@ -8328,4 +8440,5 @@ pub(crate) mod tests {
         }
 
         cleanup(true);
-    }}
+    }
+}

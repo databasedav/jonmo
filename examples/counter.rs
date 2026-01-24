@@ -6,8 +6,8 @@
 //! 1. **World-Driven State**: The application's state (the counter's value) is stored in a standard
 //!    Bevy `Component`, the "single source of truth".
 //!
-//! 2. **Declarative UI with `JonmoBuilder`**: The entire entity hierarchy is defined up-front in a
-//!    clean, colocated, declarative style.
+//! 2. **Declarative UI with `jonmo::Builder`**: The entire entity hierarchy is defined up-front in
+//!    a clean, colocated, declarative style.
 //!
 //! 3. **The `LazyEntity` Pattern**: related entities can refer to the state-holding entity *before*
 //!    it has been spawned, solving a common ordering problem in hierarchical entity construction.
@@ -40,16 +40,15 @@ fn main() {
 #[derive(Component, Clone, Deref, DerefMut)]
 struct Counter(i32);
 
-fn ui_root() -> JonmoBuilder {
-    // --- The `LazyEntity` Pattern ---
+fn ui_root() -> jonmo::Builder {
     // We need the buttons and the text display to know the `Entity` ID of the node
     // that will hold the `Counter` component. However, that node hasn't been spawned yet.
     // `LazyEntity` acts as a placeholder or a "promise" for an entity that will be
-    // spawned by a `JonmoBuilder` later. It can be cloned and passed around freely, e.g. into the
+    // spawned by a `jonmo::Builder` later. It can be cloned and passed around freely, e.g. into the
     // bodies of signal systems.
     let counter_holder = LazyEntity::new();
 
-    JonmoBuilder::from(Node {
+    jonmo::Builder::from(Node {
         width: Val::Percent(100.0),
         height: Val::Percent(100.0),
         justify_content: JustifyContent::Center,
@@ -57,7 +56,7 @@ fn ui_root() -> JonmoBuilder {
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node {
+        jonmo::Builder::from(Node {
             flex_direction: FlexDirection::Row,
             column_gap: Val::Px(15.0),
             align_items: AlignItems::Center,
@@ -65,32 +64,27 @@ fn ui_root() -> JonmoBuilder {
             ..default()
         })
         .insert(Counter(0))
-        // --- Fulfilling the Promise ---
-        // `.lazy_entity()` connects the `LazyEntity` to the actual entity that this `JonmoBuilder` spawns. Now calling
-        // `counter_holder.get()` from other deferred contexts, e.g. in the bodies of signal systems, will return the
-        // `Entity` ID of this row node.
+        // `.lazy_entity()` connects the `LazyEntity` to the actual entity that this `jonmo::Builder` spawns. Now
+        // calling `counter_holder.get()` from other deferred contexts, e.g. in the bodies of signal systems,
+        // will return the `Entity` ID of this row node.
         .lazy_entity(counter_holder.clone())
         .child(counter_button(counter_holder.clone(), PINK, "-", -1))
         .child(
-            JonmoBuilder::from((Node::default(), TextFont::from_font_size(25.)))
-                // --- Reactivity ---
+            jonmo::Builder::from((Node::default(), TextFont::from_font_size(25.)))
                 // `component_signal` is a core fixture of jonmo's reactivity. It takes a signal as an argument and
                 // uses its output to insert or update a component on the entity being built. Here,
                 // we're creating a signal that will produce a `Text` component whenever the counter
                 // changes.
                 .component_signal(
-                    // `SignalBuilder::from_component_lazy` creates a signal that reactively reads a component from an
-                    // entity that doesn't exist yet, identified by our `LazyEntity`.
-                    SignalBuilder::from_component_lazy(counter_holder.clone())
-                        // Rust's type system is intelligent enough to infer the "from_component" target from the
-                        // definition of the system passed to any of jonmo's signal combinators. `map_in` is a shorthand
-                        // for `.map` which unpacks its `In` input; this is especially convenient when the system passed
-                        // to `.map` does not need any other `SystemParam`s. Here, we simply deref the inner counter
-                        // value from the fetched `Counter` component for further transformation.
-                        .map_in(|counter: Counter| *counter)
-                        // `.dedupe()` ensures the rest of the chain only runs when the counter's value *actually
-                        // changes*, preventing redundant updates every frame.
-                        .dedupe()
+                    // `signal::from_component_changed_lazy` creates a signal that reactively reads a component from an
+                    // entity that doesn't exist yet, identified by our `LazyEntity`, only firing when the component
+                    // changes.
+                    signal::from_component_changed_lazy::<Counter>(counter_holder.clone())
+                        // `map_in` is a shorthand for `.map` that takes a regular function instead of a Bevy
+                        // system; this is especially convenient when additional `SystemParam`s aren't necessary.
+                        // `deref_copied` dereferences and copies, extracting the inner `i32` from the `Counter`
+                        // newtype for further transformation.
+                        .map_in(deref_copied)
                         // `Text` expects a `String` and `.to_string` expects a reference
                         .map_in_ref(ToString::to_string)
                         .map_in(Text)
@@ -103,8 +97,8 @@ fn ui_root() -> JonmoBuilder {
     )
 }
 
-fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str, step: i32) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str, step: i32) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             width: Val::Px(45.0),
             justify_content: JustifyContent::Center,
@@ -118,14 +112,11 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
     .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
         // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
         // state-holding entity.
-        if let Ok(mut counter) = counters.get_mut(*counter_holder) {
-            // --- State Mutation ---
-            // Because our text display has a signal that reads this component, this change will
-            // automatically trigger a UI update at the end of the frame.
-            **counter += step;
-        }
+        **counters.get_mut(*counter_holder).unwrap() += step;
+        // Because our text display has a signal that reads this component, this change will
+        // automatically trigger a UI update at the end of the frame.
     })
-    .child(JonmoBuilder::from((Text::from(label), TextFont::from_font_size(25.))))
+    .child(jonmo::Builder::from((Text::from(label), TextFont::from_font_size(25.))))
 }
 
 fn camera(mut commands: Commands) {
