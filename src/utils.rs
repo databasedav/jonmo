@@ -41,6 +41,13 @@ impl Deref for LazyEntity {
     }
 }
 
+impl From<LazyEntity> for Entity {
+    #[track_caller]
+    fn from(lazy: LazyEntity) -> Entity {
+        lazy.get()
+    }
+}
+
 pub(crate) fn get_ancestor(child_ofs: &Query<&ChildOf>, entity: Entity, generations: usize) -> Option<Entity> {
     [entity]
         .into_iter()

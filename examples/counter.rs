@@ -65,7 +65,7 @@ fn ui_root() -> jonmo::Builder {
         })
         .insert(Counter(0))
         // `.lazy_entity()` connects the `LazyEntity` to the actual entity that this `jonmo::Builder` spawns. Now
-        // calling `counter_holder.get()` from other deferred contexts, e.g. in the bodies of signal systems,
+        // calling `*counter_holder` from other deferred contexts, e.g. in the bodies of signal systems,
         // will return the `Entity` ID of this row node.
         .lazy_entity(counter_holder.clone())
         .child(counter_button(counter_holder.clone(), PINK, "-", -1))
@@ -76,10 +76,10 @@ fn ui_root() -> jonmo::Builder {
                 // we're creating a signal that will produce a `Text` component whenever the counter
                 // changes.
                 .component_signal(
-                    // `signal::from_component_changed_lazy` creates a signal that reactively reads a component from an
+                    // `signal::from_component_changed` creates a signal that reactively reads a component from an
                     // entity that doesn't exist yet, identified by our `LazyEntity`, only firing when the component
                     // changes.
-                    signal::from_component_changed_lazy::<Counter>(counter_holder.clone())
+                    signal::from_component_changed::<Counter>(counter_holder.clone())
                         // `map_in` is a shorthand for `.map` that takes a regular function instead of a Bevy
                         // system; this is especially convenient when additional `SystemParam`s aren't necessary.
                         // `deref_copied` dereferences and copies, extracting the inner `i32` from the `Counter`

@@ -223,7 +223,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
                     // This is where the `LazyEntity` becomes powerful.
                     // We create a signal that reads a component from the entity that `lifetime_holder` will eventually
                     // point to.
-                    signal::from_component_changed_lazy(lifetime_holder)
+                    signal::from_component_changed(lifetime_holder)
                         // Map the `Lifetime` component to its inner `f32` value and round it.
                         .map_in(|Lifetime(lifetime)| lifetime.round())
                         // `dedupe` is a crucial optimization. It ensures the rest of the signal chain only runs

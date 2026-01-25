@@ -13,7 +13,7 @@ use bevy_ecs::{
     system::{IntoObserverSystem, RunSystemOnce},
     world::{DeferredWorld, error::EntityMutableFetchError},
 };
-use bevy_log::warn;
+use bevy_log::error;
 use bevy_platform::prelude::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -69,10 +69,14 @@ impl Clone for Builder {
     /// ```
     #[track_caller]
     fn clone(&self) -> Self {
-        warn!(
+        let msg = format!(
             "Cloning `jonmo::Builder` at {} is a bug! Use a factory function instead.",
             core::panic::Location::caller()
         );
+        if cfg!(debug_assertions) {
+            panic!("{}", msg);
+        }
+        error!("{}", msg);
 
         Self::default()
     }
@@ -88,6 +92,15 @@ impl<T: Bundle> From<T> for Builder {
 /// Used internally by reactive child methods.
 #[derive(Component, Default)]
 struct ChildBlockPopulations(Vec<usize>);
+
+impl ChildBlockPopulations {
+    /// Ensure the vector is large enough to store population for the given block index.
+    fn ensure_block(&mut self, block: usize) {
+        if self.0.len() <= block {
+            self.0.resize(block + 1, 0);
+        }
+    }
+}
 
 impl Builder {
     #[allow(missing_docs)]
@@ -290,9 +303,7 @@ impl Builder {
             let child_entity = world.spawn_empty().id();
             // Ensure the populations vec is large enough and set this block's population
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
-            if pops.0.len() <= block {
-                pops.0.resize(block + 1, 0);
-            }
+            pops.ensure_block(block);
             pops.0[block] = 1;
             let insert_offset = offset(block, &pops.0);
             // need to call like this to avoid type ambiguity
@@ -308,9 +319,7 @@ impl Builder {
         let on_spawn = move |world: &mut World, parent: Entity| {
             // Initialize this block's population to 0
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
-            if pops.0.len() <= block {
-                pops.0.resize(block + 1, 0);
-            }
+            pops.ensure_block(block);
 
             let system = move |In(child_option): In<Option<Builder>>,
                                world: &mut World,
@@ -351,9 +360,7 @@ impl Builder {
             }
             // Set this block's population
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
-            if pops.0.len() <= block {
-                pops.0.resize(block + 1, 0);
-            }
+            pops.ensure_block(block);
             pops.0[block] = population;
             let insert_offset = offset(block, &pops.0);
             world
@@ -372,9 +379,7 @@ impl Builder {
         let on_spawn = move |world: &mut World, parent: Entity| {
             // Initialize this block's population to 0
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
-            if pops.0.len() <= block {
-                pops.0.resize(block + 1, 0);
-            }
+            pops.ensure_block(block);
 
             let system = move |In(diffs): In<Vec<VecDiff<Builder>>>,
                                world: &mut World,
@@ -500,7 +505,6 @@ impl Builder {
     /// Spawn this builder into the [`World`].
     pub fn spawn(self, world: &mut World) -> Entity {
         let entity = world.spawn_empty().id();
-        // SAFETY: We just created this entity, so it must exist
         self.spawn_on_entity(world, entity).unwrap();
         entity
     }
@@ -1158,7 +1162,7 @@ mod tests {
             // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
             let child_entity = LazyEntity::new();
             let child_builder_with_signal = jonmo::Builder::new().lazy_entity(child_entity.clone()).on_signal(
-                signal::from_parent_lazy(child_entity.clone())
+                signal::from_parent(child_entity.clone())
                     .component::<SourceComp>()
                     .map_in(|source: SourceComp| Some(TargetComp(source.0 * 2))),
                 |In((entity, comp_opt)): In<(Entity, Option<TargetComp>)>, world: &mut World| {
@@ -1485,7 +1489,7 @@ mod tests {
                     .insert(ChildCompD)
                     .child(jonmo::Builder::new().insert(GrandchildComp)) // Nested child
                     .on_signal(
-                        signal::from_parent_lazy(complex_child_entity.clone())
+                        signal::from_parent(complex_child_entity.clone())
                             .component::<SourceComp>()
                             .map_in(|source: SourceComp| Some(TargetComp(source.0 * 10))),
                         |In((entity, comp_opt)): In<(Entity, Option<TargetComp>)>, world: &mut World| {

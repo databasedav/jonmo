@@ -7,24 +7,35 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### changed
 
 - signal graph processed in deterministic topological order instead of the previous nondeterministic depth first order
-- renamed `SignalExt::combine` to `SignalExt::with`
+- `SignalBuilder::*` methods moved to free functions in the `signal` module (e.g. `SignalBuilder::always` -> `signal::always`)
 - `JonmoBuilder` renamed to `jonmo::Builder`
+- `jonmo::Builder` is now lock-free
 - `jonmo::Builder::hold_signals` renamed to `jonmo::Builder::hold_tasks` and takes `Box<dyn SignalTask>`s instead of `SignalHandles`
+- renamed `SignalExt::combine` to `SignalExt::zip`
+- `MutableVecBuilder`/`MutableBTreeMapBuilder` changed to `MutableVec::builder()`/`MutableBTreeMap::builder()` with simple chainable `.values` and `.with_values` methods
 - removed self item `Clone` bound from `SignalVecExt::map_signal` and `SignalVecExt::filter_map`
-- `SignalBuilder::*` methods moved to free functions in `signal` module (e.g. `SignalBuilder::always` -> `signal::always`)
+- `.get_mut`s unwrapped and `.get_entity_mut`s changed to `.entity_mut` in cases where they were silently ignoring invariant violations
 
 ### added
+- `signal::once`
+- `signal::from_component_changed`
+- `signal::from_resource_changed`
+- `signal::zip!`, a variadic flattened version of `SignalExt::zip`
 - `SignalExt::take`
-- `signal::zip!`, a variadic flattened version of `SignalExt::with`
 - `SignalVecExt::flatten`
 - `track_caller` derive for panicking `LazyEntity` methods
-- warning that cloning `jonmo::Builder`s at runtime is a bug
+- panic (debug only) or error log that cloning `jonmo::Builder`s at runtime is a bug
 
 ### fixed
 
 - deadlock when despawning `MutableVec/BTreeMap`s during another `MutableVec/BTreeMap` despawn
 - initially empty `MutableVec/BTreeMap`s work as expected when output to `.switch_signal_vec/map`
 - `SignalVecExt::debug` and `SignalMapExt::debug` now log correct code location
+
+### removed
+- `*_lazy` signal builder functions, the non-`lazy` versions now take both `Entity` and `LazyEntity`
+- `jonmo::Builder::signal_from_*` methods, use corresponding `signal` building functions with `.task()` and `jonmo::Builder::hold_tasks` instead
+- `jonmo::Builder::component_signal_from_*` methods, use corresponding `signal` building functions with `jonmo::Builder::component_signal` instead
 
 # 0.5.0 (2025-12-19)
 

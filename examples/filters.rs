@@ -234,7 +234,7 @@ fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(jonmo::Build
                 }),
             )
             .component_signal(
-                signal::from_component_changed_lazy(row_parent.clone())
+                signal::from_component_changed(row_parent.clone())
                     .map_in(move |NumberFilters(filters)| filters.contains(&parity))
                     .dedupe()
                     .map_true(|_: In<()>| outline()),
@@ -273,7 +273,7 @@ fn number_toggles(row_parent: LazyEntity) -> jonmo::Builder {
                 }),
             )
             .component_signal(
-                signal::from_lazy_entity(row_parent.clone())
+                signal::from_entity(row_parent.clone())
                     .has_component::<Sorted>()
                     .dedupe()
                     .map_true(|_: In<()>| outline()),
@@ -296,7 +296,7 @@ fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> jonmo::Builder {
         }),
     )
     .component_signal(
-        signal::from_component_changed_lazy(row_parent.clone())
+        signal::from_component_changed(row_parent.clone())
             .map_in(move |ShapeFilters(filters)| filters.contains(&shape))
             .dedupe()
             .map_true(|_: In<()>| outline()),
@@ -342,7 +342,7 @@ fn color_toggles(row_parent: LazyEntity) -> jonmo::Builder {
                     }),
                 )
                 .component_signal(
-                    signal::from_component_changed_lazy(row_parent.clone())
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |ColorFilters(filters)| filters.contains(&color))
                         .dedupe()
                         .map_true(|_: In<()>| outline()),
@@ -424,7 +424,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jon
             ..default()
         },))
         .children_signal_vec(
-            signal::from_lazy_entity(row_parent.clone())
+            signal::from_entity(row_parent.clone())
                 .has_component::<Sorted>()
                 .dedupe()
                 .switch_signal_vec(move |In(sorted)| {
@@ -436,7 +436,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jon
                     }
                 })
                 .filter_signal(clone!((row_parent) move | In((_, Data { number, .. })) | {
-                    signal::from_component_changed_lazy(row_parent.clone())
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |number_filters: NumberFilters| {
                             number_filters.0.contains(&if number.is_multiple_of(2) {
                                 Parity::Even
@@ -447,12 +447,12 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jon
                         .dedupe()
                 }))
                 .filter_signal(clone!((row_parent) move | In((_, Data { shape, .. })) | {
-                    signal::from_component_changed_lazy(row_parent.clone())
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |shape_filters: ShapeFilters| shape_filters.0.contains(&shape))
                         .dedupe()
                 }))
                 .filter_signal(clone!((row_parent) move | In((_, Data { color, .. })) | {
-                    signal::from_component_changed_lazy(row_parent.clone())
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |color_filters: ColorFilters| color_filters.0.contains(&color))
                         .dedupe()
                 }))

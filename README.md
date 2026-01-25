@@ -75,7 +75,7 @@ fn ui_root() -> jonmo::Builder {
         .child(
             jonmo::Builder::from((Node::default(), TextFont::from_font_size(25.)))
                 .component_signal(
-                    signal::from_component_changed_lazy::<Counter>(counter_holder.clone())
+                    signal::from_component_changed::<Counter>(counter_holder.clone())
                         .map_in(deref_copied)
                         .map_in_ref(ToString::to_string)
                         .map_in(Text)

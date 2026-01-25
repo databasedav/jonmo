@@ -346,8 +346,8 @@ where
     }
 }
 
-/// Signal graph node which combines two upstreams, see [`.with`](SignalExt::with).
-pub struct With<Left, Right>
+/// Signal graph node which combines two upstreams, see [`.zip`](SignalExt::zip).
+pub struct Zip<Left, Right>
 where
     Left: Signal,
     Right: Signal,
@@ -356,7 +356,7 @@ where
     _marker: PhantomData<fn() -> (Left, Right)>,
 }
 
-impl<Left, Right> Clone for With<Left, Right>
+impl<Left, Right> Clone for Zip<Left, Right>
 where
     Left: Signal + Clone,
     Right: Signal + Clone,
@@ -369,17 +369,17 @@ where
     }
 }
 
-/// Internal cache for [`.with`](SignalExt::with) combinator.
+/// Internal cache for [`.zip`](SignalExt::zip) combinator.
 ///
 /// Each upstream updates its side. The gate signal runs once per frame and emits the latest
 /// combined output once both sides have produced at least one value.
 #[derive(Component)]
-struct WithCache<L, R> {
+struct ZipCache<L, R> {
     left: Option<L>,
     right: Option<R>,
 }
 
-impl<L, R> Default for WithCache<L, R> {
+impl<L, R> Default for ZipCache<L, R> {
     fn default() -> Self {
         Self {
             left: None,
@@ -388,7 +388,7 @@ impl<L, R> Default for WithCache<L, R> {
     }
 }
 
-impl<Left, Right> Signal for With<Left, Right>
+impl<Left, Right> Signal for Zip<Left, Right>
 where
     Left: Signal,
     Right: Signal,
@@ -960,7 +960,7 @@ where
     O: Clone + SSs,
     F: FnMut() -> O + SSs,
 {
-    from_system(move |_: In<()>| Some(f()))
+    from_system(move |_: In<()>| f())
 }
 
 /// Creates a [`Source`] signal that always outputs a constant value.
@@ -968,7 +968,7 @@ pub fn always<O>(value: O) -> Source<O>
 where
     O: Clone + SSs,
 {
-    from_system(move |_: In<()>| Some(value.clone()))
+    from_system(move |_: In<()>| value.clone())
 }
 
 /// Creates a [`Signal`] that outputs a value once and then terminates forever.
@@ -986,99 +986,73 @@ where
     })
 }
 
-/// Creates a [`Source`] signal from an [`Entity`].
-pub fn from_entity(entity: Entity) -> Source<Entity> {
-    from_system(move |_: In<()>| entity)
+/// Creates a [`Source`] signal from an [`Entity`] or [`LazyEntity`].
+pub fn from_entity(entity: impl Into<Entity> + SSs) -> Source<Entity> {
+    let mut entity = Some(entity);
+    from_system(move |_: In<()>, mut cached: Local<Option<Entity>>| {
+        *cached.get_or_insert_with(|| entity.take().unwrap().into())
+    })
 }
 
-/// Creates a [`Source`] signal from a [`LazyEntity`].
-pub fn from_lazy_entity(entity: LazyEntity) -> Source<Entity> {
-    from_system(move |_: In<()>| *entity)
-}
-
-/// Creates a [`Source`] signal from an [`Entity`]'s `generations`-th generation ancestor's
-/// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
-/// output the [`Entity`] itself.
-pub fn from_ancestor(entity: Entity, generations: usize) -> Map<Source<Entity>, Entity> {
+/// Creates a [`Source`] signal from an [`Entity`]'s or [`LazyEntity`]'s `generations`-th generation
+/// ancestor's [`Entity`], terminating for frames where it does not exist. Passing `0` to
+/// `generation` will output the [`Entity`] itself.
+pub fn from_ancestor(entity: impl Into<Entity> + SSs, generations: usize) -> Map<Source<Entity>, Entity> {
     from_entity(entity).map(ancestor_map(generations))
 }
 
-/// Creates a [`Source`] signal from a [`LazyEntity`]'s `generations`-th generation ancestor's
-/// [`Entity`], terminating for frames where it does not exist. Passing `0` to `generation` will
-/// output the [`LazyEntity`]'s  [`Entity`] itself.
-pub fn from_ancestor_lazy(entity: LazyEntity, generations: usize) -> Map<Source<Entity>, Entity> {
-    from_lazy_entity(entity).map(ancestor_map(generations))
-}
-
-/// Creates a [`Source`] signal from an [`Entity`]'s parent's [`Entity`], terminating for frames
-/// where it does not exist. Passing `0` to `generation` will output the [`Entity`] itself.
-pub fn from_parent(entity: Entity) -> Map<Source<Entity>, Entity> {
+/// Creates a [`Source`] signal from an [`Entity`]'s or [`LazyEntity`]'s parent's [`Entity`],
+/// terminating for frames where it does not exist.
+pub fn from_parent(entity: impl Into<Entity> + SSs) -> Map<Source<Entity>, Entity> {
     from_ancestor(entity, 1)
 }
 
-/// Creates a [`Source`] signal from a [`LazyEntity`]'s parent's [`Entity`], terminating for
-/// frames where it does not exist. Passing `0` to `generation` will output the
-/// [`LazyEntity`]'s [`Entity`] itself.
-pub fn from_parent_lazy(entity: LazyEntity) -> Map<Source<Entity>, Entity> {
-    from_ancestor_lazy(entity, 1)
-}
-
-/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], terminating for the
-/// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
-/// [`Entity`].
-pub fn from_component<C>(entity: Entity) -> Source<C>
+/// Creates a [`Source`] signal from an [`Entity`] or [`LazyEntity`] and a [`Component`],
+/// terminating for the frame if the [`Entity`] does not exist or the [`Component`] does not exist
+/// on the [`Entity`].
+pub fn from_component<C>(entity: impl Into<Entity> + SSs) -> Source<C>
 where
     C: Component + Clone,
 {
-    from_system(move |_: In<()>, components: Query<&C>| components.get(entity).ok().cloned())
+    let mut entity = Some(entity);
+    from_system(
+        move |_: In<()>, mut cached: Local<Option<Entity>>, components: Query<&C>| {
+            let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
+            components.get(entity).ok().cloned()
+        },
+    )
 }
 
-/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], terminating for the
-/// frame if the [`Entity`] does not exist or the [`Component`] does not exist on the
-/// corresponding [`Entity`].
-pub fn from_component_lazy<C>(entity: LazyEntity) -> Source<C>
+/// Creates a [`Source`] signal from an [`Entity`] or [`LazyEntity`] and a [`Component`], always
+/// outputting an [`Option`].
+pub fn from_component_option<C>(entity: impl Into<Entity> + SSs) -> Source<Option<C>>
 where
     C: Component + Clone,
 {
-    from_system(move |_: In<()>, components: Query<&C>| components.get(*entity).ok().cloned())
+    let mut entity = Some(entity);
+    from_system(
+        move |_: In<()>, mut cached: Local<Option<Entity>>, components: Query<&C>| {
+            let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
+            Some(components.get(entity).ok().cloned())
+        },
+    )
 }
 
-/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], always outputting an
-/// [`Option`].
-pub fn from_component_option<C>(entity: Entity) -> Source<Option<C>>
+/// Creates a [`Source`] signal from an [`Entity`] or [`LazyEntity`] and a [`Component`], only
+/// outputting on frames where the [`Component`] has [`Changed`]. Terminates for the frame if the
+/// [`Entity`] does not exist, the [`Component`] does not exist, or the [`Component`] has not
+/// changed.
+pub fn from_component_changed<C>(entity: impl Into<Entity> + SSs) -> Source<C>
 where
     C: Component + Clone,
 {
-    from_system(move |_: In<()>, components: Query<&C>| Some(components.get(entity).ok().cloned()))
-}
-
-/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], always outputting an
-/// [`Option`].
-pub fn from_component_option_lazy<C>(entity: LazyEntity) -> Source<Option<C>>
-where
-    C: Component + Clone,
-{
-    from_system(move |_: In<()>, components: Query<&C>| Some(components.get(*entity).ok().cloned()))
-}
-
-/// Creates a [`Source`] signal from an [`Entity`] and a [`Component`], only outputting on
-/// frames where the [`Component`] has [`Changed`]. Terminates for the frame if the [`Entity`]
-/// does not exist, the [`Component`] does not exist, or the [`Component`] has not changed.
-pub fn from_component_changed<C>(entity: Entity) -> Source<C>
-where
-    C: Component + Clone,
-{
-    from_system(move |_: In<()>, components: Query<&C, Changed<C>>| components.get(entity).ok().cloned())
-}
-
-/// Creates a [`Source`] signal from a [`LazyEntity`] and a [`Component`], only outputting on
-/// frames where the [`Component`] has [`Changed`]. Terminates for the frame if the [`Entity`]
-/// does not exist, the [`Component`] does not exist, or the [`Component`] has not changed.
-pub fn from_component_changed_lazy<C>(entity: LazyEntity) -> Source<C>
-where
-    C: Component + Clone,
-{
-    from_system(move |_: In<()>, components: Query<&C, Changed<C>>| components.get(*entity).ok().cloned())
+    let mut entity = Some(entity);
+    from_system(
+        move |_: In<()>, mut cached: Local<Option<Entity>>, components: Query<&C, Changed<C>>| {
+            let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
+            components.get(entity).ok().cloned()
+        },
+    )
 }
 
 /// Creates a signal from a [`Resource`], terminating for the frame if the [`Resource`] does not
@@ -1700,9 +1674,9 @@ pub trait SignalExt: Signal {
     ///
     /// let signal_1 = signal::from_system(|_: In<()>| 1);
     /// let signal_2 = signal::from_system(|_: In<()>| 2);
-    /// signal_1.with(signal_2); // outputs `(1, 2)`
+    /// signal_1.zip(signal_2); // outputs `(1, 2)`
     /// ```
-    fn with<Other>(self, other: Other) -> With<Self, Other>
+    fn zip<Other>(self, other: Other) -> Zip<Self, Other>
     where
         Self: Sized,
         Other: Signal,
@@ -1710,22 +1684,20 @@ pub trait SignalExt: Signal {
         Other::Item: Clone + SSs,
     {
         let signal = LazySignal::new(move |world: &mut World| {
-            let with_entity = LazyEntity::new();
+            let zip_entity = LazyEntity::new();
 
-            let left_wrapper = self.map(
-                clone!((with_entity) move |In(left): In<Self::Item>, world: &mut World| {
-                    world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap().left = Some(left);
-                }),
-            );
+            let left_wrapper = self.map(clone!((zip_entity) move |In(left): In<Self::Item>, world: &mut World| {
+                world.get_mut::<ZipCache<Self::Item, Other::Item>>(*zip_entity).unwrap().left = Some(left);
+            }));
             let right_wrapper = other.map(
-                clone!((with_entity) move |In(right): In<Other::Item>, world: &mut World| {
-                    world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap().right = Some(right);
+                clone!((zip_entity) move |In(right): In<Other::Item>, world: &mut World| {
+                    world.get_mut::<ZipCache<Self::Item, Other::Item>>(*zip_entity).unwrap().right = Some(right);
                 }),
             );
 
-            let with_signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
-                clone!((with_entity) move |_: In<()>, world: &mut World| {
-                    let cache = world.get_mut::<WithCache<Self::Item, Other::Item>>(*with_entity).unwrap();
+            let zip_signal = lazy_signal_from_system::<_, (Self::Item, Other::Item), _, _, _>(
+                clone!((zip_entity) move |_: In<()>, world: &mut World| {
+                    let cache = world.get_mut::<ZipCache<Self::Item, Other::Item>>(*zip_entity).unwrap();
                     match (&cache.left, &cache.right) {
                         (Some(left), Some(right)) => Some((left.clone(), right.clone())),
                         _ => None,
@@ -1733,11 +1705,11 @@ pub trait SignalExt: Signal {
                 }),
             );
 
-            let signal = with_signal.register(world);
+            let signal = zip_signal.register(world);
             world
                 .entity_mut(*signal)
-                .insert(WithCache::<Self::Item, Other::Item>::default());
-            with_entity.set(*signal);
+                .insert(ZipCache::<Self::Item, Other::Item>::default());
+            zip_entity.set(*signal);
 
             let SignalHandle(left_upstream) = left_wrapper.register(world);
             let SignalHandle(right_upstream) = right_wrapper.register(world);
@@ -1747,7 +1719,7 @@ pub trait SignalExt: Signal {
             signal
         });
 
-        With {
+        Zip {
             signal,
             _marker: PhantomData,
         }
@@ -2921,7 +2893,7 @@ impl<T: ?Sized> SignalExt for T where T: Signal {}
 macro_rules! eq {
     // Entry point
     ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_zip_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::eq!(@check val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -2939,32 +2911,32 @@ macro_rules! eq {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __signal_with_and_map {
+macro_rules! __signal_zip_and_map {
     // Single argument case
     ($s1:expr $(,)?; |$val:ident| $body:block) => {
         $s1.map(|In($val)| $body)
     };
     // Entry point
     ($s1:expr, $s2:expr $(, $rest:expr)* $(,)?; |$val:ident| $body:block) => {
-        $crate::__signal_with_and_map!(@combine $s1, $s2 $(, $rest)*)
-            .map(|In($val @ $crate::__signal_with_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
+        $crate::__signal_zip_and_map!(@combine $s1, $s2 $(, $rest)*)
+            .map(|In($val @ $crate::__signal_zip_and_map!(@pattern $s1, $s2 $(, $rest)*))| $body)
     };
 
     // Combine chain
     (@combine $first:expr, $second:expr) => {
-        $first.with($second)
+        $first.zip($second)
     };
     (@combine $first:expr, $second:expr, $($rest:expr),+) => {
-        $crate::__signal_with_and_map!(@combine $first.with($second), $($rest),+)
+        $crate::__signal_zip_and_map!(@combine $first.zip($second), $($rest),+)
     };
 
     // Pattern generator (nested tuple of `_` matching the combine nesting)
     (@pattern $s1:expr, $s2:expr $(, $rest:expr)*) => {
-        $crate::__signal_with_and_map!(@pattern_helper (_, _) $(, $rest)*)
+        $crate::__signal_zip_and_map!(@pattern_helper (_, _) $(, $rest)*)
     };
     (@pattern_helper $acc:tt $(,)?) => { $acc };
     (@pattern_helper $acc:tt, $head:expr $(, $tail:expr)*) => {
-        $crate::__signal_with_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
+        $crate::__signal_zip_and_map!(@pattern_helper ($acc, _) $(, $tail)*)
     };
 }
 
@@ -3104,7 +3076,7 @@ macro_rules! __signal_reduce_binop {
     };
     // Entry point
     ($op:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_zip_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::__signal_reduce_binop!(@apply $op, val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -3200,7 +3172,7 @@ macro_rules! __signal_reduce_cmp {
     };
     // Entry point
     ($cmp:tt; $s1:expr, $s2:expr $(, $rest:expr)* $(,)?) => {
-        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)*; |val| {
+        $crate::__signal_zip_and_map!($s1, $s2 $(, $rest)*; |val| {
             $crate::__signal_reduce_cmp!(@select $cmp, val, $s1, $s2 $(, $rest)*)
         })
     };
@@ -3220,7 +3192,7 @@ macro_rules! __signal_reduce_cmp {
 }
 
 /// Zips multiple [`Signal`]s into a single [`Signal`] that outputs a flat tuple of all their
-/// outputs. Unlike chaining [`.with()`](SignalExt::with) calls which produces nested tuples
+/// outputs. Unlike chaining [`.zip()`](SignalExt::zip) calls which produces nested tuples
 /// like `(((A, B), C), D)`, this macro produces flat tuples like `(A, B, C, D)`.
 ///
 /// The resulting [`Signal`] will only output a value when all input [`Signal`]s have outputted a
@@ -3242,7 +3214,7 @@ macro_rules! __signal_reduce_cmp {
 /// // Outputs a flat tuple (i32, &str, f64, bool)
 /// let zipped = signal::zip!(s1, s2, s3, s4);
 ///
-/// // Compare to chained .with() which would give (((i32, &str), f64), bool)
+/// // Compare to chained .zip() which would give (((i32, &str), f64), bool)
 /// ```
 #[macro_export]
 macro_rules! zip {
@@ -3250,13 +3222,13 @@ macro_rules! zip {
     ($s1:expr $(,)?) => {
         $s1.map(|In(__v)| (__v,))
     };
-    // Two signals - use with directly (already flat)
+    // Two signals - use zip directly (already flat)
     ($s1:expr, $s2:expr $(,)?) => {
-        $s1.with($s2)
+        $s1.zip($s2)
     };
     // Three or more signals - build combine chain then flatten
     ($s1:expr, $s2:expr $(, $rest:expr)+ $(,)?) => {
-        $crate::__signal_with_and_map!($s1, $s2 $(, $rest)+; |__v| {
+        $crate::__signal_zip_and_map!($s1, $s2 $(, $rest)+; |__v| {
             $crate::__signal_zip_flatten!(__v; $s1, $s2 $(, $rest)+;)
         })
     };
@@ -3807,11 +3779,11 @@ mod tests {
     }
 
     #[test]
-    fn test_with() {
+    fn test_zip() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
         let signal = signal::from_system(move |_: In<()>| 10)
-            .with(signal::from_system(move |_: In<()>| "hello"))
+            .zip(signal::from_system(move |_: In<()>| "hello"))
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -3820,7 +3792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_emits_after_both_emit() {
+    fn test_zip_emits_after_both_emit() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutputVec<(i32, i32)>>();
 
@@ -3830,7 +3802,7 @@ mod tests {
         });
         let right = signal::from_system(|_: In<()>| 10).first();
 
-        let signal = left.with(right).map(capture_output_vec).register(app.world_mut());
+        let signal = left.zip(right).map(capture_output_vec).register(app.world_mut());
 
         app.update();
         assert_eq!(
@@ -3867,7 +3839,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fan_out_fan_in_with() {
+    fn test_fan_out_fan_in_zip() {
         let mut app = create_test_app();
         app.init_resource::<SignalOutput<(i32, i32)>>();
 
@@ -3879,7 +3851,7 @@ mod tests {
         let left = source.clone().map_in(|x: i32| x + 1);
         let right = source.map_in(|x: i32| x + 10);
 
-        let signal = left.with(right).map(capture_output).register(app.world_mut());
+        let signal = left.zip(right).map(capture_output).register(app.world_mut());
 
         app.update();
         assert_eq!(get_output::<(i32, i32)>(app.world()), Some((2, 11)));
@@ -3902,7 +3874,7 @@ mod tests {
         assert_eq!(get_output::<(i32,)>(app.world()), Some((1,)));
         signal.cleanup(app.world_mut());
 
-        // Test 2 signals - same as .with()
+        // Test 2 signals - same as .zip()
         app.init_resource::<SignalOutput<(i32, &'static str)>>();
         let s1 = signal::from_system(|_: In<()>| 1);
         let s2 = signal::from_system(|_: In<()>| "two");
@@ -4951,6 +4923,53 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_from_function() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+
+        // Test basic FnMut closure
+        let counter = Arc::new(Mutex::new(0));
+        let signal = signal::from_function(clone!((counter) move || {
+            let mut c = counter.lock().unwrap();
+            *c += 1;
+            *c
+        }))
+        .map(capture_output)
+        .register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(1));
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(2));
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(3));
+
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_builder_always() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+
+        let signal = signal::always(42).map(capture_output).register(app.world_mut());
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+
+        // Verify it still outputs the same value on subsequent updates
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(42));
+
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
     fn test_builder_from_entity() {
         let mut app = create_test_app();
         app.insert_resource(SignalOutput(Some(Entity::PLACEHOLDER)));
@@ -4974,9 +4993,7 @@ mod tests {
         let test_entity = app.world_mut().spawn_empty().id();
         lazy.set(test_entity);
 
-        let signal = signal::from_lazy_entity(lazy)
-            .map(capture_output)
-            .register(app.world_mut());
+        let signal = signal::from_entity(lazy).map(capture_output).register(app.world_mut());
 
         app.update();
         assert_eq!(get_output::<Entity>(app.world()), Some(test_entity));
@@ -5046,7 +5063,7 @@ mod tests {
         lazy_child.set(child);
 
         // Test parent (generations = 1)
-        let signal_parent = signal::from_ancestor_lazy(lazy_child.clone(), 1)
+        let signal_parent = signal::from_ancestor(lazy_child.clone(), 1)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5054,7 +5071,7 @@ mod tests {
         signal_parent.cleanup(app.world_mut());
 
         // Test grandparent (generations = 2)
-        let signal_gp = signal::from_ancestor_lazy(lazy_child, 2)
+        let signal_gp = signal::from_ancestor(lazy_child, 2)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5102,7 +5119,7 @@ mod tests {
         app.world_mut().entity_mut(parent).add_child(child);
         lazy_child.set(child);
 
-        let signal = signal::from_parent_lazy(lazy_child)
+        let signal = signal::from_parent(lazy_child)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5148,7 +5165,7 @@ mod tests {
         let entity_with = app.world_mut().spawn(TestData(42)).id();
         lazy.set(entity_with);
 
-        let signal = signal::from_component_lazy::<TestData>(lazy)
+        let signal = signal::from_component::<TestData>(lazy)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5193,7 +5210,7 @@ mod tests {
         let entity_with = app.world_mut().spawn(TestData(42)).id();
         lazy.set(entity_with);
 
-        let signal = signal::from_component_option_lazy::<TestData>(lazy)
+        let signal = signal::from_component_option::<TestData>(lazy)
             .map(capture_output)
             .register(app.world_mut());
         app.update();
@@ -5313,7 +5330,7 @@ mod tests {
         let entity = app.world_mut().spawn(TestData(42)).id();
         lazy.set(entity);
 
-        let signal = signal::from_component_changed_lazy::<TestData>(lazy)
+        let signal = signal::from_component_changed::<TestData>(lazy)
             .map(capture_output)
             .register(app.world_mut());
 

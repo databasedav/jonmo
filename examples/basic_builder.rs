@@ -26,11 +26,10 @@ fn main() {
 #[derive(Resource, Deref, DerefMut)]
 struct ValueTicker(Timer);
 
-#[derive(Component, Clone, Default, PartialEq)]
+#[derive(Component, Clone, Default, PartialEq, Deref)]
 struct Value(i32);
 
 fn ui() -> jonmo::Builder {
-    let lazy_entity = LazyEntity::new();
     jonmo::Builder::from(Node {
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
@@ -38,17 +37,19 @@ fn ui() -> jonmo::Builder {
         width: Val::Percent(100.),
         ..default()
     })
-    .lazy_entity(lazy_entity.clone())
-    .child(
+    .child({
+        let lazy_entity = LazyEntity::new();
         jonmo::Builder::from((Node::default(), TextFont::from_font_size(100.)))
+            .lazy_entity(lazy_entity.clone())
             .insert(Value(0))
             .component_signal(
-                signal::from_component_changed_lazy::<Value>(lazy_entity)
-                    .map_in(|value| value.0.to_string())
+                signal::from_component_changed::<Value>(lazy_entity)
+                    .map_in(deref_copied)
+                    .map_in_ref(ToString::to_string)
                     .map_in(Text)
                     .map_in(Some),
-            ),
-    )
+            )
+    })
 }
 
 fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {
