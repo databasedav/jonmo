@@ -10,8 +10,6 @@ use bevy_ecs::{
     system::{SystemId, SystemState},
     world::DeferredWorld,
 };
-#[cfg(feature = "tracing")]
-use bevy_log::prelude::*;
 use bevy_platform::{
     collections::{HashMap, HashSet},
     prelude::*,
@@ -118,7 +116,7 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
     if would_create_cycle(world, source, target) {
         // TODO: panic instead ?
         #[cfg(feature = "tracing")]
-        error!("cycle detected when attempting to pipe {:?} → {:?}", source, target);
+        bevy_log::error!("cycle detected when attempting to pipe {:?} → {:?}", source, target);
         return;
     }
     let mut upstream = world.entity_mut(*source);
@@ -176,7 +174,7 @@ where
                 cfg_if::cfg_if! {
                     if #[cfg(feature = "tracing")] {
                         let expected_type = core::any::type_name::<I>();
-                        error!(
+                        bevy_log::error!(
                             "failed to downcast input for system {:?}. expected input type: `{}`",
                             self.system, expected_type
                         );

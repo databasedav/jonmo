@@ -13,7 +13,6 @@ use bevy_ecs::{
     system::{IntoObserverSystem, RunSystemOnce},
     world::{DeferredWorld, error::EntityMutableFetchError},
 };
-use bevy_log::error;
 use bevy_platform::prelude::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -76,7 +75,8 @@ impl Clone for Builder {
         if cfg!(debug_assertions) {
             panic!("{}", msg);
         }
-        error!("{}", msg);
+        #[cfg(feature = "tracing")]
+        bevy_log::error!("{}", msg);
 
         Self::default()
     }

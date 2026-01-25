@@ -11,8 +11,6 @@ use super::{
 use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{change_detection::Mut, entity_disabling::Internal, prelude::*, system::SystemId};
-#[cfg(feature = "tracing")]
-use bevy_log::debug;
 use bevy_platform::{
     collections::{HashMap, HashSet},
     prelude::*,
@@ -3877,7 +3875,7 @@ pub trait SignalVecExt: SignalVec {
         let location = core::panic::Location::caller();
         Debug {
             signal: self.for_each(move |In(item)| {
-                debug!("[{}] {:#?}", location, item);
+                bevy_log::debug!("[{}] {:#?}", location, item);
                 item
             }),
         }
@@ -4528,9 +4526,11 @@ pub(crate) mod tests {
     where
         T: SSs + Clone + fmt::Debug,
     {
-        debug!(
+        #[cfg(feature = "tracing")]
+        bevy_log::debug!(
             "Capture SignalVec Output: Received {:?}, extending resource from {:?} with new diffs",
-            diffs, output.0
+            diffs,
+            output.0
         );
         output.0.extend(diffs);
     }

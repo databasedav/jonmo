@@ -13,7 +13,6 @@ use crate::prelude::clone;
 use bevy_ecs::{entity_disabling::Internal, prelude::*, system::SystemState};
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
-        use bevy_log::prelude::*;
         use core::fmt;
     }
 }
@@ -2804,7 +2803,7 @@ pub trait SignalExt: Signal {
         let location = core::panic::Location::caller();
         Debug {
             signal: self.map(move |In(item)| {
-                debug!("[{}] {:#?}", location, item);
+                bevy_log::debug!("[{}] {:#?}", location, item);
                 item
             }),
         }
@@ -3303,9 +3302,12 @@ mod tests {
 
     // Helper system to capture signal output
     fn capture_output<T: SSs + Clone + fmt::Debug>(In(value): In<T>, mut output: ResMut<SignalOutput<T>>) {
-        debug!(
+        #[cfg(feature = "tracing")]
+        bevy_log::debug!(
             "Capture Output System: Received {:?}, updating resource from {:?} to Some({:?})",
-            value, output.0, value
+            value,
+            output.0,
+            value
         );
         output.0 = Some(value);
     }

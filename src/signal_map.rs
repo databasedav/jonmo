@@ -12,8 +12,6 @@ use super::{
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
 use bevy_ecs::{entity_disabling::Internal, prelude::*};
-#[cfg(feature = "tracing")]
-use bevy_log::debug;
 use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
@@ -901,7 +899,7 @@ pub trait SignalMapExt: SignalMap {
         let location = core::panic::Location::caller();
         Debug {
             signal: self.for_each(move |In(item)| {
-                debug!("[{}] {:#?}", location, item);
+                bevy_log::debug!("[{}] {:#?}", location, item);
                 item
             }),
         }
