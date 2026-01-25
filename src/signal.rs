@@ -1981,12 +1981,11 @@ pub trait SignalExt: Signal {
                     // signal and poke the output signal.
                     let forwarder_logic = move |In(diffs): In<Vec<VecDiff<S::Item>>>, world: &mut World| {
                         if !diffs.is_empty() {
-                            world
-                                .get_mut::<SwitcherQueue<S::Item>>(*output_signal)
-                                .unwrap()
-                                .0
-                                .extend(diffs);
-                            process_signals(world, [output_signal], Box::new(()));
+                            // The output signal may have been cleaned up during a cleanup race.
+                            if let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Item>>(*output_signal) {
+                                queue.0.extend(diffs);
+                                process_signals(world, [output_signal], Box::new(()));
+                            }
                         }
                     };
 
@@ -2120,12 +2119,11 @@ pub trait SignalExt: Signal {
                     let forwarder_logic = move |In(diffs): In<Vec<super::signal_map::MapDiff<S::Key, S::Value>>>,
                                                 world: &mut World| {
                         if !diffs.is_empty() {
-                            world
-                                .get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal)
-                                .unwrap()
-                                .0
-                                .extend(diffs);
-                            process_signals(world, [output_signal], Box::new(()));
+                            // The output signal may have been cleaned up during a cleanup race.
+                            if let Some(mut queue) = world.get_mut::<SwitcherQueue<S::Key, S::Value>>(*output_signal) {
+                                queue.0.extend(diffs);
+                                process_signals(world, [output_signal], Box::new(()));
+                            }
                         }
                     };
 
