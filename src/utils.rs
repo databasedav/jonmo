@@ -72,7 +72,3 @@ where
 {
     x.deref().clone()
 }
-
-/// Convenience trait for [`Send`] + [`Sync`] + 'static.
-pub trait SSs: Send + Sync + 'static {}
-impl<T: Send + Sync + 'static> SSs for T {}

@@ -1,16 +1,27 @@
-//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
-//! [`Vec`] mutations, see [`MutableVec`] and [`SignalVecExt`].
+//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top
+//! of [`Vec`] mutations.
+//!
+//! This module provides [`SignalVec`], a collection-oriented signal trait with **diff-based
+//! semantics**. Rather than forwarding entire collections each frame, [`SignalVec`] propagates
+//! [`VecDiff`] values that describe incremental mutations (insert, remove, update, move, etc.).
+//! This enables efficient, constant-time reactive updates for collections of any size.
+//!
+//! See [`MutableVec`] for the primary source type and [`SignalVecExt`] for available combinators.
+//! For the general signal graph runtime model and core concepts, see the [`Signal`] trait
+//! documentation.
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, downcast_any_clone, lazy_signal_from_system,
-        pipe_signal, poll_signal, process_signals, register_signal,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, Upstream, apply_schedule_to_signal, downcast_any_clone,
+        lazy_signal_from_system, pipe_signal, poll_signal, register_signal, trigger_signal_subgraph,
     },
-    signal::{self, Signal, SignalExt},
-    utils::{LazyEntity, SSs},
+    signal::{self, BoxedSignal, Signal, SignalExt},
+    utils::LazyEntity,
 };
 use crate::prelude::clone;
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::{change_detection::Mut, entity_disabling::Internal, prelude::*, system::SystemId};
+use bevy_ecs::{
+    change_detection::Mut, entity_disabling::Internal, prelude::*, schedule::ScheduleLabel, system::SystemId,
+};
 use bevy_platform::{
     collections::{HashMap, HashSet},
     prelude::*,
@@ -127,10 +138,22 @@ impl<T> VecDiff<T> {
     }
 }
 
-/// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
-/// of the signal graph downstream of some source [`MutableVec`]; this is similar to [`Signal`] but
-/// critically requires that the [`System`] outputs [`Option<VecDiff<Self::Item>>`].
-pub trait SignalVec: SSs {
+/// A composable node in [jonmo](crate)'s reactive dependency graph, specialized for **diff-based**
+/// [`Vec`] reactivity.
+///
+/// Unlike [`Signal`] which forwards complete values, a [`SignalVec`] propagates [`VecDiff`]
+/// values describing incremental mutations to an underlying collection. This diff-based approach
+/// enables **constant-time reactive updates** regardless of collection size; only the changes are
+/// transmitted and processed, not the entire collection.
+///
+/// Downstream consumers receive a stream of [`VecDiff`] variants ([`InsertAt`](VecDiff::InsertAt),
+/// [`RemoveAt`](VecDiff::RemoveAt), [`UpdateAt`](VecDiff::UpdateAt), [`Move`](VecDiff::Move),
+/// etc.) that they can apply to maintain a synchronized view of the source data.
+///
+/// For the general signal graph runtime model, registration pattern, flow control semantics, and
+/// composition strategies, see the [`Signal`] trait documentation, which also applies to
+/// [`SignalVec`].
+pub trait SignalVec: Send + Sync + 'static {
     /// Output type.
     type Item;
 
@@ -287,7 +310,7 @@ impl<Upstream, S: Signal> SignalVec for MapSignal<Upstream, S>
 where
     Upstream: SignalVec,
     S: Signal + 'static,
-    S::Item: Clone + SSs,
+    S::Item: Clone + Send + Sync + 'static,
 {
     type Item = S::Item;
 
@@ -562,7 +585,7 @@ impl<Upstream> SignalVec for Enumerate<Upstream>
 where
     Upstream: SignalVec,
 {
-    type Item = (super::signal::Source<Option<usize>>, Upstream::Item);
+    type Item = (BoxedSignal<Option<usize>>, Upstream::Item);
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.signal.register(world).into()
@@ -697,21 +720,11 @@ where
     }
 }
 
+/// Tagged diff for chain combinator to distinguish left vs right upstream.
+#[derive(Clone)]
 enum LrDiff<T> {
     Left(Vec<VecDiff<T>>),
     Right(Vec<VecDiff<T>>),
-}
-
-impl<T> Clone for LrDiff<T>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Self {
-        match self {
-            Self::Left(left) => Self::Left(left.clone()),
-            Self::Right(right) => Self::Right(right.clone()),
-        }
-    }
 }
 
 /// Signal graph node which concatenates its upstreams, see [`.chain`](SignalVecExt::chain).
@@ -747,12 +760,12 @@ where
     type Item = Left::Item;
 
     fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        let signal = self.signal.register(world);
         let SignalHandle(left_upstream) = self.left_wrapper.register(world);
         let SignalHandle(right_upstream) = self.right_wrapper.register(world);
-        let signal = self.signal.register(world);
         pipe_signal(world, left_upstream, signal);
         pipe_signal(world, right_upstream, signal);
-        signal.into()
+        SignalHandle(signal)
     }
 }
 
@@ -879,7 +892,7 @@ impl<Upstream> SignalVec for Flatten<Upstream>
 where
     Upstream: SignalVec,
     Upstream::Item: SignalVec + 'static,
-    <Upstream::Item as SignalVec>::Item: Clone + SSs,
+    <Upstream::Item as SignalVec>::Item: Clone + Send + Sync + 'static,
 {
     type Item = <Upstream::Item as SignalVec>::Item;
 
@@ -1069,10 +1082,10 @@ pub trait SignalVecExt: SignalVec {
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
-        Self::Item: 'static,
-        O: Clone + 'static,
+        Self::Item: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
         IOO: Into<Option<O>> + 'static,
-        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, IOO, M> + SSs,
+        F: IntoSystem<In<Vec<VecDiff<Self::Item>>>, IOO, M> + Send + Sync + 'static,
     {
         ForEach {
             upstream: self,
@@ -1099,9 +1112,9 @@ pub trait SignalVecExt: SignalVec {
     fn map<O, F, M>(self, system: F) -> Map<Self, O>
     where
         Self: Sized,
-        Self::Item: 'static,
-        O: Clone + 'static,
-        F: IntoSystem<In<Self::Item>, O, M> + SSs,
+        Self::Item: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Item>, O, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(system);
@@ -1183,9 +1196,9 @@ pub trait SignalVecExt: SignalVec {
     fn map_in<O, F>(self, mut function: F) -> Map<Self, O>
     where
         Self: Sized,
-        Self::Item: 'static,
-        O: Clone + 'static,
-        F: FnMut(Self::Item) -> O + SSs,
+        Self::Item: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        F: FnMut(Self::Item) -> O + Send + Sync + 'static,
     {
         self.map(move |In(item)| function(item))
     }
@@ -1212,9 +1225,9 @@ pub trait SignalVecExt: SignalVec {
     fn map_in_ref<O, F>(self, mut function: F) -> Map<Self, O>
     where
         Self: Sized,
-        Self::Item: 'static,
-        O: Clone + 'static,
-        F: FnMut(&Self::Item) -> O + SSs,
+        Self::Item: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        F: FnMut(&Self::Item) -> O + Send + Sync + 'static,
     {
         self.map(move |In(item)| function(&item))
     }
@@ -1239,15 +1252,15 @@ pub trait SignalVecExt: SignalVec {
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
     where
         Self: Sized,
-        Self::Item: SSs,
+        Self::Item: Send + Sync + 'static,
         S: Signal + 'static + Clone,
         S::Item: Clone + Send + Sync,
-        F: IntoSystem<In<Self::Item>, S, M> + SSs,
+        F: IntoSystem<In<Self::Item>, S, M> + Send + Sync + 'static,
     {
         #[derive(Component, Deref, DerefMut, Clone, Copy)]
         struct ItemIndex(usize);
 
-        fn spawn_processor<Item: Clone + SSs, S: Signal<Item = Item> + Clone + 'static>(
+        fn spawn_processor<Item: Clone + Send + Sync + 'static, S: Signal<Item = Item> + Clone + 'static>(
             world: &mut World,
             output_signal: SignalSystem,
             index: usize,
@@ -1270,7 +1283,7 @@ pub trait SignalVecExt: SignalVec {
                         index: current_index,
                         value,
                     });
-                process_signals(world, [output_signal], Box::new(()));
+                trigger_signal_subgraph(world, [output_signal], Box::new(()));
             });
             let processor_handle = inner_signal.map(processor_logic).register(world);
             processor_entity.set(**processor_handle);
@@ -1474,7 +1487,7 @@ pub trait SignalVecExt: SignalVec {
                         .unwrap()
                         .0
                         .extend(new_diffs);
-                    process_signals(world, [output_signal], Box::new(()));
+                    trigger_signal_subgraph(world, [output_signal], Box::new(()));
                 }
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
@@ -1517,8 +1530,8 @@ pub trait SignalVecExt: SignalVec {
     fn filter<F, M>(self, predicate: F) -> Filter<Self>
     where
         Self: Sized,
-        Self::Item: Clone + 'static,
-        F: IntoSystem<In<Self::Item>, bool, M> + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Item>, bool, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(predicate);
@@ -1558,9 +1571,9 @@ pub trait SignalVecExt: SignalVec {
     fn filter_map<O, F, M>(self, system: F) -> FilterMap<Self, O>
     where
         Self: Sized,
-        Self::Item: 'static,
-        O: Clone + 'static,
-        F: IntoSystem<In<Self::Item>, Option<O>, M> + SSs,
+        Self::Item: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Item>, Option<O>, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system = world.register_system(system);
@@ -1605,9 +1618,9 @@ pub trait SignalVecExt: SignalVec {
     fn filter_signal<F, S, M>(self, system: F) -> FilterSignal<Self>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
         S: Signal<Item = bool> + 'static,
-        F: IntoSystem<In<Self::Item>, S, M> + SSs,
+        F: IntoSystem<In<Self::Item>, S, M> + Send + Sync + 'static,
     {
         struct FilterSignalItem<T> {
             signal: SignalHandle,
@@ -1621,7 +1634,7 @@ pub trait SignalVecExt: SignalVec {
             diffs: Vec<VecDiff<T>>,
         }
 
-        fn with_filter_signal_data<T: SSs, O>(
+        fn with_filter_signal_data<T: Send + Sync + 'static, O>(
             world: &mut World,
             entity: Entity,
             f: impl FnOnce(Mut<FilterSignalData<T>>) -> O,
@@ -1637,7 +1650,7 @@ pub trait SignalVecExt: SignalVec {
         #[derive(Component, Deref, DerefMut)]
         struct FilterSignalIndex(usize);
 
-        fn spawn_filter_signal<T: Clone + SSs>(
+        fn spawn_filter_signal<T: Clone + Send + Sync + 'static>(
             world: &mut World,
             index: usize,
             signal: impl Signal<Item = bool> + 'static,
@@ -1647,18 +1660,22 @@ pub trait SignalVecExt: SignalVec {
             let processor_system = clone!((entity) move |In(filter): In<bool>, world: &mut World| {
                 let self_entity = *entity;
 
-                let item_index = world
+                let Some(item_index) = world
                     .query_filtered::<&FilterSignalIndex, Allow<Internal>>()
                     .get(world, self_entity)
-                    .unwrap()
-                    .0;
-                let mut filter_signal_data = world
+                    .ok()
+                    .map(|idx| idx.0)
+                else {
+                    return;
+                };
+                let Ok(mut filter_signal_data) = world
                     .query_filtered::<&mut FilterSignalData<T>, Allow<Internal>>()
                     .get_mut(world, parent)
-                    .unwrap();
+                else {
+                    return;
+                };
                 let old_filtered_state = filter_signal_data.items[item_index].filtered;
                 if old_filtered_state == filter {
-                    // No change, do nothing.
                     return;
                 }
                 let diff_to_queue = if filter {
@@ -1680,7 +1697,7 @@ pub trait SignalVecExt: SignalVec {
                 filter_signal_data.diffs.push(diff_to_queue);
 
                 // Poke the main output signal to process its queue immediately.
-                process_signals(world, [parent.into()], Box::new(Vec::<VecDiff<T>>::new()));
+                trigger_signal_subgraph(world, [parent.into()], Box::new(Vec::<VecDiff<T>>::new()));
             });
 
             // Use .map() to attach the processor. The dedupe is still important.
@@ -2042,7 +2059,7 @@ pub trait SignalVecExt: SignalVec {
     fn enumerate(self) -> Enumerate<Self>
     where
         Self: Sized,
-        Self::Item: Clone + 'static,
+        Self::Item: Clone + Send + Sync + 'static,
     {
         #[derive(Component, Default)]
         struct EnumerateState {
@@ -2070,7 +2087,7 @@ pub trait SignalVecExt: SignalVec {
                         }
                     }
 
-                    let create_index_signal = clone!((processor_entity_handle) move | key: usize | {
+                    let create_index_signal = clone!((processor_entity_handle) move | key: usize | -> BoxedSignal<Option<usize>> {
                         signal::from_system(
                             clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
                                 Some(
@@ -2080,14 +2097,14 @@ pub trait SignalVecExt: SignalVec {
                                         .and_then(|s| s.key_to_index.get(&key).copied()),
                                 )
                             }),
-                        )
+                        ).boxed_clone()
                     });
                     for diff in diffs {
                         match diff {
                             VecDiff::Replace { values } => {
                                 state.key_to_index.clear();
                                 state.ordered_keys.clear();
-                                let new_values_with_signals = values.into_iter().enumerate().map(|(i, value)| {
+                                let new_values_with_signals: Vec<_> = values.into_iter().enumerate().map(|(i, value)| {
                                     let key = new_key_helper(&mut state);
                                     state.ordered_keys.push(key);
                                     state.key_to_index.insert(key, i);
@@ -2190,7 +2207,7 @@ pub trait SignalVecExt: SignalVec {
                 }
             );
             let handle = self
-                .for_each::<Vec<VecDiff<(super::signal::Source<Option<usize>>, Self::Item)>>, _, _, _>(processor_logic)
+                .for_each::<Vec<VecDiff<(BoxedSignal<Option<usize>>, Self::Item)>>, _, _, _>(processor_logic)
                 .register(world);
             processor_entity_handle.set(**handle);
             world.entity_mut(**handle).insert(EnumerateState::default());
@@ -2222,7 +2239,7 @@ pub trait SignalVecExt: SignalVec {
     fn to_signal(self) -> ToSignal<Self>
     where
         Self: Sized,
-        Self::Item: Clone + Send + 'static,
+        Self::Item: Clone + Send + Sync + 'static,
     {
         let signal = self.for_each(|In(diffs), mut values: Local<Vec<Self::Item>>| {
             for diff in diffs {
@@ -2279,7 +2296,7 @@ pub trait SignalVecExt: SignalVec {
     fn is_empty(self) -> IsEmpty<Self>
     where
         Self: Sized,
-        Self::Item: Clone + Send + 'static,
+        Self::Item: Clone + Send + Sync + 'static,
     {
         IsEmpty {
             signal: self.to_signal().map(|In(v): In<Vec<Self::Item>>| v.is_empty()),
@@ -2304,7 +2321,7 @@ pub trait SignalVecExt: SignalVec {
     fn len(self) -> Len<Self>
     where
         Self: Sized,
-        Self::Item: Clone + Send + 'static,
+        Self::Item: Clone + Send + Sync + 'static,
     {
         Len {
             signal: self.to_signal().map(|In(v): In<Vec<Self::Item>>| v.len()),
@@ -2329,7 +2346,7 @@ pub trait SignalVecExt: SignalVec {
     fn sum(self) -> Sum<Self>
     where
         Self: Sized,
-        Self::Item: for<'a> core::iter::Sum<&'a Self::Item> + Clone + Send + 'static,
+        Self::Item: for<'a> core::iter::Sum<&'a Self::Item> + Clone + Send + Sync + 'static,
     {
         Sum {
             signal: self
@@ -2364,13 +2381,23 @@ pub trait SignalVecExt: SignalVec {
     where
         S: SignalVec<Item = Self::Item>,
         Self: Sized,
-        Self::Item: SSs + Clone,
+        Self::Item: Send + Sync + 'static + Clone,
     {
         let left_wrapper = self.for_each(|In(diffs)| LrDiff::Left(diffs));
         let right_wrapper = other.for_each(|In(diffs)| LrDiff::Right(diffs));
         let signal = lazy_signal_from_system::<_, Vec<VecDiff<Self::Item>>, _, _, _>(
-            move |In(lr_diff): In<LrDiff<Self::Item>>, mut left_len: Local<usize>, mut right_len: Local<usize>| {
-                let mut out_diffs = Vec::new();
+            move |In(lr_diff): In<LrDiff<Self::Item>>,
+                  mut left_len: Local<usize>,
+                  mut right_len: Local<usize>,
+                  mut accumulated: Local<Vec<VecDiff<Self::Item>>>,
+                  mut last_frame: Local<u32>,
+                  frame: Res<bevy_diagnostic::FrameCount>| {
+                // Clear accumulator at start of new frame
+                if *last_frame != frame.0 {
+                    accumulated.clear();
+                    *last_frame = frame.0;
+                }
+
                 let (is_left, diffs) = match lr_diff {
                     LrDiff::Left(diffs) => (true, diffs),
                     LrDiff::Right(diffs) => (false, diffs),
@@ -2382,55 +2409,55 @@ pub trait SignalVecExt: SignalVec {
                                 let removing = *left_len;
                                 *left_len = values.len();
                                 if *right_len == 0 {
-                                    out_diffs.push(VecDiff::Replace { values });
+                                    accumulated.push(VecDiff::Replace { values });
                                 } else {
                                     for i in (0..removing).rev() {
-                                        out_diffs.push(VecDiff::RemoveAt { index: i });
+                                        accumulated.push(VecDiff::RemoveAt { index: i });
                                     }
                                     for (i, value) in values.into_iter().enumerate() {
-                                        out_diffs.push(VecDiff::InsertAt { index: i, value });
+                                        accumulated.push(VecDiff::InsertAt { index: i, value });
                                     }
                                 }
                             }
                             VecDiff::InsertAt { index, value } => {
                                 *left_len += 1;
-                                out_diffs.push(VecDiff::InsertAt { index, value });
+                                accumulated.push(VecDiff::InsertAt { index, value });
                             }
                             VecDiff::UpdateAt { index, value } => {
-                                out_diffs.push(VecDiff::UpdateAt { index, value });
+                                accumulated.push(VecDiff::UpdateAt { index, value });
                             }
                             VecDiff::Move { old_index, new_index } => {
-                                out_diffs.push(VecDiff::Move { old_index, new_index });
+                                accumulated.push(VecDiff::Move { old_index, new_index });
                             }
                             VecDiff::RemoveAt { index } => {
                                 *left_len -= 1;
-                                out_diffs.push(VecDiff::RemoveAt { index });
+                                accumulated.push(VecDiff::RemoveAt { index });
                             }
                             VecDiff::Push { value } => {
                                 let index = *left_len;
                                 *left_len += 1;
                                 if *right_len == 0 {
-                                    out_diffs.push(VecDiff::Push { value });
+                                    accumulated.push(VecDiff::Push { value });
                                 } else {
-                                    out_diffs.push(VecDiff::InsertAt { index, value });
+                                    accumulated.push(VecDiff::InsertAt { index, value });
                                 }
                             }
                             VecDiff::Pop => {
                                 *left_len -= 1;
                                 if *right_len == 0 {
-                                    out_diffs.push(VecDiff::Pop);
+                                    accumulated.push(VecDiff::Pop);
                                 } else {
-                                    out_diffs.push(VecDiff::RemoveAt { index: *left_len });
+                                    accumulated.push(VecDiff::RemoveAt { index: *left_len });
                                 }
                             }
                             VecDiff::Clear => {
                                 let removing = *left_len;
                                 *left_len = 0;
                                 if *right_len == 0 {
-                                    out_diffs.push(VecDiff::Clear);
+                                    accumulated.push(VecDiff::Clear);
                                 } else {
                                     for i in (0..removing).rev() {
-                                        out_diffs.push(VecDiff::RemoveAt { index: i });
+                                        accumulated.push(VecDiff::RemoveAt { index: i });
                                     }
                                 }
                             }
@@ -2442,66 +2469,71 @@ pub trait SignalVecExt: SignalVec {
                                 let removing = *right_len;
                                 *right_len = values.len();
                                 if *left_len == 0 {
-                                    out_diffs.push(VecDiff::Replace { values });
+                                    accumulated.push(VecDiff::Replace { values });
                                 } else {
                                     for _ in 0..removing {
-                                        out_diffs.push(VecDiff::Pop);
+                                        accumulated.push(VecDiff::Pop);
                                     }
                                     for value in values {
-                                        out_diffs.push(VecDiff::Push { value });
+                                        accumulated.push(VecDiff::Push { value });
                                     }
                                 }
                             }
                             VecDiff::InsertAt { index, value } => {
                                 *right_len += 1;
-                                out_diffs.push(VecDiff::InsertAt {
+                                accumulated.push(VecDiff::InsertAt {
                                     index: index + *left_len,
                                     value,
                                 });
                             }
                             VecDiff::UpdateAt { index, value } => {
-                                out_diffs.push(VecDiff::UpdateAt {
+                                accumulated.push(VecDiff::UpdateAt {
                                     index: index + *left_len,
                                     value,
                                 });
                             }
                             VecDiff::Move { old_index, new_index } => {
-                                out_diffs.push(VecDiff::Move {
+                                accumulated.push(VecDiff::Move {
                                     old_index: old_index + *left_len,
                                     new_index: new_index + *left_len,
                                 });
                             }
                             VecDiff::RemoveAt { index } => {
                                 *right_len -= 1;
-                                out_diffs.push(VecDiff::RemoveAt {
+                                accumulated.push(VecDiff::RemoveAt {
                                     index: index + *left_len,
                                 });
                             }
                             VecDiff::Push { value } => {
                                 *right_len += 1;
-                                out_diffs.push(VecDiff::Push { value });
+                                accumulated.push(VecDiff::Push { value });
                             }
                             VecDiff::Pop => {
                                 *right_len -= 1;
-                                out_diffs.push(VecDiff::Pop);
+                                accumulated.push(VecDiff::Pop);
                             }
                             VecDiff::Clear => {
                                 let removing = *right_len;
                                 *right_len = 0;
                                 if *left_len == 0 {
-                                    out_diffs.push(VecDiff::Clear);
+                                    accumulated.push(VecDiff::Clear);
                                 } else {
                                     for _ in 0..removing {
-                                        out_diffs.push(VecDiff::Pop);
+                                        accumulated.push(VecDiff::Pop);
                                     }
                                 }
                             }
                         }
                     }
                 }
-                if out_diffs.is_empty() { None } else { Some(out_diffs) }
+                if accumulated.is_empty() {
+                    None
+                } else {
+                    Some(accumulated.clone())
+                }
             },
         );
+
         Chain {
             left_wrapper,
             right_wrapper,
@@ -2527,7 +2559,7 @@ pub trait SignalVecExt: SignalVec {
     fn intersperse(self, separator: Self::Item) -> Intersperse<Self>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
     {
         let signal = self.for_each(
             move |In(diffs): In<Vec<VecDiff<Self::Item>>>, mut local_values: Local<Vec<Self::Item>>| {
@@ -2656,16 +2688,16 @@ pub trait SignalVecExt: SignalVec {
     /// ```
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
-    /// use jonmo::signal::{Dedupe, Source};
+    /// use jonmo::signal::BoxedSignal;
     ///
     /// let mut world = World::new();
-    /// MutableVec::builder().values([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<Source<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
+    /// MutableVec::builder().values([1, 2, 3]).spawn(&mut world).signal_vec().intersperse_with(|_: In<BoxedSignal<Option<usize>>>| 0); // outputs `SignalVec -> [1, 0, 2, 0, 3]`
     /// ```
     fn intersperse_with<F, M>(self, separator_system: F) -> IntersperseWith<Self>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
-        F: IntoSystem<In<super::signal::Source<Option<usize>>>, Self::Item, M> + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<BoxedSignal<Option<usize>>>, Self::Item, M> + Send + Sync + 'static,
     {
         #[derive(Component)]
         struct IntersperseState<T> {
@@ -2713,7 +2745,7 @@ pub trait SignalVecExt: SignalVec {
                             )
                         }
                     ),
-                )
+                ).boxed_clone()
             });
 
             // 4. Define the main processor logic that handles incoming diffs.
@@ -2989,8 +3021,8 @@ pub trait SignalVecExt: SignalVec {
     fn sort_by<F, M>(self, compare_system: F) -> SortBy<Self>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
-        F: IntoSystem<In<(Self::Item, Self::Item)>, Ordering, M> + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<(Self::Item, Self::Item)>, Ordering, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let compare_system_id = world.register_system(compare_system);
@@ -3009,7 +3041,7 @@ pub trait SignalVecExt: SignalVec {
                 }
             }
 
-            fn search<T: Clone + SSs>(
+            fn search<T: Clone + Send + Sync + 'static>(
                 world: &mut World,
                 system_id: SystemId<In<(T, T)>, Ordering>,
                 state: &SortState<T>,
@@ -3176,7 +3208,7 @@ pub trait SignalVecExt: SignalVec {
     fn sort_by_cmp(self) -> SortBy<Self>
     where
         Self: Sized,
-        Self::Item: Ord + Clone + SSs,
+        Self::Item: Ord + Clone + Send + Sync + 'static,
     {
         self.sort_by(|In((left, right)): In<(Self::Item, Self::Item)>| left.cmp(&right))
     }
@@ -3201,9 +3233,9 @@ pub trait SignalVecExt: SignalVec {
     fn sort_by_key<K, F, M>(self, system: F) -> SortByKey<Self>
     where
         Self: Sized,
-        Self::Item: Clone + SSs,
-        K: Ord + Clone + SSs,
-        F: IntoSystem<In<Self::Item>, K, M> + SSs,
+        Self::Item: Clone + Send + Sync + 'static,
+        K: Ord + Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Item>, K, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let key_system_id = world.register_system(system);
@@ -3399,7 +3431,7 @@ pub trait SignalVecExt: SignalVec {
     where
         Self: Sized,
         Self::Item: SignalVec + 'static + Clone,
-        <Self::Item as SignalVec>::Item: Clone + SSs,
+        <Self::Item as SignalVec>::Item: Clone + Send + Sync + 'static,
     {
         type InnerItem<U> = <<U as SignalVec>::Item as SignalVec>::Item;
 
@@ -3460,7 +3492,7 @@ pub trait SignalVecExt: SignalVec {
             /// flattened output. Returns (processor handle, replay triggers to call
             /// later). NOTE: The caller should add the entry to FlattenState.items and
             /// THEN call trigger_replays.
-            fn create_inner_processor<O: Clone + SSs>(
+            fn create_inner_processor<O: Clone + Send + Sync + 'static>(
                 world: &mut World,
                 output_signal: SignalSystem,
                 index: usize,
@@ -3563,7 +3595,7 @@ pub trait SignalVecExt: SignalVec {
                             .unwrap()
                             .0
                             .extend(out_diffs);
-                        process_signals(world, [output_signal], Box::new(()));
+                        trigger_signal_subgraph(world, [output_signal], Box::new(()));
                     }
                 });
 
@@ -3824,7 +3856,7 @@ pub trait SignalVecExt: SignalVec {
                         .unwrap()
                         .0
                         .extend(out_diffs);
-                    process_signals(world, [output_signal], Box::new(()));
+                    trigger_signal_subgraph(world, [output_signal], Box::new(()));
                 }
             });
 
@@ -3870,7 +3902,7 @@ pub trait SignalVecExt: SignalVec {
     fn debug(self) -> Debug<Self>
     where
         Self: Sized,
-        Self::Item: fmt::Debug + Clone + 'static,
+        Self::Item: fmt::Debug + Clone + Send + Sync + 'static,
     {
         let location = core::panic::Location::caller();
         Debug {
@@ -3952,6 +3984,22 @@ pub trait SignalVecExt: SignalVec {
         Box::new(self)
     }
 
+    /// Assign a schedule to this signal vec chain, see [`SignalExt::schedule`].
+    fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> ScheduledVec<Sched, Self::Item>
+    where
+        Self: Sized + 'static,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let handle = self.register_signal_vec(world);
+            apply_schedule_to_signal(world, *handle, Sched::default().intern());
+            *handle
+        });
+        ScheduledVec {
+            signal,
+            _marker: PhantomData,
+        }
+    }
+
     /// Activate this [`SignalVec`] and all its upstreams, causing them to be evaluated every frame
     /// until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
     fn register(self, world: &mut World) -> SignalHandle
@@ -3963,6 +4011,30 @@ pub trait SignalVecExt: SignalVec {
 }
 
 impl<T: ?Sized> SignalVecExt for T where T: SignalVec {}
+
+/// Signal vec node wrapper that assigns a schedule to a signal chain, see
+/// [`.schedule`](SignalVecExt::schedule).
+pub struct ScheduledVec<Sched, I> {
+    signal: LazySignal,
+    _marker: PhantomData<fn() -> (Sched, I)>,
+}
+
+impl<Sched, I> Clone for ScheduledVec<Sched, I> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Sched: 'static, I: Send + Sync + 'static> SignalVec for ScheduledVec<Sched, I> {
+    type Item = I;
+
+    fn register_boxed_signal_vec(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
 
 /// Provides immutable access to the underlying [`Vec`].
 pub struct MutableVecReadGuard<'s, T> {
@@ -4131,7 +4203,7 @@ impl<T> Drop for MutableVec<T> {
 }
 
 impl<T> MutableVec<T> {
-    /// Creates a [`Builder`] for constructing a [`MutableVec`].
+    /// Creates a [`MutableVecBuilder`] for constructing a [`MutableVec`].
     ///
     /// # Example
     ///
@@ -4149,15 +4221,15 @@ impl<T> MutableVec<T> {
     ///     .with_values(|v| v.extend(0..10))
     ///     .spawn(&mut world);
     /// ```
-    pub fn builder() -> Builder<T> {
-        Builder::new()
+    pub fn builder() -> MutableVecBuilder<T> {
+        MutableVecBuilder::new()
     }
 
     /// Provides read-only access to the underlying [`Vec`] via either a `&World` or a
     /// `&Query<MutableVecData<T>>`.
     pub fn read<'s>(&self, mutable_vec_data_reader: impl ReadMutableVecData<'s, T>) -> MutableVecReadGuard<'s, T>
     where
-        T: SSs,
+        T: Send + Sync + 'static,
     {
         MutableVecReadGuard {
             guard: mutable_vec_data_reader.read(self.entity),
@@ -4167,7 +4239,7 @@ impl<T> MutableVec<T> {
     /// `&mut Query<&mut MutableVecData<T>>`.
     pub fn write<'w>(&self, mutable_vec_data_writer: impl WriteMutableVecData<'w, T>) -> MutableVecWriteGuard<'w, T>
     where
-        T: SSs,
+        T: Send + Sync + 'static,
     {
         MutableVecWriteGuard {
             guard: mutable_vec_data_writer.write(self.entity),
@@ -4177,7 +4249,7 @@ impl<T> MutableVec<T> {
     /// Returns a [`Source`] signal from this [`MutableVec`].
     pub fn signal_vec(&self) -> Source<T>
     where
-        T: Clone + SSs,
+        T: Clone + Send + Sync + 'static,
     {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableVecData<T>>(self_.entity).unwrap().broadcaster.clone().register(world);
@@ -4209,7 +4281,7 @@ impl<T> MutableVec<T> {
             replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
-                process_signals(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
+                trigger_signal_subgraph(world, [replay_signal], Box::new(Vec::<VecDiff<T>>::new()));
             });
 
             world.entity_mut(*replay_signal).insert((VecReplayTrigger(trigger), ReplayOnce));
@@ -4234,7 +4306,7 @@ pub(crate) fn despawn_stale_mutable_vecs(world: &mut World) {
 
 fn new_mutable_vec_data<T>(values: Vec<T>) -> (MutableVecData<T>, LazyEntity)
 where
-    T: Clone + SSs,
+    T: Clone + Send + Sync + 'static,
 {
     let data_entity = LazyEntity::new();
     let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
@@ -4261,7 +4333,7 @@ where
 
 impl<T> From<&mut World> for MutableVec<T>
 where
-    T: Clone + SSs,
+    T: Clone + Send + Sync + 'static,
 {
     fn from(world: &mut World) -> Self {
         let (data, data_entity) = new_mutable_vec_data::<T>(Vec::new());
@@ -4277,7 +4349,7 @@ where
 
 impl<T> FromWorld for MutableVec<T>
 where
-    T: Clone + SSs,
+    T: Clone + Send + Sync + 'static,
 {
     fn from_world(world: &mut World) -> Self {
         world.into()
@@ -4295,15 +4367,15 @@ where
 /// let mut world = World::new();
 /// let vec = MutableVec::builder().values([1, 2, 3]).spawn(&mut world);
 /// ```
-pub struct Builder<T>(Vec<T>);
+pub struct MutableVecBuilder<T>(Vec<T>);
 
-impl<T> Default for Builder<T> {
+impl<T> Default for MutableVecBuilder<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Builder<T> {
+impl<T> MutableVecBuilder<T> {
     /// Creates a new empty builder.
     pub fn new() -> Self {
         Self(Vec::new())
@@ -4347,7 +4419,7 @@ impl<T> Builder<T> {
     }
 }
 
-impl<T, A> From<A> for Builder<T>
+impl<T, A> From<A> for MutableVecBuilder<T>
 where
     Vec<T>: From<A>,
 {
@@ -4356,7 +4428,7 @@ where
     }
 }
 
-impl<T: SSs + Clone> Builder<T> {
+impl<T: Send + Sync + 'static + Clone> MutableVecBuilder<T> {
     /// Spawns a [`MutableVec`] using a `&mut World`.
     pub fn spawn(self, world: &mut World) -> MutableVec<T> {
         let (data, data_entity) = new_mutable_vec_data::<T>(self.0);
@@ -4384,7 +4456,7 @@ impl<T: SSs + Clone> Builder<T> {
 
 impl<T> From<&mut Commands<'_, '_>> for MutableVec<T>
 where
-    T: Clone + SSs,
+    T: Clone + Send + Sync + 'static,
 {
     fn from(commands: &mut Commands) -> Self {
         let (data, data_entity) = new_mutable_vec_data::<T>(Vec::new());
@@ -4460,7 +4532,7 @@ where
 
 impl<'s, T> ReadMutableVecData<'s, T> for &'s Query<'_, 's, &MutableVecData<T>>
 where
-    T: SSs,
+    T: Send + Sync + 'static,
 {
     fn read(self, entity: Entity) -> &'s MutableVecData<T> {
         self.get(entity).unwrap()
@@ -4469,7 +4541,7 @@ where
 
 impl<'s, T> ReadMutableVecData<'s, T> for &'s World
 where
-    T: SSs,
+    T: Send + Sync + 'static,
 {
     fn read(self, entity: Entity) -> &'s MutableVecData<T> {
         self.get(entity).unwrap()
@@ -4487,7 +4559,7 @@ where
 
 impl<'a, 'w, 's, T> WriteMutableVecData<'a, T> for &'a mut Query<'w, 's, &mut MutableVecData<T>>
 where
-    T: SSs,
+    T: Send + Sync + 'static,
 {
     fn write(self, entity: Entity) -> Mut<'a, MutableVecData<T>> {
         self.get_mut(entity).unwrap()
@@ -4496,7 +4568,7 @@ where
 
 impl<'w, T> WriteMutableVecData<'w, T> for &'w mut World
 where
-    T: SSs,
+    T: Send + Sync + 'static,
 {
     fn write(self, entity: Entity) -> Mut<'w, MutableVecData<T>> {
         self.get_mut(entity).unwrap()
@@ -4524,7 +4596,7 @@ pub(crate) mod tests {
     // Helper system to capture signal_vec output
     fn capture_signal_vec_output<T>(In(diffs): In<Vec<VecDiff<T>>>, mut output: ResMut<SignalVecOutput<T>>)
     where
-        T: SSs + Clone + fmt::Debug,
+        T: Send + Sync + 'static + Clone + fmt::Debug,
     {
         #[cfg(feature = "tracing")]
         bevy_log::debug!(
@@ -4536,14 +4608,14 @@ pub(crate) mod tests {
     }
 
     // Helper to make assertions cleaner
-    fn get_and_clear_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
+    fn get_and_clear_output<T: Send + Sync + 'static + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
         let output = world.resource::<SignalVecOutput<T>>().0.clone();
         world.resource_mut::<SignalVecOutput<T>>().0.clear();
         output
     }
 
     // Add this PartialEq implementation for easier testing
-    impl<T: SSs + PartialEq + fmt::Debug> PartialEq for VecDiff<T> {
+    impl<T: Send + Sync + 'static + PartialEq + fmt::Debug> PartialEq for VecDiff<T> {
         fn eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (Self::Replace { values: l_values }, Self::Replace { values: r_values }) => l_values == r_values,
@@ -4594,16 +4666,16 @@ pub(crate) mod tests {
     }
 
     #[derive(Resource, Default, Debug)]
-    struct FinalSignalOutput<T: SSs + Clone + fmt::Debug>(Option<T>);
+    struct FinalSignalOutput<T: Send + Sync + 'static + Clone + fmt::Debug>(Option<T>);
 
     fn capture_final_output<T>(In(value): In<T>, mut output: ResMut<FinalSignalOutput<T>>)
     where
-        T: SSs + Clone + fmt::Debug,
+        T: Send + Sync + 'static + Clone + fmt::Debug,
     {
         output.0 = Some(value);
     }
 
-    fn get_and_clear_final_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Option<T> {
+    fn get_and_clear_final_output<T: Send + Sync + 'static + Clone + fmt::Debug>(world: &mut World) -> Option<T> {
         world
             .get_resource_mut::<FinalSignalOutput<T>>()
             .and_then(|mut res| res.0.take())
@@ -7043,7 +7115,7 @@ pub(crate) mod tests {
     enum ItemOrSep {
         Item(u32),
         // The separator variant holds the *unregistered* index signal.
-        Sep(crate::signal::Source<Option<usize>>),
+        Sep(crate::signal::BoxedSignal<Option<usize>>),
     }
 
     impl Clone for ItemOrSep {
@@ -7110,11 +7182,7 @@ pub(crate) mod tests {
 
             let source_vec = MutableVec::builder().values([10u32, 20, 30]).spawn(app.world_mut());
 
-            // CORRECTION: The closure's input parameter must be the concrete type
-            // `signal::Source<Option<usize>>`, not a generic `impl Signal`. This satisfies
-            // the `IntoSystem` trait bound.
-            let separator_factory =
-                |In(index_signal): In<crate::signal::Source<Option<usize>>>| ItemOrSep::Sep(index_signal);
+            let separator_factory = |In(index_signal): In<BoxedSignal<Option<usize>>>| ItemOrSep::Sep(index_signal);
 
             let interspersed_signal = source_vec
                 .signal_vec()
@@ -7132,9 +7200,7 @@ pub(crate) mod tests {
             app.update();
             apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
 
-            // CORRECTION: Use the correct `signal::Source` for the placeholder.
-            // We also need to provide the type hint for the closure to resolve ambiguity.
-            let placeholder_sep = ItemOrSep::Sep(signal::from_system(|_: In<()>| None::<usize>));
+            let placeholder_sep = ItemOrSep::Sep(signal::from_system(|_: In<()>| None::<usize>).boxed_clone());
             assert_eq!(
                 current_state,
                 vec![
@@ -7600,8 +7666,7 @@ pub(crate) mod tests {
             // --- 1. Setup ---
             let mut app = create_test_app();
 
-            use crate::signal::Source;
-            type EnumeratedItem = (Source<Option<usize>>, i32);
+            type EnumeratedItem = (BoxedSignal<Option<usize>>, i32);
 
             #[derive(Resource, Default)]
             struct EnumOutput(Vec<VecDiff<EnumeratedItem>>);
@@ -7627,11 +7692,11 @@ pub(crate) mod tests {
             };
 
             // Track all items with their index signals throughout the test
-            let mut tracked_items: Vec<(Source<Option<usize>>, i32)>;
+            let mut tracked_items: Vec<(BoxedSignal<Option<usize>>, i32)>;
 
             // Helper to verify index signals match their positions
             let verify_indices =
-                |world: &mut World, items: &[(Source<Option<usize>>, i32)], expected: &[(usize, i32)]| {
+                |world: &mut World, items: &[(BoxedSignal<Option<usize>>, i32)], expected: &[(usize, i32)]| {
                     assert_eq!(items.len(), expected.len(), "Item count mismatch");
                     for (i, ((index_signal, value), (expected_index, expected_value))) in
                         items.iter().zip(expected.iter()).enumerate()

@@ -4,7 +4,7 @@ use super::{
     signal::{Signal, SignalExt},
     signal_map::{SignalMap, SignalMapExt},
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
-    utils::{LazyEntity, SSs},
+    utils::LazyEntity,
 };
 use bevy_ecs::{
     component::Mutable,
@@ -73,7 +73,14 @@ impl Clone for Builder {
             core::panic::Location::caller()
         );
         if cfg!(debug_assertions) {
-            panic!("{}", msg);
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "std")] {
+                    let backtrace = std::backtrace::Backtrace::force_capture();
+                    panic!("{}\nBacktrace:\n{}", msg, backtrace);
+                } else {
+                    panic!("{}", msg);
+                }
+            }
         }
         #[cfg(feature = "tracing")]
         bevy_log::error!("{}", msg);
@@ -109,7 +116,7 @@ impl Builder {
     }
 
     /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
-    pub fn on_spawn(mut self, on_spawn: impl FnOnce(&mut World, Entity) + SSs) -> Self {
+    pub fn on_spawn(mut self, on_spawn: impl FnOnce(&mut World, Entity) + Send + Sync + 'static) -> Self {
         self.on_spawns.push(Box::new(on_spawn));
         self
     }
@@ -117,7 +124,7 @@ impl Builder {
     /// Run a [`System`] which takes [`In`] this builder's [`Entity`].
     pub fn on_spawn_with_system<T, M>(self, system: T) -> Self
     where
-        T: IntoSystem<In<Entity>, (), M> + SSs,
+        T: IntoSystem<In<Entity>, (), M> + Send + Sync + 'static,
     {
         self.on_spawn(|world, entity| {
             #[allow(unused_variables)]
@@ -157,7 +164,7 @@ impl Builder {
     ///
     /// jonmo::Builder::new().hold_tasks([my_signal_task, my_signal_vec_task]);
     /// ```
-    pub fn hold_tasks(self, tasks: impl IntoIterator<Item = Box<dyn SignalTask>> + SSs) -> Self {
+    pub fn hold_tasks(self, tasks: impl IntoIterator<Item = Box<dyn SignalTask>> + Send + Sync + 'static) -> Self {
         self.on_spawn(move |world, entity| {
             let handles: Vec<_> = tasks.into_iter().map(|task| task.register_task(world)).collect();
             add_handles(world, entity, handles);
@@ -165,7 +172,7 @@ impl Builder {
     }
 
     /// Run a function with this builder's [`EntityWorldMut`].
-    pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + SSs) -> Self {
+    pub fn with_entity(self, f: impl FnOnce(EntityWorldMut) + Send + Sync + 'static) -> Self {
         self.on_spawn(move |world, entity| {
             f(world.entity_mut(entity));
         })
@@ -180,7 +187,10 @@ impl Builder {
 
     /// Run a function with mutable access (via [`Mut`]) to this builder's `C` [`Component`] if it
     /// exists.
-    pub fn with_component<C: Component<Mutability = Mutable>>(self, f: impl FnOnce(Mut<C>) + SSs) -> Self {
+    pub fn with_component<C: Component<Mutability = Mutable>>(
+        self,
+        f: impl FnOnce(Mut<C>) + Send + Sync + 'static,
+    ) -> Self {
         self.with_entity(|mut entity| {
             if let Some(component) = entity.get_mut::<C>() {
                 f(component);
@@ -223,9 +233,9 @@ impl Builder {
     /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn on_signal<I, S, F, M>(self, signal: S, system: F) -> Self
     where
-        I: Clone + 'static,
-        S: Signal<Item = I> + SSs,
-        F: IntoSystem<In<(Entity, I)>, (), M> + SSs,
+        I: Clone + Send + Sync + 'static,
+        S: Signal<Item = I> + Send + Sync + 'static,
+        F: IntoSystem<In<(Entity, I)>, (), M> + Send + Sync + 'static,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle =
@@ -241,9 +251,9 @@ impl Builder {
     /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn on_signal_with_entity<I, S, F>(self, signal: S, mut f: F) -> Self
     where
-        I: Clone + 'static,
-        S: Signal<Item = I> + SSs,
-        F: FnMut(EntityWorldMut, I) + SSs,
+        I: Clone + Send + Sync + 'static,
+        S: Signal<Item = I> + Send + Sync + 'static,
+        F: FnMut(EntityWorldMut, I) + Send + Sync + 'static,
     {
         self.on_signal(signal, move |In((entity, value)), world: &mut World| {
             f(world.entity_mut(entity), value)
@@ -254,12 +264,14 @@ impl Builder {
     /// `C` [`Component`] if it exists and the output of a [`Signal`].
     ///
     /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
-    pub fn on_signal_with_component<C, I, S, F>(self, signal: S, mut f: F) -> Self
+    pub fn on_signal_with_component<I, C>(
+        self,
+        signal: impl Signal<Item = I>,
+        mut f: impl FnMut(Mut<C>, I) + Send + Sync + 'static,
+    ) -> Self
     where
         C: Component<Mutability = Mutable>,
         I: Clone + 'static,
-        S: Signal<Item = I> + SSs,
-        F: FnMut(Mut<C>, I) + SSs,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
             let handle = Signal::register_signal(
@@ -277,10 +289,9 @@ impl Builder {
 
     /// Reactively set this builder's [`Entity`]'s `C` [`Component`] with a [`Signal`] that outputs
     /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
-    pub fn component_signal<C, S>(self, signal: S) -> Self
+    pub fn component_signal<C>(self, signal: impl Signal<Item = Option<C>>) -> Self
     where
         C: Component + Clone,
-        S: Signal<Item = Option<C>> + SSs,
     {
         self.on_signal(
             signal,
@@ -491,7 +502,8 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// Returns an error if the entity does not exist in the world.
+    /// Returns [`EntityMutableFetchError::EntityDoesNotExist`] if the entity does not exist in the
+    /// world.
     pub fn spawn_on_entity(self, world: &mut World, entity: Entity) -> Result<(), EntityMutableFetchError> {
         let mut entity_mut = world.get_entity_mut(entity)?;
         let id = entity_mut.id();
@@ -524,14 +536,14 @@ pub trait SignalTask: Send + Sync + 'static {
 
 struct SignalTaskSignal<S>(S);
 
-impl<S: Signal + SSs> SignalTask for SignalTaskSignal<S> {
+impl<S: Signal + Send + Sync + 'static> SignalTask for SignalTaskSignal<S> {
     fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
 /// Extension trait for converting a [`Signal`] into a [`SignalTask`].
-pub trait SignalTaskExt: Signal + Sized + SSs {
+pub trait SignalTaskExt: Signal + Sized + Send + Sync + 'static {
     /// Convert this signal into a type-erased [`SignalTask`] for use with
     /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
@@ -539,18 +551,18 @@ pub trait SignalTaskExt: Signal + Sized + SSs {
     }
 }
 
-impl<S: Signal + Sized + SSs> SignalTaskExt for S {}
+impl<S: Signal + Sized + Send + Sync + 'static> SignalTaskExt for S {}
 
 struct SignalTaskSignalVec<S>(S);
 
-impl<S: SignalVec + SSs> SignalTask for SignalTaskSignalVec<S> {
+impl<S: SignalVec + Send + Sync + 'static> SignalTask for SignalTaskSignalVec<S> {
     fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
 /// Extension trait for converting a [`SignalVec`] into a [`SignalTask`].
-pub trait SignalVecTaskExt: SignalVec + Sized + SSs {
+pub trait SignalVecTaskExt: SignalVec + Sized + Send + Sync + 'static {
     /// Convert this signal vec into a type-erased [`SignalTask`] for use with
     /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
@@ -558,18 +570,18 @@ pub trait SignalVecTaskExt: SignalVec + Sized + SSs {
     }
 }
 
-impl<S: SignalVec + Sized + SSs> SignalVecTaskExt for S {}
+impl<S: SignalVec + Sized + Send + Sync + 'static> SignalVecTaskExt for S {}
 
 struct SignalTaskSignalMap<S>(S);
 
-impl<S: SignalMap + SSs> SignalTask for SignalTaskSignalMap<S> {
+impl<S: SignalMap + Send + Sync + 'static> SignalTask for SignalTaskSignalMap<S> {
     fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
         self.0.register(world)
     }
 }
 
 /// Extension trait for converting a [`SignalMap`] into a [`SignalTask`].
-pub trait SignalMapTaskExt: SignalMap + Sized + SSs {
+pub trait SignalMapTaskExt: SignalMap + Sized + Send + Sync + 'static {
     /// Convert this signal map into a type-erased [`SignalTask`] for use with
     /// [`Builder::hold_tasks`].
     fn task(self) -> Box<dyn SignalTask> {
@@ -577,7 +589,7 @@ pub trait SignalMapTaskExt: SignalMap + Sized + SSs {
     }
 }
 
-impl<S: SignalMap + Sized + SSs> SignalMapTaskExt for S {}
+impl<S: SignalMap + Sized + Send + Sync + 'static> SignalMapTaskExt for S {}
 
 fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
     let entity = ctx.entity;

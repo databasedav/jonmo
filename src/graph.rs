@@ -1,12 +1,74 @@
 //! Signal graph management and runtime.
-use super::utils::SSs;
+//!
+//! This module contains the core infrastructure for [jonmo](crate)'s reactive signal graph,
+//! including graph topology tracking, signal registration, multi-schedule processing, and
+//! the per-frame processing loop.
+//!
+//! # Graph Structure
+//!
+//! The signal graph is a directed acyclic graph (DAG) where each node is backed by a Bevy
+//! [`System`]. Edges represent data dependencies: when an upstream signal produces output, that
+//! output becomes the input to its downstream signals. Cycles are detected and rejected at
+//! edge-creation time.
+//!
+//! # Multi-Schedule Processing
+//!
+//! Signals can be assigned to run in different Bevy schedules (e.g., `Update`, `PostUpdate`)
+//! using [`SignalExt::schedule`](super::signal::SignalExt::schedule). This enables fine-grained
+//! control over when signals execute within each frame.
+//!
+//! - **Schedule assignment**: Each signal can be assigned to a specific schedule. Unassigned
+//!   signals inherit the schedule from upstream signals or default to the
+//!   [`JonmoPlugin`](crate::JonmoPlugin)'s default schedule, see
+//!   [`SignalExt::schedule`](super::signal::SignalExt::schedule) for the exact semantics.
+//! - **Cross-schedule data flow**: Signals in different schedules can still be connected. Outputs
+//!   from earlier schedules are available as inputs to signals in later schedules.
+//! - **Per-schedule graph partitioning**: The graph is partitioned by schedule, with each schedule
+//!   processing only its assigned signals in topological order.
+//!
+//! # Processing Semantics
+//!
+//! Each frame, within each configured schedule, signals are processed in topological order:
+//!
+//! 1. **Level assignment**: Each signal is assigned a level equal to 1 + the maximum level of its
+//!    upstreams (roots have level 0). This is recomputed incrementally when edges change.
+//! 2. **Level-order execution**: Signals are processed level by level, lowest first, ensuring every
+//!    signal's upstreams have already run before it executes. Within each level, signals are
+//!    processed in deterministic order (sorted by entity index) for reproducible behavior.
+//! 3. **Output forwarding**: When a signal produces [`Some`] value, that value is forwarded as
+//!    input to all downstream signals. Returning [`None`] terminates propagation for that branch.
+//! 4. **Dynamic registration**: Signals registered during processing (e.g., from UI element
+//!    spawning) are integrated and processed within the same frame, avoiding one-frame delays.
+//!
+//! A signal with multiple upstreams runs **once per upstream** that fires in a given frame. This
+//! allows a signal to act as a collection point, processing each upstream's output in turn.
+//! However, only the **final output** (from the last run) is forwarded to downstream signals,
+//! ensuring that downstreams see a single, consolidated result rather than receiving multiple
+//! inputs.
+//!
+//! # Lifecycle
+//!
+//! Signal systems are usage-tracked; each call to [`.register`](super::signal::SignalExt::register)
+//! increments a registration count on the signal and its upstreams. To release a signal,
+//! [`SignalHandle::cleanup`] must be called, either explicitly or implicitly by storing handles in
+//! a [`SignalHandles`] component (which calls cleanup when the entity is despawned). When a
+//! signal's registration count reaches zero and no downstream dependents remain, the signal's
+//! backing system is automatically despawned.
+//!
+//! # Polling
+//!
+//! In addition to the standard push-based flow, signals can be polled synchronously to retrieve
+//! their most recent output. This is useful when a system needs to read signal state on-demand
+//! rather than receiving it as pushed input.
 use alloc::collections::VecDeque;
+use bevy_app::PostUpdate;
 use bevy_derive::Deref;
 use bevy_ecs::{
     entity_disabling::Internal,
     lifecycle::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
+    schedule::{InternedScheduleLabel, ScheduleLabel},
     system::{SystemId, SystemState},
     world::DeferredWorld,
 };
@@ -54,12 +116,74 @@ impl SignalRegistrationCount {
     }
 }
 
+/// Component on signal system entities indicating which schedule they run in.
+///
+/// Used by the multi-schedule processing system to determine which signals
+/// to run during each schedule's processing pass.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct SignalScheduleTag(pub(crate) InternedScheduleLabel);
+
+/// Component for downstream schedule inheritance during registration.
+///
+/// When a signal is connected to an upstream via [`pipe_signal`], if the upstream
+/// has a `ScheduleHint`, the downstream inherits the schedule (unless it already
+/// has a [`SignalScheduleTag`]).
+#[derive(Component, Clone, Copy)]
+pub(crate) struct ScheduleHint(pub(crate) InternedScheduleLabel);
+
+/// Apply schedule tagging to a signal: tag the signal itself, propagate to unscheduled
+/// upstreams, and set hint for downstream inheritance.
+///
+/// This is the common logic used by [`SignalExt::schedule`](super::signal::SignalExt::schedule),
+/// [`SignalVecExt::schedule`](super::signal_vec::SignalVecExt::schedule), and
+/// [`SignalMapExt::schedule`](super::signal_map::SignalMapExt::schedule).
+pub(crate) fn apply_schedule_to_signal(world: &mut World, signal: SignalSystem, schedule: InternedScheduleLabel) {
+    // Directly tag caller (overwrites any inherited schedule)
+    world.entity_mut(*signal).insert(SignalScheduleTag(schedule));
+
+    // Propagate to unscheduled upstreams
+    tag_unscheduled_upstreams(world, signal, schedule);
+
+    // Set hint for downstream inheritance
+    world.entity_mut(*signal).insert(ScheduleHint(schedule));
+}
+
+/// Tags all upstream signals that don't already have a [`SignalScheduleTag`].
+///
+/// Traverses the upstream graph from `start` and applies the given `schedule` to any
+/// signal that hasn't been explicitly scheduled. This ensures that when a downstream
+/// signal is scheduled, its entire upstream chain runs in a compatible schedule.
+pub(crate) fn tag_unscheduled_upstreams(world: &mut World, start: SignalSystem, schedule: InternedScheduleLabel) {
+    let mut stack = vec![start];
+    let mut visited = HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+
+        // Tag if not already tagged
+        if world.get::<SignalScheduleTag>(*current).is_none() {
+            world.entity_mut(*current).insert(SignalScheduleTag(schedule));
+        }
+
+        // Continue to upstreams
+        if let Some(upstream) = world.get::<Upstream>(*current) {
+            for &up in upstream.iter() {
+                if !visited.contains(&up) {
+                    stack.push(up);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn register_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
     I: 'static,
-    O: Clone + 'static,
+    O: Clone + Send + Sync + 'static,
     IOO: Into<Option<O>> + 'static,
-    F: IntoSystem<In<I>, IOO, M> + SSs,
+    F: IntoSystem<In<I>, IOO, M> + Send + Sync + 'static,
 {
     lazy_signal_from_system(system).register(world)
 }
@@ -131,6 +255,17 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
     } else {
         downstream.insert(Upstream(HashSet::from([source])));
     }
+
+    // Inherit schedule from upstream if target doesn't already have one
+    if world.get::<SignalScheduleTag>(*target).is_none()
+        && let Some(hint) = world.get::<ScheduleHint>(*source).copied()
+    {
+        world
+            .entity_mut(*target)
+            .insert(SignalScheduleTag(hint.0))
+            .insert(ScheduleHint(hint.0)); // Pass it on to further downstreams
+    }
+
     world
         .resource_mut::<SignalGraphState>()
         .edge_change_seeds
@@ -160,7 +295,7 @@ where
 impl<I, O, S> Runnable for SystemHolder<I, O, S>
 where
     I: 'static,
-    O: Clone,
+    O: Clone + Send + Sync,
     S: Into<Option<O>> + 'static,
 {
     fn run(&self, world: &mut World, input: Box<dyn Any>) -> Option<Box<dyn AnyClone>> {
@@ -192,52 +327,121 @@ impl SystemRunner {
     }
 }
 
-/// An extension trait for [`Any`] types that implement [`Clone`].
-pub trait AnyClone: Any + DynClone {}
+/// An extension trait for [`Any`] types that implement [`Clone`], [`Send`], and [`Sync`].
+pub trait AnyClone: Any + DynClone + Send + Sync {}
 
 clone_trait_object!(AnyClone);
 
-impl<T: Clone + 'static> AnyClone for T {}
+impl<T: Clone + Send + Sync + 'static> AnyClone for T {}
+
+/// Component that stores pending inputs for a signal.
+///
+/// Inputs are written by upstream signals and read by the signal during processing.
+/// The buffer is cleared at the end of each frame.
+#[derive(Component, Default)]
+pub(crate) struct SignalInputBuffer(pub(crate) Vec<Box<dyn AnyClone>>);
+
+impl SignalInputBuffer {
+    /// Take all inputs, leaving the buffer empty.
+    fn take(&mut self) -> Vec<Box<dyn AnyClone>> {
+        core::mem::take(&mut self.0)
+    }
+
+    /// Push an input value.
+    fn push(&mut self, value: Box<dyn AnyClone>) {
+        self.0.push(value);
+    }
+
+    /// Clear the buffer.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Behavior when the signal registration recursion limit is exceeded.
+///
+/// During signal processing, signals can spawn new signals (e.g., UI elements registering
+/// child signals). These new signals are processed in the same frame via recursive passes.
+/// If signals keep spawning more signals indefinitely, this limit prevents infinite loops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecursionLimitBehavior {
+    /// Panic with an error message. This is the default because hitting the limit
+    /// almost always indicates a bug (infinite signal spawning loop).
+    #[default]
+    Panic,
+    /// Log a warning (if the `tracing` feature is enabled) and stop processing
+    /// new signals for this frame. The graph may be left in an incomplete state.
+    Warn,
+    /// Silently stop processing new signals. Use this only if you understand the
+    /// implications and have a specific reason to suppress the error.
+    Silent,
+}
 
 /// Tracks signal graph topology for level-based processing.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(crate) struct SignalGraphState {
     /// Cached level for each signal (max distance from any root).
     levels: HashMap<SignalSystem, u32>,
-    /// Signals grouped by level for efficient iteration.
-    by_level: Vec<Vec<SignalSystem>>,
+    /// Signals partitioned by schedule for efficient per-schedule iteration.
+    /// Updated incrementally alongside level updates.
+    by_schedule: HashMap<InternedScheduleLabel, Vec<Vec<SignalSystem>>>,
+    /// Cache of which schedule each signal belongs to, for O(1) lookup during removal.
+    signal_schedules: HashMap<SignalSystem, InternedScheduleLabel>,
     /// Signals that seed level recomputation after edge changes.
     edge_change_seeds: HashSet<SignalSystem>,
     /// Signals queued for removal while the graph is being processed.
     deferred_removals: HashSet<SignalSystem>,
     /// Whether the signal graph is currently being processed.
     is_processing: bool,
+    /// Default schedule for signals without explicit scheduling.
+    default_schedule: InternedScheduleLabel,
+    /// Maximum number of recursive signal registration passes per frame.
+    registration_recursion_limit: usize,
+    /// What to do when the recursion limit is exceeded.
+    on_recursion_limit_exceeded: RecursionLimitBehavior,
 }
 
-// Fan out a signal output to downstream input queues. When there is exactly one downstream, move
-// the value without cloning.
-fn enqueue_inputs(
-    world: &World,
-    inputs: &mut HashMap<SignalSystem, VecDeque<Box<dyn AnyClone>>>,
-    signal: SignalSystem,
-    value: Box<dyn AnyClone>,
-) {
-    let downstreams = get_downstreams(world, signal);
-    if downstreams.is_empty() {
-        return;
+/// Default recursion limit for signal registration passes.
+pub const DEFAULT_REGISTRATION_RECURSION_LIMIT: usize = 100;
+
+impl Default for SignalGraphState {
+    fn default() -> Self {
+        Self::with_options(
+            PostUpdate.intern(),
+            DEFAULT_REGISTRATION_RECURSION_LIMIT,
+            RecursionLimitBehavior::default(),
+        )
+    }
+}
+
+impl SignalGraphState {
+    /// Create a new SignalGraphState with the specified default schedule.
+    #[allow(unused)] // used in tests
+    pub(crate) fn new(default_schedule: InternedScheduleLabel) -> Self {
+        Self::with_options(
+            default_schedule,
+            DEFAULT_REGISTRATION_RECURSION_LIMIT,
+            RecursionLimitBehavior::default(),
+        )
     }
 
-    if downstreams.len() == 1 {
-        // avoid cloning if there's only a single downstream
-        inputs.entry(downstreams[0]).or_default().push_back(value);
-        return;
-    }
-
-    if let Some((last, rest)) = downstreams.split_last() {
-        for downstream in rest {
-            inputs.entry(*downstream).or_default().push_back(value.clone());
+    /// Create a new SignalGraphState with full configuration options.
+    pub(crate) fn with_options(
+        default_schedule: InternedScheduleLabel,
+        registration_recursion_limit: usize,
+        on_recursion_limit_exceeded: RecursionLimitBehavior,
+    ) -> Self {
+        Self {
+            levels: HashMap::default(),
+            by_schedule: HashMap::default(),
+            signal_schedules: HashMap::default(),
+            edge_change_seeds: HashSet::default(),
+            deferred_removals: HashSet::default(),
+            is_processing: false,
+            default_schedule,
+            registration_recursion_limit,
+            on_recursion_limit_exceeded,
         }
-        inputs.entry(*last).or_default().push_back(value);
     }
 }
 
@@ -264,48 +468,152 @@ fn insert_sorted_by_index(bucket: &mut Vec<SignalSystem>, signal: SignalSystem) 
     bucket.insert(index, signal);
 }
 
-// Computes a per-call, local topological ordering of signals reachable downstream
-// from `seeds`. This intentionally does NOT use `SignalGraphState` because it only
-// needs a lightweight traversal for the provided subset and should not mutate or
-// depend on the global cached topology.
-fn downstream_levels_from_seeds(world: &World, seeds: &[SignalSystem]) -> Vec<Vec<SignalSystem>> {
-    let mut levels: HashMap<SignalSystem, u32> = HashMap::new();
-    let mut by_level: Vec<HashSet<SignalSystem>> = Vec::new();
-    let mut queue: VecDeque<SignalSystem> = VecDeque::new();
+/// Result of computing signal levels via Kahn's algorithm.
+struct LevelComputeResult {
+    /// Computed levels for each signal in the working set.
+    levels: HashMap<SignalSystem, u32>,
+    /// Number of signals successfully processed.
+    processed: usize,
+    /// Total number of signals in the working set.
+    total: usize,
+}
 
-    for signal in seeds {
-        levels.insert(*signal, 0);
-        queue.push_back(*signal);
+impl LevelComputeResult {
+    fn is_complete(&self) -> bool {
+        self.processed == self.total
+    }
+}
+
+/// Core Kahn's algorithm for computing topological levels on a subset of signals.
+///
+/// - `signals`: the working set of signals to compute levels for
+/// - `upstream_filter`: determines which upstreams count toward in-degree (typically the working
+///   set)
+/// - `external_level`: provides levels for upstreams outside the working set
+fn compute_signal_levels(
+    world: &World,
+    signals: &HashSet<SignalSystem>,
+    upstream_filter: impl Fn(SignalSystem) -> bool,
+    external_level: impl Fn(SignalSystem) -> Option<u32>,
+) -> LevelComputeResult {
+    if signals.is_empty() {
+        return LevelComputeResult {
+            levels: HashMap::new(),
+            processed: 0,
+            total: 0,
+        };
     }
 
+    let mut in_degree: HashMap<SignalSystem, usize> = HashMap::new();
+    let mut upstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
+    let mut downstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
+
+    for &signal in signals {
+        let upstreams = get_upstreams(world, signal);
+        let local_in_degree = upstreams.iter().filter(|u| upstream_filter(**u)).count();
+        in_degree.insert(signal, local_in_degree);
+        // Build local downstreams_map by inverting upstream relationships.
+        // This ensures we only traverse to signals in our working set.
+        for &upstream in upstreams.iter().filter(|u| signals.contains(*u)) {
+            downstreams_map.entry(upstream).or_default().push(signal);
+        }
+        upstreams_map.insert(signal, upstreams);
+    }
+
+    let mut queue: VecDeque<SignalSystem> = in_degree.iter().filter_map(|(s, d)| (*d == 0).then_some(*s)).collect();
+
+    let mut levels: HashMap<SignalSystem, u32> = HashMap::new();
+    let mut processed = 0usize;
+
     while let Some(signal) = queue.pop_front() {
-        let level = *levels.get(&signal).unwrap_or(&0);
-        for downstream in get_downstreams(world, signal) {
-            let next_level = level.saturating_add(1);
-            let current = levels.get(&downstream).copied().unwrap_or(0);
-            if next_level > current {
-                levels.insert(downstream, next_level);
-                queue.push_back(downstream);
+        processed += 1;
+        let upstreams = upstreams_map.get(&signal).cloned().unwrap_or_default();
+        let level = upstreams
+            .iter()
+            .filter_map(|u| levels.get(u).copied().or_else(|| external_level(*u)))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+
+        levels.insert(signal, level);
+
+        // Use local downstreams_map instead of get_downstreams to ensure we only
+        // consider signals in our working set.
+        if let Some(downstreams) = downstreams_map.get(&signal) {
+            for &downstream in downstreams {
+                if let Some(count) = in_degree.get_mut(&downstream) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        queue.push_back(downstream);
+                    }
+                }
             }
         }
     }
 
-    for (signal, level) in levels.iter() {
-        while by_level.len() <= *level as usize {
-            by_level.push(HashSet::new());
+    LevelComputeResult {
+        levels,
+        processed,
+        total: signals.len(),
+    }
+}
+
+fn bucket_levels_sorted(levels: &HashMap<SignalSystem, u32>) -> Vec<Vec<SignalSystem>> {
+    let mut by_level: Vec<Vec<SignalSystem>> = Vec::new();
+    for (&signal, &level) in levels {
+        while by_level.len() <= level as usize {
+            by_level.push(Vec::new());
         }
-        by_level[*level as usize].insert(*signal);
+        by_level[level as usize].push(signal);
+    }
+    for bucket in &mut by_level {
+        bucket.sort_by_key(|s| s.index());
+    }
+    by_level
+}
+
+// Computes a topological ordering of signals reachable downstream from `seeds`.
+// Uses cached levels when available, falls back to BFS level computation for uncached signals.
+fn downstream_levels_from_seeds(world: &World, seeds: &[SignalSystem]) -> Vec<Vec<SignalSystem>> {
+    let state = world.resource::<SignalGraphState>();
+
+    // Collect all reachable signals via BFS.
+    let mut reachable: HashSet<SignalSystem> = HashSet::new();
+    let mut queue: VecDeque<SignalSystem> = seeds.iter().copied().collect();
+    while let Some(signal) = queue.pop_front() {
+        if reachable.insert(signal) {
+            queue.extend(get_downstreams(world, signal));
+        }
     }
 
-    by_level
-        .into_iter()
-        .map(|level| {
-            let mut signals_at_level: Vec<SignalSystem> = level.into_iter().collect();
-            // Sort by Entity index to get a deterministic, stable order independent of hash iteration.
-            signals_at_level.sort_by_key(|signal| signal.index());
-            signals_at_level
-        })
-        .collect()
+    // Check if all reachable signals have cached levels.
+    let all_cached = reachable.iter().all(|s| state.levels.contains_key(s));
+
+    if all_cached {
+        // Fast path: use cached levels.
+        let mut by_level: Vec<Vec<SignalSystem>> = Vec::new();
+        for signal in reachable {
+            let level = state.levels.get(&signal).copied().unwrap_or(0) as usize;
+            while by_level.len() <= level {
+                by_level.push(Vec::new());
+            }
+            by_level[level].push(signal);
+        }
+        for bucket in &mut by_level {
+            bucket.sort_by_key(|s| s.index());
+        }
+        by_level
+    } else {
+        // Slow path: compute levels via Kahn's algorithm on the reachable subgraph.
+        // This handles newly created signals that aren't in the cache yet.
+        let result = compute_signal_levels(
+            world,
+            &reachable,
+            |u| reachable.contains(&u),        // only count upstreams in the subgraph
+            |u| state.levels.get(&u).copied(), // use cached levels for external upstreams
+        );
+        bucket_levels_sorted(&result.levels)
+    }
 }
 
 // Rebuilds per-signal levels using a Kahn-style topological traversal.
@@ -317,74 +625,77 @@ fn downstream_levels_from_seeds(world: &World, seeds: &[SignalSystem]) -> Vec<Ve
 //   the graph invariants were violated.
 fn rebuild_levels(world: &mut World, state: &mut SignalGraphState) {
     state.levels.clear();
-    state.by_level.clear();
+    state.by_schedule.clear();
+    state.signal_schedules.clear();
 
-    let mut all_signals = SystemState::<Query<Entity, (With<SystemRunner>, Allow<Internal>)>>::new(world);
-    let signals = all_signals.get(world).iter().map(SignalSystem).collect::<Vec<_>>();
+    let mut all_signals_state = SystemState::<Query<Entity, (With<SystemRunner>, Allow<Internal>)>>::new(world);
+    let all_signals: HashSet<SignalSystem> = all_signals_state.get(world).iter().map(SignalSystem).collect();
 
-    let mut in_degree: HashMap<SignalSystem, usize> = HashMap::new();
-    let mut upstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
-    let mut downstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
+    let result = compute_signal_levels(
+        world,
+        &all_signals,
+        |u| all_signals.contains(&u), // all upstreams count
+        |_| None,                     // no external levels
+    );
 
-    for signal in signals {
-        let upstreams = get_upstreams(world, signal);
-        in_degree.insert(signal, upstreams.len());
-        upstreams_map.insert(signal, upstreams.clone());
-        for upstream in upstreams {
-            downstreams_map.entry(upstream).or_default().push(signal);
-        }
-    }
-
-    let mut queue: VecDeque<SignalSystem> = in_degree
-        .iter()
-        .filter_map(|(signal, degree)| if *degree == 0 { Some(*signal) } else { None })
-        .collect();
-
-    let mut processed = 0usize;
-    while let Some(signal) = queue.pop_front() {
-        processed += 1;
-        let upstreams = upstreams_map.get(&signal).cloned().unwrap_or_default();
-        let level = if upstreams.is_empty() {
-            0
-        } else {
-            upstreams
-                .iter()
-                .filter_map(|u| state.levels.get(u))
-                .max()
-                .map(|m| m + 1)
-                .unwrap_or(0)
-        };
-
-        while state.by_level.len() <= level as usize {
-            state.by_level.push(Vec::new());
-        }
-        state.by_level[level as usize].push(signal);
-        state.levels.insert(signal, level);
-
-        if let Some(downstreams) = downstreams_map.get(&signal) {
-            for downstream in downstreams {
-                if let Some(count) = in_degree.get_mut(downstream) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        queue.push_back(*downstream);
-                    }
-                }
-            }
-        }
-    }
-
-    if processed < in_degree.len() {
+    if !result.is_complete() {
         panic!("signal graph contains a cycle or inconsistent edges during level rebuild");
     }
 
-    for bucket in state.by_level.iter_mut() {
-        bucket.sort_by_key(|signal| signal.index());
+    state.levels = result.levels;
+
+    // Build by_schedule partitioning and signal_schedules cache
+    for (&signal, &level) in &state.levels {
+        let schedule = world
+            .get::<SignalScheduleTag>(*signal)
+            .map(|tag| tag.0)
+            .unwrap_or(state.default_schedule);
+
+        // Cache the schedule for O(1) lookup during removal
+        state.signal_schedules.insert(signal, schedule);
+
+        let schedule_levels = state.by_schedule.entry(schedule).or_default();
+        while schedule_levels.len() <= level as usize {
+            schedule_levels.push(Vec::new());
+        }
+        insert_sorted_by_index(&mut schedule_levels[level as usize], signal);
     }
 }
 
-fn update_levels_incremental(world: &mut World, state: &mut SignalGraphState) -> bool {
+/// Remove a signal from its current position in by_schedule.
+fn remove_signal_from_buckets(state: &mut SignalGraphState, signal: SignalSystem, old_level: u32) {
+    // Remove from by_schedule using cached schedule for O(1) lookup.
+    if let Some(&schedule) = state.signal_schedules.get(&signal)
+        && let Some(schedule_levels) = state.by_schedule.get_mut(&schedule)
+        && let Some(bucket) = schedule_levels.get_mut(old_level as usize)
+        && let Some(pos) = bucket.iter().position(|s| *s == signal)
+    {
+        bucket.remove(pos);
+    }
+}
+
+/// Insert a signal at its new level in by_schedule.
+fn insert_signal_into_buckets(world: &World, state: &mut SignalGraphState, signal: SignalSystem, new_level: u32) {
+    // Get schedule and insert into by_schedule
+    let schedule = world
+        .get::<SignalScheduleTag>(*signal)
+        .map(|tag| tag.0)
+        .unwrap_or(state.default_schedule);
+
+    // Update the schedule cache
+    state.signal_schedules.insert(signal, schedule);
+
+    let schedule_levels = state.by_schedule.entry(schedule).or_default();
+    while schedule_levels.len() <= new_level as usize {
+        schedule_levels.push(Vec::new());
+    }
+    insert_sorted_by_index(&mut schedule_levels[new_level as usize], signal);
+}
+
+fn update_levels_incremental(world: &mut World, state: &mut SignalGraphState, seeds: &[SignalSystem]) -> bool {
+    // Collect all signals affected by edge changes (seeds + all their downstreams).
     let mut affected: HashSet<SignalSystem> = HashSet::new();
-    let mut queue: VecDeque<SignalSystem> = state.edge_change_seeds.iter().copied().collect();
+    let mut queue: VecDeque<SignalSystem> = seeds.iter().copied().collect();
 
     while let Some(signal) = queue.pop_front() {
         if affected.insert(signal) {
@@ -397,103 +708,76 @@ fn update_levels_incremental(world: &mut World, state: &mut SignalGraphState) ->
         return true;
     }
 
-    let mut in_degree: HashMap<SignalSystem, usize> = HashMap::new();
-    let mut upstreams_map: HashMap<SignalSystem, Vec<SignalSystem>> = HashMap::new();
+    // Use Kahn's algorithm to compute new levels for affected signals
+    let result = compute_signal_levels(
+        world,
+        &affected,
+        |u| affected.contains(&u),         // only affected upstreams count for in-degree
+        |u| state.levels.get(&u).copied(), // unaffected upstreams use cached levels
+    );
 
-    for signal in affected.iter().copied() {
-        let upstreams = get_upstreams(world, signal);
-        let local_in_degree = upstreams.iter().filter(|u| affected.contains(&(**u))).count();
-        in_degree.insert(signal, local_in_degree);
-        upstreams_map.insert(signal, upstreams);
-    }
-
-    let mut queue: VecDeque<SignalSystem> = in_degree
-        .iter()
-        .filter_map(|(signal, degree)| if *degree == 0 { Some(*signal) } else { None })
-        .collect();
-
-    let mut new_levels: HashMap<SignalSystem, u32> = HashMap::new();
-    let mut processed = 0usize;
-
-    while let Some(signal) = queue.pop_front() {
-        processed += 1;
-        let upstreams = upstreams_map.get(&signal).cloned().unwrap_or_default();
-
-        let mut level = 0u32;
-        for upstream in upstreams {
-            let upstream_level = new_levels
-                .get(&upstream)
-                .copied()
-                .or_else(|| state.levels.get(&upstream).copied())
-                .unwrap_or(0);
-            level = level.max(upstream_level.saturating_add(1));
-        }
-
-        new_levels.insert(signal, level);
-
-        for downstream in get_downstreams(world, signal) {
-            if !affected.contains(&downstream) {
-                continue;
-            }
-            if let Some(count) = in_degree.get_mut(&downstream) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    queue.push_back(downstream);
-                }
-            }
-        }
-    }
-
-    if processed < affected.len() {
+    if !result.is_complete() {
         return false;
     }
 
-    for signal in affected {
-        if let Some(old_level) = state.levels.get(&signal).copied()
-            && let Some(bucket) = state.by_level.get_mut(old_level as usize)
-            && let Some(pos) = bucket.iter().position(|s| *s == signal)
-        {
-            bucket.remove(pos);
+    // Update state with short-circuit optimization:
+    // Only update buckets for signals whose level actually changed.
+    for &signal in &affected {
+        let old_level = state.levels.get(&signal).copied();
+        let new_level = result.levels.get(&signal).copied();
+
+        // Short-circuit: if level didn't change, skip bucket updates
+        if old_level == new_level {
+            continue;
         }
 
-        if let Some(new_level) = new_levels.get(&signal).copied() {
-            while state.by_level.len() <= new_level as usize {
-                state.by_level.push(Vec::new());
-            }
-            insert_sorted_by_index(&mut state.by_level[new_level as usize], signal);
+        // Remove from old position
+        if let Some(old) = old_level {
+            remove_signal_from_buckets(state, signal, old);
+        }
+
+        // Insert at new position
+        if let Some(new_level) = new_level {
             state.levels.insert(signal, new_level);
+            insert_signal_into_buckets(world, state, signal, new_level);
         } else {
             state.levels.remove(&signal);
+            state.signal_schedules.remove(&signal);
         }
     }
 
     true
 }
 
-fn update_edge_change_levels(world: &mut World, state: &mut SignalGraphState) {
+/// Updates signal levels based on edge changes and returns the seeds that were processed.
+///
+/// Returns the signals that were in `edge_change_seeds` before processing. This allows
+/// callers to know which signals triggered the update without needing to drain and re-add.
+fn update_edge_change_levels(world: &mut World, state: &mut SignalGraphState) -> Vec<SignalSystem> {
     if state.levels.is_empty() {
         rebuild_levels(world, state);
-        state.edge_change_seeds.clear();
-        return;
+        return state.edge_change_seeds.drain().collect();
     }
 
     if state.edge_change_seeds.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    if !update_levels_incremental(world, state) {
+    // Drain seeds once and pass directly to update function
+    let seeds: Vec<SignalSystem> = state.edge_change_seeds.drain().collect();
+
+    if !update_levels_incremental(world, state, &seeds) {
         panic!("signal graph contains a cycle or inconsistent edges during incremental update");
     }
-    state.edge_change_seeds.clear();
+
+    seeds
 }
 
 fn remove_signal_from_graph_state_internal(state: &mut SignalGraphState, signal: SignalSystem) {
-    if let Some(level) = state.levels.remove(&signal)
-        && let Some(bucket) = state.by_level.get_mut(level as usize)
-        && let Some(pos) = bucket.iter().position(|s| *s == signal)
-    {
-        bucket.remove(pos);
+    if let Some(level) = state.levels.remove(&signal) {
+        remove_signal_from_buckets(state, signal, level);
     }
+    state.signal_schedules.remove(&signal);
     state.edge_change_seeds.remove(&signal);
 }
 
@@ -517,109 +801,258 @@ fn apply_deferred_removals(state: &mut SignalGraphState) {
     }
 }
 
-fn process_signal(
-    world: &mut World,
-    signal: SignalSystem,
-    inputs: &mut HashMap<SignalSystem, VecDeque<Box<dyn AnyClone>>>,
-) {
-    let runner = match world.get::<SystemRunner>(*signal).cloned() {
-        Some(runner) => runner,
-        None => {
-            if world.get_entity(*signal).is_err() {
-                // Re-entrant combinators can despawn signals during the same frame; skip these stale IDs.
-                return;
+/// Runs a signal node: reads inputs from its [`SignalInputBuffer`], executes the system,
+/// and writes outputs to downstream signals' buffers.
+///
+/// Avoids holding references to [`SignalGraphState`] during execution, since signal
+/// systems may spawn new signals that call [`pipe_signal`].
+fn run_signal_node(world: &mut World, signal: SignalSystem) {
+    // Get runner and inputs before running (to avoid borrow conflicts)
+    let (runner, signal_inputs, upstreams) = {
+        let runner = match world.get::<SystemRunner>(*signal).cloned() {
+            Some(runner) => runner,
+            None => {
+                if world.get_entity(*signal).is_err() {
+                    // Re-entrant combinators can despawn signals during the same frame; skip these stale IDs.
+                    return;
+                }
+                let upstreams = get_upstreams(world, signal);
+                let downstreams = get_downstreams(world, signal);
+                panic!(
+                    "missing SystemRunner for signal {:?} during processing (entity exists). upstreams={:?}, downstreams={:?}",
+                    signal, upstreams, downstreams
+                );
             }
-            let upstreams = get_upstreams(world, signal);
-            let downstreams = get_downstreams(world, signal);
-            panic!(
-                "missing SystemRunner for signal {:?} during processing (entity exists). upstreams={:?}, downstreams={:?}",
-                signal, upstreams, downstreams
-            );
-        }
+        };
+
+        // Take inputs from the signal's component
+        let signal_inputs = world
+            .get_mut::<SignalInputBuffer>(*signal)
+            .map(|mut buffer| buffer.take())
+            .unwrap_or_default();
+
+        let upstreams = get_upstreams(world, signal);
+
+        (runner, signal_inputs, upstreams)
     };
 
-    let upstreams = get_upstreams(world, signal);
-
-    if upstreams.is_empty() {
-        if let Some(output) = runner.run(world, Box::new(())) {
-            enqueue_inputs(world, inputs, signal, output);
+    // Run the signal system
+    let final_output = if upstreams.is_empty() {
+        // Root signal - run with unit input
+        runner.run(world, Box::new(()))
+    } else if !signal_inputs.is_empty() {
+        // Run once per upstream input received, forwarding only the final output.
+        // This means a signal with multiple upstreams acts as a "collection" point:
+        // it processes each upstream's output, but only its last output propagates downstream.
+        let mut output = None;
+        for input in signal_inputs {
+            if let Some(o) = runner.run(world, input) {
+                output = Some(o);
+            }
         }
-        return;
-    }
+        output
+    } else {
+        None
+    };
 
-    let mut queue = inputs.remove(&signal).unwrap_or_default();
-    while let Some(input) = queue.pop_front() {
-        if let Some(output) = runner.run(world, input) {
-            enqueue_inputs(world, inputs, signal, output);
+    // Write outputs directly to downstream components
+    if let Some(output) = final_output {
+        let downstreams = get_downstreams(world, signal);
+        if let Some((last, rest)) = downstreams.split_last() {
+            // Clone for all but last
+            for downstream in rest {
+                if let Ok(mut entity) = world.get_entity_mut(**downstream)
+                    && let Some(mut buffer) = entity.get_mut::<SignalInputBuffer>()
+                {
+                    buffer.push(output.clone());
+                }
+            }
+            // Last downstream gets the original (no clone)
+            if let Ok(mut entity) = world.get_entity_mut(**last)
+                && let Some(mut buffer) = entity.get_mut::<SignalInputBuffer>()
+            {
+                buffer.push(output);
+            }
         }
     }
 }
 
-pub(crate) fn process_signals(world: &mut World, signals: impl AsRef<[SignalSystem]>, input: Box<dyn AnyClone>) {
+pub(crate) fn trigger_signal_subgraph(
+    world: &mut World,
+    signals: impl AsRef<[SignalSystem]>,
+    input: Box<dyn AnyClone>,
+) {
     let signals = signals.as_ref();
     if signals.is_empty() {
         return;
     }
 
-    let mut inputs: HashMap<SignalSystem, VecDeque<Box<dyn AnyClone>>> = HashMap::new();
-    let mut iter = signals.iter().copied().peekable();
-    if let Some(first) = iter.next() {
-        let mut run_with_input = |signal: SignalSystem, input: Box<dyn AnyClone>| {
-            let runner = world
-                .get::<SystemRunner>(*signal)
-                .cloned()
-                .unwrap_or_else(|| panic!("missing SystemRunner for signal {:?} during processing", signal));
-            if let Some(output) = runner.run(world, input) {
-                enqueue_inputs(world, &mut inputs, signal, output);
+    // Pre-populate inputs for seed signals by writing to their components
+    if let Some((last, rest)) = signals.split_last() {
+        for signal in rest {
+            if let Ok(mut entity) = world.get_entity_mut(**signal)
+                && let Some(mut buffer) = entity.get_mut::<SignalInputBuffer>()
+            {
+                buffer.push(input.clone());
             }
-        };
-
-        if iter.peek().is_none() {
-            // avoid cloning if there's only a single downstream
-            run_with_input(first, input);
-        } else {
-            let rest: Vec<SignalSystem> = iter.collect();
-            if let Some((last, rest)) = rest.split_last() {
-                for signal in core::iter::once(first).chain(rest.iter().copied()) {
-                    run_with_input(signal, input.clone());
-                }
-                run_with_input(*last, input);
-            }
+        }
+        // Last signal gets the original (no clone)
+        if let Ok(mut entity) = world.get_entity_mut(**last)
+            && let Some(mut buffer) = entity.get_mut::<SignalInputBuffer>()
+        {
+            buffer.push(input);
         }
     }
 
+    // Process seeds and all their downstreams in topological order.
     let by_level = downstream_levels_from_seeds(world, signals);
-    let skip: HashSet<SignalSystem> = signals.iter().copied().collect();
-    for level in by_level.into_iter().skip(1) {
+    for level in by_level {
         for signal in level {
-            if skip.contains(&signal) {
-                continue;
-            }
-            process_signal(world, signal, &mut inputs);
+            run_signal_node(world, signal);
         }
     }
 }
 
-pub(crate) fn process_signal_graph(world: &mut World) {
-    let mut levels_snapshot: Vec<Vec<SignalSystem>> = Vec::new();
-    world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
-        update_edge_change_levels(world, &mut state);
-        state.is_processing = true;
-        levels_snapshot = core::mem::take(&mut state.by_level);
-    });
+/// Creates a system that processes only signals tagged for the specified schedule.
+///
+/// Uses persistent inputs stored in [`SignalGraphState`] to enable cross-schedule data flow.
+/// Includes a fixpoint loop to process signals that are registered during processing.
+pub(crate) fn process_signal_graph_for_schedule(schedule: InternedScheduleLabel) -> impl FnMut(&mut World) {
+    move |world: &mut World| {
+        // Phase 1: Update graph if needed, take this schedule's signals (avoids cloning)
+        let levels_for_schedule: Vec<Vec<SignalSystem>> = {
+            world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
+                // Recompute levels if edges changed (also updates partition incrementally)
+                let _ = update_edge_change_levels(world, &mut state);
+                state.is_processing = true;
 
-    let mut inputs: HashMap<SignalSystem, VecDeque<Box<dyn AnyClone>>> = HashMap::new();
-    for level in &levels_snapshot {
-        for &signal in level {
-            process_signal(world, signal, &mut inputs);
+                // Take this schedule's signals to avoid cloning; we'll put them back after processing
+                state.by_schedule.remove(&schedule).unwrap_or_default()
+            })
+        };
+
+        // Track signals we've already processed this frame to avoid double-processing
+        let mut processed: HashSet<SignalSystem> = HashSet::default();
+
+        // Phase 2: Process signals level-by-level using persistent inputs
+        // Note: We don't use resource_scope here because signal processing may spawn
+        // new elements that register new signals, which calls pipe_signal, which needs
+        // to access SignalGraphState. Using resource_scope would temporarily remove
+        // the resource and cause a panic.
+        for level in &levels_for_schedule {
+            for &signal in level {
+                processed.insert(signal);
+                run_signal_node(world, signal);
+            }
         }
-    }
 
-    let mut state = world.resource_mut::<SignalGraphState>();
-    state.is_processing = false;
-    state.by_level = levels_snapshot;
-    // this indirection allows us to avoid cloning the topological ordering every frame
-    apply_deferred_removals(&mut state);
+        // Put levels back
+        world
+            .resource_mut::<SignalGraphState>()
+            .by_schedule
+            .insert(schedule, levels_for_schedule);
+
+        // Phase 2b: Process signals registered during processing (registration recursion).
+        // This handles cases like child_signal spawning elements with their own signals.
+        let (recursion_limit, limit_behavior) = {
+            let state = world.resource::<SignalGraphState>();
+            (state.registration_recursion_limit, state.on_recursion_limit_exceeded)
+        };
+        let mut recursion_pass = 0usize;
+
+        loop {
+            recursion_pass += 1;
+
+            if recursion_pass > recursion_limit {
+                match limit_behavior {
+                    RecursionLimitBehavior::Panic => {
+                        panic!(
+                            "Signal registration recursion limit exceeded ({} passes) in schedule {:?}. \
+                             This usually indicates an infinite loop where signals keep spawning new signals. \
+                             Processed {} signals before limit was reached. \
+                             Use `JonmoPlugin::on_recursion_limit_exceeded` to change this behavior.",
+                            recursion_limit,
+                            schedule,
+                            processed.len()
+                        );
+                    }
+                    RecursionLimitBehavior::Warn => {
+                        #[cfg(feature = "tracing")]
+                        bevy_log::warn!(
+                            "Signal registration recursion limit exceeded ({} passes) in schedule {:?}. \
+                             This may indicate an infinite loop where signals keep spawning new signals. \
+                             Processed {} signals so far.",
+                            recursion_limit,
+                            schedule,
+                            processed.len()
+                        );
+                        break;
+                    }
+                    RecursionLimitBehavior::Silent => {
+                        break;
+                    }
+                }
+            }
+
+            // Update levels for new signals and get the seeds that were processed
+            let new_seeds: Vec<SignalSystem> = world
+                .resource_scope(|world, mut state: Mut<SignalGraphState>| update_edge_change_levels(world, &mut state));
+
+            if new_seeds.is_empty() {
+                break;
+            }
+
+            // Get signals in this schedule that we haven't processed yet
+            let new_signals: Vec<SignalSystem> = new_seeds
+                .into_iter()
+                .filter(|s| {
+                    !processed.contains(s)
+                        && world
+                            .get::<SignalScheduleTag>(**s)
+                            .map(|tag| tag.0 == schedule)
+                            .unwrap_or(false)
+                })
+                .collect();
+
+            if new_signals.is_empty() {
+                break;
+            }
+
+            // Process new signals and their downstreams in topological order
+            let new_levels = downstream_levels_from_seeds(world, &new_signals);
+            for level in new_levels {
+                for signal in level {
+                    if processed.insert(signal) {
+                        // Only process if we haven't already
+                        if world
+                            .get::<SignalScheduleTag>(*signal)
+                            .map(|tag| tag.0 == schedule)
+                            .unwrap_or(false)
+                        {
+                            run_signal_node(world, signal);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 3: Cleanup
+        let mut state = world.resource_mut::<SignalGraphState>();
+        state.is_processing = false;
+        apply_deferred_removals(&mut state);
+    }
+}
+
+/// Clears persistent inputs at the end of each frame.
+///
+/// This should run after all signal processing systems in the frame.
+/// Clears all signal input buffers at the end of each frame.
+///
+/// This should run after all signal processing systems in the frame.
+pub(crate) fn clear_signal_inputs(mut buffers: Query<&mut SignalInputBuffer>) {
+    for mut buffer in &mut buffers {
+        buffer.clear();
+    }
 }
 
 /// Handle to a particular node of the signal graph, returned by
@@ -694,7 +1127,7 @@ impl SignalHandles {
 fn spawn_signal<I, O, IOO, F, M>(world: &mut World, system: F) -> SignalSystem
 where
     I: 'static,
-    O: Clone + 'static,
+    O: Clone + Send + Sync + 'static,
     IOO: Into<Option<O>> + 'static,
     F: IntoSystem<In<I>, IOO, M> + 'static,
 {
@@ -705,6 +1138,7 @@ where
     }));
     world.entity_mut(signal_system.entity()).insert((
         SignalRegistrationCount::new(),
+        SignalInputBuffer::default(),
         SystemRunner {
             runner: Arc::new(Box::new(move |w, inp| runner.run(w, inp))),
         },
@@ -751,7 +1185,7 @@ pub(crate) struct LazySignal {
 }
 
 impl LazySignal {
-    pub(crate) fn new<F: FnOnce(&mut World) -> SignalSystem + SSs>(system: F) -> Self {
+    pub(crate) fn new<F: FnOnce(&mut World) -> SignalSystem + Send + Sync + 'static>(system: F) -> Self {
         LazySignal {
             inner: Arc::new(LazySignalState {
                 references: AtomicUsize::new(1),
@@ -832,9 +1266,9 @@ pub(crate) fn despawn_stale_signals(world: &mut World) {
 pub(crate) fn lazy_signal_from_system<I, O, IOO, F, M>(system: F) -> LazySignal
 where
     I: 'static,
-    O: Clone + 'static,
+    O: Clone + Send + Sync + 'static,
     IOO: Into<Option<O>> + 'static,
-    F: IntoSystem<In<I>, IOO, M> + SSs,
+    F: IntoSystem<In<I>, IOO, M> + Send + Sync + 'static,
 {
     LazySignal::new(move |world: &mut World| spawn_signal(world, system))
 }
@@ -952,12 +1386,12 @@ fn unlink_from_upstream(world: &mut World, upstream_system: SignalSystem, signal
 }
 
 fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
-    // Stage 1: Decrement registration and bail if the node is still in use.
+    // Decrement registration and bail if the node is still in use.
     if !decrement_registration_and_needs_cleanup(world, signal) {
         return;
     }
 
-    // Stage 2: The count is zero. Perform the full cleanup. First, get the list of parents.
+    // The count is zero. Perform the full cleanup. First, get the list of parents.
     let upstreams = world.get::<Upstream>(*signal).cloned();
 
     // Unlink downstream edges and mark affected nodes for level recomputation.
@@ -970,7 +1404,7 @@ fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
         }
     }
 
-    // Stage 3: Notify parents and recurse after processing this node.
+    // Notify parents and recurse after processing this node.
     if let Some(upstreams) = upstreams {
         for &upstream_system in upstreams.iter() {
             unlink_from_upstream(world, upstream_system, signal);
@@ -979,50 +1413,144 @@ fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
     }
 }
 
-fn poll_signal_one_shot(In(signal): In<SignalSystem>, world: &mut World) -> Option<Box<dyn AnyClone>> {
-    fn visit(
-        world: &mut World,
-        node: SignalSystem,
-        cache: &mut HashMap<SignalSystem, Option<Box<dyn AnyClone>>>,
-    ) -> Option<Box<dyn AnyClone>> {
-        // 1. memoisation fast-path
-        if let Some(cached) = cache.get(&node) {
-            return cached.clone();
+/// Computes topological levels for signals upstream of a target that aren't in the cached state.
+/// Uses Kahn's algorithm on the reachable subgraph.
+fn compute_levels_for_uncached(
+    world: &World,
+    reachable: &HashSet<SignalSystem>,
+    cached_levels: &HashMap<SignalSystem, u32>,
+) -> HashMap<SignalSystem, u32> {
+    let uncached: HashSet<SignalSystem> = reachable
+        .iter()
+        .filter(|s| !cached_levels.contains_key(*s))
+        .copied()
+        .collect();
+
+    // Note: upstream_filter uses `reachable` (not `uncached`) because we need to count
+    // in-degree based on the full reachable subgraph, but only compute levels for uncached signals.
+    // Cached upstreams don't contribute to in-degree since their levels are already known.
+    let result = compute_signal_levels(
+        world,
+        &uncached,
+        |u| reachable.contains(&u) && !cached_levels.contains_key(&u),
+        |u| cached_levels.get(&u).copied(),
+    );
+
+    result.levels
+}
+
+fn poll_signal_one_shot(In(target): In<SignalSystem>, world: &mut World) -> Option<Box<dyn AnyClone>> {
+    // Collect all signals reachable upstream from target
+    let mut reachable: HashSet<SignalSystem> = HashSet::new();
+    let mut queue: VecDeque<SignalSystem> = VecDeque::new();
+    queue.push_back(target);
+    reachable.insert(target);
+
+    while let Some(signal) = queue.pop_front() {
+        for upstream in get_upstreams(world, signal) {
+            if reachable.insert(upstream) {
+                queue.push_back(upstream);
+            }
+        }
+    }
+
+    // Get cached levels and compute levels for any uncached signals.
+    // We avoid cloning the entire levels HashMap by collecting only the levels we need.
+
+    // First pass: check which signals need level computation
+    let uncached: HashSet<SignalSystem> = {
+        let state = world.resource::<SignalGraphState>();
+        reachable
+            .iter()
+            .filter(|s| !state.levels.contains_key(*s))
+            .copied()
+            .collect()
+    };
+
+    // Compute levels for uncached signals if any (requires &World, so state borrow must end first)
+    let uncached_levels = if uncached.is_empty() {
+        HashMap::default()
+    } else {
+        compute_levels_for_uncached(world, &reachable, &world.resource::<SignalGraphState>().levels)
+    };
+
+    // Bucket by level using references to avoid cloning
+    let by_level = {
+        let state = world.resource::<SignalGraphState>();
+        let mut by_level: Vec<Vec<SignalSystem>> = Vec::new();
+        for signal in &reachable {
+            let level = state
+                .levels
+                .get(signal)
+                .or_else(|| uncached_levels.get(signal))
+                .copied()
+                .unwrap_or(0) as usize;
+            while by_level.len() <= level {
+                by_level.push(Vec::new());
+            }
+            by_level[level].push(*signal);
         }
 
-        // 2. pull runner + upstream list
-        let runner = world
-            .get::<SystemRunner>(*node)
-            .cloned()
-            .unwrap_or_else(|| panic!("missing SystemRunner for signal {:?} during processing", node));
-        let upstreams: Vec<SignalSystem> = world
-            .get::<Upstream>(*node)
-            .map(|u| {
-                let mut v: Vec<_> = u.0.iter().copied().collect();
-                v.sort_by_key(|s| **s);
-                v
-            })
-            .unwrap_or_default();
+        // Sort each level for determinism
+        for level in &mut by_level {
+            level.sort_by_key(|s| s.index());
+        }
 
-        // 3. run the node (depth-first)
-        let mut last_output = None;
-        if upstreams.is_empty() {
-            last_output = runner.run(world, Box::new(()));
-        } else {
-            for up in upstreams {
-                if let Some(input) = visit(world, up, cache)
-                    && let Some(out) = runner.run(world, input)
-                {
-                    last_output = Some(out);
+        by_level
+    };
+
+    // Process level by level, running each signal once per upstream input received.
+    // We only track the target's output directly instead of storing all outputs.
+    let mut inputs: HashMap<SignalSystem, Vec<Box<dyn AnyClone>>> = HashMap::new();
+    let mut target_output: Option<Box<dyn AnyClone>> = None;
+
+    for level in by_level {
+        for signal in level {
+            let runner = world
+                .get::<SystemRunner>(*signal)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing SystemRunner for signal {:?} during poll", signal));
+
+            let upstreams = get_upstreams(world, signal);
+
+            let output = if upstreams.is_empty() {
+                // Source signal - run with unit input
+                runner.run(world, Box::new(()))
+            } else if let Some(input_list) = inputs.remove(&signal) {
+                // Has inputs from upstreams - run once per input, keep final output
+                let mut final_output = None;
+                for input in input_list {
+                    if let Some(out) = runner.run(world, input) {
+                        final_output = Some(out);
+                    }
+                }
+                final_output
+            } else {
+                // No input received - signal doesn't fire
+                None
+            };
+
+            // Only store output if this is the target we're polling
+            if signal == target {
+                target_output = output;
+                // Target found - no need to propagate further since we're done
+                continue;
+            }
+
+            // Propagate output to downstreams
+            if let Some(out) = output {
+                let downstreams = get_downstreams(world, signal);
+                if let Some((last, rest)) = downstreams.split_last() {
+                    for downstream in rest {
+                        inputs.entry(*downstream).or_default().push(out.clone());
+                    }
+                    inputs.entry(*last).or_default().push(out);
                 }
             }
         }
-        cache.insert(node, last_output.clone());
-        last_output
     }
 
-    let mut cache = HashMap::new();
-    visit(world, signal, &mut cache)
+    target_output
 }
 
 /// Get a signal's current value by running all of it's dependencies.
@@ -1039,12 +1567,13 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
 /// # Example
 ///
 /// ```
-/// use bevy_ecs::prelude::*;
+/// use bevy::prelude::*;
 /// use jonmo::{prelude::*, graph::*};
 ///
-/// let mut world = World::new();
-/// let signal = *signal::from_system(|_: In<()>| 1).register(&mut world);
-/// poll_signal(&mut world, signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
+/// let mut app = App::new();
+/// app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+/// let signal = *signal::from_system(|_: In<()>| 1).register(app.world_mut());
+/// poll_signal(app.world_mut(), signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
 /// ```
 pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {
     (any_clone as Box<dyn Any>).downcast::<T>().map(|o| *o).ok()
@@ -1053,10 +1582,21 @@ pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_ecs::prelude::{In, Mut, World};
+
+    use bevy_ecs::{
+        prelude::{In, Mut, World},
+        schedule::ScheduleLabel,
+    };
 
     #[derive(Resource, Default)]
     struct Order(Vec<&'static str>);
+
+    /// Helper to process all signals in the default schedule for tests.
+    fn process_signals(world: &mut World) {
+        let default_schedule = world.resource::<SignalGraphState>().default_schedule;
+        let mut system = process_signal_graph_for_schedule(default_schedule);
+        system(world);
+    }
 
     #[test]
     #[should_panic(expected = "signal graph contains a cycle or inconsistent edges during incremental update")]
@@ -1105,7 +1645,7 @@ mod tests {
             Some(())
         });
 
-        process_signal_graph(&mut world);
+        process_signals(&mut world);
 
         let order = world.resource::<Order>().0.clone();
         if signal_a.0.index() < signal_b.0.index() {
@@ -1130,11 +1670,11 @@ mod tests {
             Some(())
         });
 
-        process_signal_graph(&mut world);
+        process_signals(&mut world);
         world.resource_mut::<Order>().0.clear();
 
         pipe_signal(&mut world, signal_a, signal_b);
-        process_signal_graph(&mut world);
+        process_signals(&mut world);
 
         let order = world.resource::<Order>().0.clone();
         assert_eq!(order, vec!["a", "b"]);
@@ -1197,5 +1737,358 @@ mod tests {
         assert_eq!(levels_after.get(&b), Some(&0));
         assert_eq!(levels_after.get(&c), Some(&1));
         assert!(!levels_after.contains_key(&a));
+    }
+
+    #[test]
+    fn schedule_tag_assigns_signal_to_schedule() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+
+        // Tag the signal with Update schedule
+        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+
+        world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
+            rebuild_levels(world, &mut state);
+        });
+
+        let state = world.resource::<SignalGraphState>();
+        let update_signals = state.by_schedule.get(&Update.intern());
+        assert!(update_signals.is_some());
+        assert!(update_signals.unwrap().iter().flatten().any(|s| *s == signal_a));
+    }
+
+    #[test]
+    fn schedule_hint_propagates_to_downstream_via_pipe() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+
+        // Tag signal_a with Update schedule and set a hint for downstream
+        world
+            .entity_mut(*signal_a)
+            .insert(SignalScheduleTag(Update.intern()))
+            .insert(ScheduleHint(Update.intern()));
+
+        // Pipe a -> b (b should inherit the schedule from hint)
+        pipe_signal(&mut world, signal_a, signal_b);
+
+        // signal_b should now have the SignalScheduleTag from the hint
+        let tag = world.get::<SignalScheduleTag>(*signal_b);
+        assert!(tag.is_some());
+        assert_eq!(tag.unwrap().0, Update.intern());
+    }
+
+    #[test]
+    fn schedule_hint_does_not_override_existing_tag() {
+        use bevy_app::{Last, Update};
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+
+        // Tag signal_a with Update schedule and set a hint
+        world
+            .entity_mut(*signal_a)
+            .insert(SignalScheduleTag(Update.intern()))
+            .insert(ScheduleHint(Update.intern()));
+
+        // Tag signal_b with Last schedule (explicit tag)
+        world.entity_mut(*signal_b).insert(SignalScheduleTag(Last.intern()));
+
+        // Pipe a -> b (b's explicit tag should NOT be overridden)
+        pipe_signal(&mut world, signal_a, signal_b);
+
+        // signal_b should still have Last schedule
+        let tag = world.get::<SignalScheduleTag>(*signal_b);
+        assert!(tag.is_some());
+        assert_eq!(tag.unwrap().0, Last.intern());
+    }
+
+    #[test]
+    fn by_schedule_is_partitioned_correctly() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal_update = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_default = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+
+        // Tag one signal with Update
+        world
+            .entity_mut(*signal_update)
+            .insert(SignalScheduleTag(Update.intern()));
+
+        world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
+            rebuild_levels(world, &mut state);
+        });
+
+        let state = world.resource::<SignalGraphState>();
+
+        // Check Update schedule has signal_update
+        let update_signals = state.by_schedule.get(&Update.intern());
+        assert!(update_signals.is_some());
+        let update_flat: Vec<_> = update_signals.unwrap().iter().flatten().collect();
+        assert!(update_flat.contains(&&signal_update));
+        assert!(!update_flat.contains(&&signal_default));
+
+        // Check default schedule (PostUpdate) has signal_default
+        let default_signals = state.by_schedule.get(&state.default_schedule);
+        assert!(default_signals.is_some());
+        let default_flat: Vec<_> = default_signals.unwrap().iter().flatten().collect();
+        assert!(default_flat.contains(&&signal_default));
+        assert!(!default_flat.contains(&&signal_update));
+    }
+
+    #[test]
+    fn process_for_schedule_only_runs_scheduled_signals() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+        world.insert_resource(Order::default());
+
+        let signal_update =
+            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+                order.0.push("update");
+                Some(())
+            });
+        let _signal_default =
+            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+                order.0.push("default");
+                Some(())
+            });
+
+        // Tag one signal with Update schedule
+        world
+            .entity_mut(*signal_update)
+            .insert(SignalScheduleTag(Update.intern()));
+
+        // Build levels first
+        world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
+            rebuild_levels(world, &mut state);
+        });
+
+        // Process only Update schedule
+        let mut process_update = process_signal_graph_for_schedule(Update.intern());
+        process_update(&mut world);
+
+        let order = world.resource::<Order>().0.clone();
+        assert_eq!(order, vec!["update"]);
+
+        // Now process default schedule
+        world.resource_mut::<Order>().0.clear();
+        let default_schedule = world.resource::<SignalGraphState>().default_schedule;
+        let mut process_default = process_signal_graph_for_schedule(default_schedule);
+        process_default(&mut world);
+
+        let order = world.resource::<Order>().0.clone();
+        assert_eq!(order, vec!["default"]);
+    }
+
+    #[test]
+    fn cross_schedule_data_flow_via_inputs() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        #[derive(Resource, Default)]
+        struct CollectedValues(Vec<i32>);
+        world.insert_resource(CollectedValues::default());
+
+        // signal_a runs in Update, outputs 42
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(42));
+
+        // signal_b runs in PostUpdate (default), collects input
+        let signal_b = spawn_signal::<i32, (), Option<()>, _, _>(
+            &mut world,
+            |In(value): In<i32>, mut collected: ResMut<CollectedValues>| {
+                collected.0.push(value);
+                Some(())
+            },
+        );
+
+        // Tag signal_a with Update
+        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+
+        // Pipe a -> b (cross-schedule dependency)
+        pipe_signal(&mut world, signal_a, signal_b);
+
+        // Build levels
+        world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
+            rebuild_levels(world, &mut state);
+        });
+
+        // Process Update schedule first (signal_a runs, stores output in inputs)
+        let mut process_update = process_signal_graph_for_schedule(Update.intern());
+        process_update(&mut world);
+
+        // signal_b hasn't run yet
+        assert!(world.resource::<CollectedValues>().0.is_empty());
+
+        // Process PostUpdate schedule (signal_b runs, gets input from signal_a)
+        let default_schedule = world.resource::<SignalGraphState>().default_schedule;
+        let mut process_default = process_signal_graph_for_schedule(default_schedule);
+        process_default(&mut world);
+
+        // signal_b should have received 42 from signal_a
+        assert_eq!(world.resource::<CollectedValues>().0, vec![42]);
+    }
+
+    #[test]
+    fn clear_signal_inputs_clears_inputs() {
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+
+        // Manually insert some inputs into the signal's buffer component
+        world
+            .get_mut::<SignalInputBuffer>(*signal_a)
+            .unwrap()
+            .push(Box::new(42i32) as Box<dyn AnyClone>);
+
+        assert!(!world.get::<SignalInputBuffer>(*signal_a).unwrap().0.is_empty());
+
+        // Clear inputs by clearing the component
+        world.get_mut::<SignalInputBuffer>(*signal_a).unwrap().clear();
+
+        assert!(world.get::<SignalInputBuffer>(*signal_a).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn signals_registered_during_processing_are_processed_same_frame() {
+        use bevy_app::Update;
+
+        // This test verifies the fixpoint loop behavior:
+        // When a signal spawns new elements that register new signals during processing,
+        // those new signals should be processed in the same frame.
+
+        #[derive(Resource, Default)]
+        struct ProcessOrder(Vec<&'static str>);
+
+        #[derive(Resource)]
+        struct ChildSignalHandle(Option<SignalSystem>);
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::new(Update.intern()));
+        world.insert_resource(ProcessOrder::default());
+        world.insert_resource(ChildSignalHandle(None));
+
+        // Create a "parent" signal that, when processed, registers a new "child" signal
+        let parent_signal = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, world: &mut World| {
+            world.resource_mut::<ProcessOrder>().0.push("parent");
+
+            // Check if child already exists (to avoid infinite loop)
+            if world.resource::<ChildSignalHandle>().0.is_none() {
+                // Register a new child signal during parent's processing
+                let child_signal =
+                    spawn_signal::<(), (), Option<()>, _, _>(world, |_: In<()>, mut order: ResMut<ProcessOrder>| {
+                        order.0.push("child");
+                        Some(())
+                    });
+                // Tag child with same schedule as parent
+                world
+                    .entity_mut(*child_signal)
+                    .insert(SignalScheduleTag(Update.intern()));
+                world.resource_mut::<ChildSignalHandle>().0 = Some(child_signal);
+            }
+            Some(())
+        });
+
+        // Tag parent signal
+        world
+            .entity_mut(*parent_signal)
+            .insert(SignalScheduleTag(Update.intern()));
+
+        // Process signals - the fixpoint loop should process both parent and child
+        let mut process_system = process_signal_graph_for_schedule(Update.intern());
+        process_system(&mut world);
+
+        // Both parent and child should have been processed in the same frame
+        let order = &world.resource::<ProcessOrder>().0;
+        assert!(order.contains(&"parent"), "Parent signal should have been processed");
+        assert!(
+            order.contains(&"child"),
+            "Child signal registered during processing should also be processed"
+        );
+    }
+
+    #[test]
+    fn fixpoint_loop_handles_multiple_levels_of_spawning() {
+        use bevy_app::Update;
+
+        // Test that the fixpoint loop can handle chains: A spawns B, B spawns C
+
+        #[derive(Resource, Default)]
+        struct ProcessOrder(Vec<&'static str>);
+
+        #[derive(Resource, Default)]
+        struct SpawnedSignals(Vec<SignalSystem>);
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::new(Update.intern()));
+        world.insert_resource(ProcessOrder::default());
+        world.insert_resource(SpawnedSignals::default());
+
+        // Signal A: spawns signal B
+        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, world: &mut World| {
+            world.resource_mut::<ProcessOrder>().0.push("A");
+
+            let spawned = &world.resource::<SpawnedSignals>().0;
+            if spawned.is_empty() {
+                // Spawn B
+                let signal_b = spawn_signal::<(), (), Option<()>, _, _>(world, |_: In<()>, world: &mut World| {
+                    world.resource_mut::<ProcessOrder>().0.push("B");
+
+                    let spawned = &world.resource::<SpawnedSignals>().0;
+                    if spawned.len() == 1 {
+                        // B spawns C
+                        let signal_c = spawn_signal::<(), (), Option<()>, _, _>(
+                            world,
+                            |_: In<()>, mut order: ResMut<ProcessOrder>| {
+                                order.0.push("C");
+                                Some(())
+                            },
+                        );
+                        world.entity_mut(*signal_c).insert(SignalScheduleTag(Update.intern()));
+                        world.resource_mut::<SpawnedSignals>().0.push(signal_c);
+                    }
+                    Some(())
+                });
+                world.entity_mut(*signal_b).insert(SignalScheduleTag(Update.intern()));
+                world.resource_mut::<SpawnedSignals>().0.push(signal_b);
+            }
+            Some(())
+        });
+
+        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+
+        // Process signals
+        let mut process_system = process_signal_graph_for_schedule(Update.intern());
+        process_system(&mut world);
+
+        // All three should have been processed
+        let order = &world.resource::<ProcessOrder>().0;
+        assert!(order.contains(&"A"), "Signal A should have been processed");
+        assert!(
+            order.contains(&"B"),
+            "Signal B (spawned by A) should have been processed"
+        );
+        assert!(
+            order.contains(&"C"),
+            "Signal C (spawned by B) should have been processed"
+        );
     }
 }
