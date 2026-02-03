@@ -19,7 +19,6 @@ pub mod graph;
 pub mod signal;
 pub mod signal_map;
 pub mod signal_vec;
-#[allow(missing_docs)]
 pub mod utils;
 
 cfg_if::cfg_if! {

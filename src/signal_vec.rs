@@ -4002,8 +4002,7 @@ pub trait SignalVecExt: SignalVec {
 
     /// Activate this [`SignalVec`] and all its upstreams, causing them to be evaluated every frame
     /// until they are [`SignalHandle::cleanup`]-ed, see [`SignalHandle`].
-    fn register(self, world: &mut World) -> SignalHandle
-    where
+    fn register(self, world: &mut World) -> SignalHandle   where
         Self: Sized,
     {
         self.register_signal_vec(world)

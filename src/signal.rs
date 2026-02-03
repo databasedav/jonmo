@@ -430,6 +430,37 @@ where
     }
 }
 
+/// Signal graph node that skips the first `count` upstream values before forwarding, see
+/// [`.skip`](SignalExt::skip).
+pub struct Skip<Upstream>
+where
+    Upstream: Signal,
+{
+    signal: Filter<Upstream>,
+}
+
+impl<Upstream> Clone for Skip<Upstream>
+where
+    Upstream: Signal + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+        }
+    }
+}
+
+impl<Upstream> Signal for Skip<Upstream>
+where
+    Upstream: Signal,
+{
+    type Item = Upstream::Item;
+
+    fn register_boxed_signal(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world)
+    }
+}
+
 /// Signal graph node which combines two upstreams, see [`.zip`](SignalExt::zip).
 #[allow(clippy::type_complexity)]
 pub struct Zip<Left, Right>
@@ -1603,6 +1634,39 @@ pub trait SignalExt: Signal {
                 } else {
                     *emitted += 1;
                     Some(item)
+                }
+            }),
+        }
+    }
+
+    /// Skips the first `count` values from this [`Signal`], then outputs all subsequent values.
+
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// signal::from_system({
+    ///     move |_: In<()>, mut state: Local<usize>| {
+    ///         *state += 1;
+    ///         *state
+    ///     }
+    /// })
+    /// .skip(2); // skips `1`, `2`, then outputs `3`, `4`, `5`, ...
+    /// ```
+    fn skip(self, count: usize) -> Skip<Self>
+    where
+        Self: Sized,
+        Self::Item: Clone + Send + Sync + 'static,
+    {
+        Skip {
+            signal: self.filter(move |_: In<Self::Item>, mut skipped: Local<usize>| {
+                if *skipped < count {
+                    *skipped += 1;
+                    false
+                } else {
+                    true
                 }
             }),
         }
@@ -3889,6 +3953,52 @@ mod tests {
         app.update();
         assert_eq!(get_output::<i32>(app.world()), Some(20));
         assert_eq!(*counter.lock().unwrap(), 2);
+        assert_eq!(values.lock().unwrap().len(), 0);
+        signal.cleanup(app.world_mut());
+    }
+
+    #[test]
+    fn test_skip() {
+        let mut app = create_test_app();
+        app.init_resource::<SignalOutput<i32>>();
+        let counter = Arc::new(Mutex::new(0));
+        let values = Arc::new(Mutex::new(vec![10, 20, 30, 40, 50]));
+        let signal = signal::from_system(clone!((values) move |_: In<()>| {
+            let mut values_lock = values.lock().unwrap();
+            if values_lock.is_empty() {
+                None
+            } else {
+                Some(values_lock.remove(0))
+            }
+        }))
+        .skip(2) // Skip first 2 values (10, 20), then output rest
+        .map(clone!((counter) move |In(val): In<i32>| {
+            *counter.lock().unwrap() += 1;
+            val
+        }))
+        .map(capture_output)
+        .register(app.world_mut());
+
+        // First two updates: values 10, 20 are skipped
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), None);
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), None);
+
+        // Third update: value 30 is output
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(30));
+
+        // Fourth update: value 40 is output
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(40));
+
+        // Fifth update: value 50 is output
+        app.update();
+        assert_eq!(get_output::<i32>(app.world()), Some(50));
+
+        // Counter should be 3 (only values after skip were processed by the map)
+        assert_eq!(*counter.lock().unwrap(), 3);
         assert_eq!(values.lock().unwrap().len(), 0);
         signal.cleanup(app.world_mut());
     }

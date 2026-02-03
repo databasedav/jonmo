@@ -1,3 +1,5 @@
+//! Utility types and functions.
+
 use core::ops::Deref;
 
 use bevy_ecs::prelude::*;
@@ -14,7 +16,7 @@ pub struct LazyEntity(Arc<OnceLock<Entity>>);
 const LAZY_ENTITY_GET_ERROR: &str = "LazyEntity does not contain an Entity";
 
 impl LazyEntity {
-    #[allow(missing_docs)]
+    /// Create a new empty [`LazyEntity`].
     pub fn new() -> Self {
         Self::default()
     }
@@ -59,6 +61,23 @@ pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&Chi
     move |In(entity): In<Entity>, child_ofs: Query<&ChildOf>| get_ancestor(&child_ofs, entity, generations)
 }
 
+/// Dereferences and copies the inner value.
+///
+/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the inner
+/// value from [`Copy`] newtypes.
+///
+/// # Example
+///
+/// ```
+/// use bevy_derive::Deref;
+/// use jonmo::prelude::*;
+///
+/// #[derive(Clone, Deref)]
+/// struct Counter(i32);
+///
+/// signal::always(Counter(42))
+///     .map_in(deref_copied); // outputs `42`
+/// ```
 pub fn deref_copied<T: Deref>(x: T) -> T::Target
 where
     <T as Deref>::Target: Copy,
@@ -66,6 +85,23 @@ where
     *x.deref()
 }
 
+/// Dereferences and clones the inner value.
+///
+/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the inner
+/// value from [`Clone`] newtypes.
+///
+/// # Example
+///
+/// ```
+/// use bevy_derive::Deref;
+/// use jonmo::prelude::*;
+///
+/// #[derive(Clone, Deref)]
+/// struct Username(String);
+///
+/// signal::always(Username("test".to_string()))
+///     .map_in(deref_cloned); // outputs `"test"`
+/// ```
 pub fn deref_cloned<T: Deref>(x: T) -> T::Target
 where
     <T as Deref>::Target: Clone,

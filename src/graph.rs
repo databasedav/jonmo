@@ -1815,6 +1815,101 @@ mod tests {
     }
 
     #[test]
+    fn schedule_propagates_to_all_upstreams_for_multi_upstream_signal() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        // Create three independent root signals (simulating branches that will be combined)
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let signal_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(3));
+
+        // Create a multi-upstream signal that depends on all three
+        // (simulating what happens with signal::zip or signal::any!)
+        let combined = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(100));
+
+        // Manually connect all three as upstreams of `combined`
+        pipe_signal(&mut world, signal_a, combined);
+        pipe_signal(&mut world, signal_b, combined);
+        pipe_signal(&mut world, signal_c, combined);
+
+        // Verify the combined signal has all three upstreams
+        let upstreams = world.get::<Upstream>(*combined).unwrap();
+        assert_eq!(upstreams.iter().count(), 3);
+
+        // Now apply schedule to the combined signal - this should propagate to ALL upstreams
+        apply_schedule_to_signal(&mut world, combined, Update.intern());
+
+        // Verify the combined signal itself has the schedule
+        let combined_tag = world.get::<SignalScheduleTag>(*combined);
+        assert!(combined_tag.is_some());
+        assert_eq!(combined_tag.unwrap().0, Update.intern());
+
+        // Verify ALL upstream signals got the schedule tag
+        let tag_a = world.get::<SignalScheduleTag>(*signal_a);
+        assert!(tag_a.is_some(), "signal_a should have schedule tag");
+        assert_eq!(tag_a.unwrap().0, Update.intern());
+
+        let tag_b = world.get::<SignalScheduleTag>(*signal_b);
+        assert!(tag_b.is_some(), "signal_b should have schedule tag");
+        assert_eq!(tag_b.unwrap().0, Update.intern());
+
+        let tag_c = world.get::<SignalScheduleTag>(*signal_c);
+        assert!(tag_c.is_some(), "signal_c should have schedule tag");
+        assert_eq!(tag_c.unwrap().0, Update.intern());
+    }
+
+    #[test]
+    fn schedule_propagates_to_deep_multi_upstream_graph() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        // Create a deeper graph:
+        //       root_a    root_b    root_c
+        //          \       /           |
+        //         mid_ab              mid_c
+        //              \             /
+        //               \           /
+        //                  final
+        let root_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let root_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let root_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(3));
+
+        let mid_ab = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(10));
+        let mid_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(20));
+
+        let final_signal = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(100));
+
+        // Connect the graph
+        pipe_signal(&mut world, root_a, mid_ab);
+        pipe_signal(&mut world, root_b, mid_ab);
+        pipe_signal(&mut world, root_c, mid_c);
+        pipe_signal(&mut world, mid_ab, final_signal);
+        pipe_signal(&mut world, mid_c, final_signal);
+
+        // Apply schedule only to the final signal
+        apply_schedule_to_signal(&mut world, final_signal, Update.intern());
+
+        // ALL signals in the graph should now have the schedule tag
+        for (name, signal) in [
+            ("root_a", root_a),
+            ("root_b", root_b),
+            ("root_c", root_c),
+            ("mid_ab", mid_ab),
+            ("mid_c", mid_c),
+            ("final", final_signal),
+        ] {
+            let tag = world.get::<SignalScheduleTag>(*signal);
+            assert!(tag.is_some(), "{name} should have schedule tag");
+            assert_eq!(tag.unwrap().0, Update.intern(), "{name} should have Update schedule");
+        }
+    }
+
+    #[test]
     fn by_schedule_is_partitioned_correctly() {
         use bevy_app::Update;
 
