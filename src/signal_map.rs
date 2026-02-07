@@ -473,7 +473,7 @@ where
     ///     .values([(1, 10), (2, 20)])
     ///     .spawn(&mut world);
     ///
-    /// let signal = signal::from_system(|_: In<()>, res: Res<DoubleValues>| res.0).switch_signal_map(
+    /// let signal = signal::from_system(|In(_), res: Res<DoubleValues>| res.0).switch_signal_map(
     ///     move |In(double): In<bool>, world: &mut World| {
     ///         if double {
     ///             map.signal_map()
@@ -518,7 +518,7 @@ where
     ///     .values([(1, 100), (2, 200), (3, 300)])
     ///     .spawn(&mut world);
     ///
-    /// let signal = signal::from_system(|_: In<()>, res: Res<MapSelector>| res.0).switch_signal_map(
+    /// let signal = signal::from_system(|In(_), res: Res<MapSelector>| res.0).switch_signal_map(
     ///     move |In(use_a): In<bool>, world: &mut World| {
     ///         if use_a {
     ///             map_a
@@ -627,7 +627,7 @@ pub trait SignalMapExt: SignalMap {
     ///     .spawn(&mut world)
     ///     .signal_map()
     ///     .map_value_signal(|In(x)|
-    ///         signal::from_system(move |_: In<()>| x * 2).dedupe()
+    ///         signal::from_system(move |In(_)| x * 2).dedupe()
     ///     ); // outputs `SignalMap -> {1: 4, 3: 8}`
     /// ```
     fn map_value_signal<S, F, M>(self, system: F) -> MapValueSignal<Self, S>
@@ -646,7 +646,7 @@ pub trait SignalMapExt: SignalMap {
             let factory_system_id = world.register_system(system);
             let output_signal_entity = LazyEntity::new();
             let output_signal = *signal::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                clone!((output_signal_entity) move |In(_), world: &mut World| {
                     let mut diffs = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal_entity).unwrap();
                     if diffs.0.is_empty() {
                         None
@@ -949,7 +949,7 @@ pub trait SignalMapExt: SignalMap {
     ///         .values([(1, 2), (3, 4)])
     ///         .spawn(&mut world)
     ///         .signal_map()
-    ///         .map_value_signal(|In(x): In<i32>| signal::from_system(move |_: In<()>| x * 2))
+    ///         .map_value_signal(|In(x): In<i32>| signal::from_system(move |In(_)| x * 2))
     ///         .boxed() // this is a `MapValueSignal<Source<i32, i32>>`
     /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
@@ -970,7 +970,7 @@ pub trait SignalMapExt: SignalMap {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// signal::from_system(|_: In<()>| true).switch_signal_map(
+    /// signal::from_system(|In(_)| true).switch_signal_map(
     ///     |In(condition): In<bool>, world: &mut World| {
     ///         if condition {
     ///             MutableBTreeMap::builder()
@@ -984,7 +984,7 @@ pub trait SignalMapExt: SignalMap {
     ///                 .values([(1, 2), (3, 4)])
     ///                 .spawn(world)
     ///                 .signal_map()
-    ///                 .map_value_signal(|In(x): In<i32>| signal::from_system(move |_: In<()>| x * 2))
+    ///                 .map_value_signal(|In(x): In<i32>| signal::from_system(move |In(_)| x * 2))
     ///                 .boxed_clone() // this is a `MapValueSignal<Source<i32, i32>>`
     ///         } // without the `.boxed_clone()`, the compiler would not allow this
     ///     },
@@ -1225,7 +1225,7 @@ where
 {
     let data_entity = LazyEntity::new();
     let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
-        let source_system = move |_: In<()>, mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
+        let source_system = move |In(_), mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
             let mut data = mutable_btree_map_datas.get_mut(*data_entity).unwrap();
             if data.pending_diffs.is_empty() {
                 None

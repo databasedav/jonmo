@@ -51,8 +51,8 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> jonmo::Builder {
         // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
         numbers
             .signal_vec()
-            // signal::from_system(|_: In<()>| 1)
-            // signal::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
+            // signal::from_system(|In(_)| 1)
+            // signal::from_system(|In(_), toggle: Res<ToggleFilter>| toggle.0)
             // .dedupe()
             // .switch_signal_vec(move |In(toggle)| {
             //     if toggle {
@@ -66,12 +66,12 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> jonmo::Builder {
             // .dedupe()
             // .to_signal_vec()
             .filter_signal(|In(n)| {
-                signal::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+                signal::from_system(move |In(_), toggle: Res<ToggleFilter>| {
                     n % 2 == if toggle.0 { 0 } else { 1 }
                 })
             })
             // .map_signal(|In(n): In<i32>| {
-            //     signal::from_system(move |_: In<()>| n + 1).dedupe()
+            //     signal::from_system(move |In(_)| n + 1).dedupe()
             // })
             // .debug()
             // .map_in(|n: i32| -n)

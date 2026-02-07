@@ -235,7 +235,7 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> jonmo::
         data.clone()
             .map_in(|LetterData { pressed, .. }| pressed)
             .dedupe()
-            .map_true(|_: In<()>| Outline {
+            .map_true(|In(_)| Outline {
                 width: Val::Px(1.),
                 ..default()
             }),

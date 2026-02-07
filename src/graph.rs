@@ -1572,7 +1572,7 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
 ///
 /// let mut app = App::new();
 /// app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
-/// let signal = *signal::from_system(|_: In<()>| 1).register(app.world_mut());
+/// let signal = *signal::from_system(|In(_)| 1).register(app.world_mut());
 /// poll_signal(app.world_mut(), signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
 /// ```
 pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {
@@ -1604,8 +1604,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
 
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
             rebuild_levels(world, &mut state);
@@ -1636,11 +1636,11 @@ mod tests {
         world.insert_resource(SignalGraphState::default());
         world.insert_resource(Order::default());
 
-        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
             order.0.push("a");
             Some(())
         });
-        let signal_b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+        let signal_b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
             order.0.push("b");
             Some(())
         });
@@ -1661,11 +1661,11 @@ mod tests {
         world.insert_resource(SignalGraphState::default());
         world.insert_resource(Order::default());
 
-        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
             order.0.push("a");
             Some(())
         });
-        let signal_b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+        let signal_b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
             order.0.push("b");
             Some(())
         });
@@ -1685,10 +1685,10 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
-        let b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
-        let c = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
-        let d = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
+        let a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
+        let b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
+        let c = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
+        let d = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
 
         pipe_signal(&mut world, a, b);
         pipe_signal(&mut world, b, c);
@@ -1716,9 +1716,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
-        let b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
-        let c = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>| Some(()));
+        let a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
+        let b = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
+        let c = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_)| Some(()));
 
         pipe_signal(&mut world, a, b);
         pipe_signal(&mut world, b, c);
@@ -1746,7 +1746,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
 
         // Tag the signal with Update schedule
         world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
@@ -1768,8 +1768,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
 
         // Tag signal_a with Update schedule and set a hint for downstream
         world
@@ -1793,8 +1793,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
 
         // Tag signal_a with Update schedule and set a hint
         world
@@ -1822,13 +1822,13 @@ mod tests {
         world.insert_resource(SignalGraphState::default());
 
         // Create three independent root signals (simulating branches that will be combined)
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
-        let signal_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(3));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let signal_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
+        let signal_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(3));
 
         // Create a multi-upstream signal that depends on all three
         // (simulating what happens with signal::zip or signal::any!)
-        let combined = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(100));
+        let combined = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(100));
 
         // Manually connect all three as upstreams of `combined`
         pipe_signal(&mut world, signal_a, combined);
@@ -1875,14 +1875,14 @@ mod tests {
         //              \             /
         //               \           /
         //                  final
-        let root_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let root_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
-        let root_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(3));
+        let root_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let root_b = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
+        let root_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(3));
 
-        let mid_ab = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(10));
-        let mid_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(20));
+        let mid_ab = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(10));
+        let mid_c = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(20));
 
-        let final_signal = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(100));
+        let final_signal = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(100));
 
         // Connect the graph
         pipe_signal(&mut world, root_a, mid_ab);
@@ -1916,8 +1916,8 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_update = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
-        let signal_default = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(2));
+        let signal_update = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let signal_default = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
 
         // Tag one signal with Update
         world
@@ -1954,12 +1954,12 @@ mod tests {
         world.insert_resource(Order::default());
 
         let signal_update =
-            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
                 order.0.push("update");
                 Some(())
             });
         let _signal_default =
-            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, mut order: ResMut<Order>| {
+            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
                 order.0.push("default");
                 Some(())
             });
@@ -2003,7 +2003,7 @@ mod tests {
         world.insert_resource(CollectedValues::default());
 
         // signal_a runs in Update, outputs 42
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(42));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(42));
 
         // signal_b runs in PostUpdate (default), collects input
         let signal_b = spawn_signal::<i32, (), Option<()>, _, _>(
@@ -2046,7 +2046,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
 
-        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |_: In<()>| Some(1));
+        let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
 
         // Manually insert some inputs into the signal's buffer component
         world
@@ -2082,14 +2082,14 @@ mod tests {
         world.insert_resource(ChildSignalHandle(None));
 
         // Create a "parent" signal that, when processed, registers a new "child" signal
-        let parent_signal = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, world: &mut World| {
+        let parent_signal = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), world: &mut World| {
             world.resource_mut::<ProcessOrder>().0.push("parent");
 
             // Check if child already exists (to avoid infinite loop)
             if world.resource::<ChildSignalHandle>().0.is_none() {
                 // Register a new child signal during parent's processing
                 let child_signal =
-                    spawn_signal::<(), (), Option<()>, _, _>(world, |_: In<()>, mut order: ResMut<ProcessOrder>| {
+                    spawn_signal::<(), (), Option<()>, _, _>(world, |In(_), mut order: ResMut<ProcessOrder>| {
                         order.0.push("child");
                         Some(())
                     });
@@ -2138,13 +2138,13 @@ mod tests {
         world.insert_resource(SpawnedSignals::default());
 
         // Signal A: spawns signal B
-        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |_: In<()>, world: &mut World| {
+        let signal_a = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), world: &mut World| {
             world.resource_mut::<ProcessOrder>().0.push("A");
 
             let spawned = &world.resource::<SpawnedSignals>().0;
             if spawned.is_empty() {
                 // Spawn B
-                let signal_b = spawn_signal::<(), (), Option<()>, _, _>(world, |_: In<()>, world: &mut World| {
+                let signal_b = spawn_signal::<(), (), Option<()>, _, _>(world, |In(_), world: &mut World| {
                     world.resource_mut::<ProcessOrder>().0.push("B");
 
                     let spawned = &world.resource::<SpawnedSignals>().0;
@@ -2152,7 +2152,7 @@ mod tests {
                         // B spawns C
                         let signal_c = spawn_signal::<(), (), Option<()>, _, _>(
                             world,
-                            |_: In<()>, mut order: ResMut<ProcessOrder>| {
+                            |In(_), mut order: ResMut<ProcessOrder>| {
                                 order.0.push("C");
                                 Some(())
                             },

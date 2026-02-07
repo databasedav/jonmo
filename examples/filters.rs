@@ -237,7 +237,7 @@ fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(jonmo::Build
                 signal::from_component_changed(row_parent.clone())
                     .map_in(move |NumberFilters(filters)| filters.contains(&parity))
                     .dedupe()
-                    .map_true(|_: In<()>| outline()),
+                    .map_true(|In(_)| outline()),
             )
     }
 }
@@ -276,7 +276,7 @@ fn number_toggles(row_parent: LazyEntity) -> jonmo::Builder {
                 signal::from_entity(row_parent.clone())
                     .has_component::<Sorted>()
                     .dedupe()
-                    .map_true(|_: In<()>| outline()),
+                    .map_true(|In(_)| outline()),
             ),
     )
 }
@@ -299,7 +299,7 @@ fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> jonmo::Builder {
         signal::from_component_changed(row_parent.clone())
             .map_in(move |ShapeFilters(filters)| filters.contains(&shape))
             .dedupe()
-            .map_true(|_: In<()>| outline()),
+            .map_true(|In(_)| outline()),
     )
 }
 
@@ -345,7 +345,7 @@ fn color_toggles(row_parent: LazyEntity) -> jonmo::Builder {
                     signal::from_component_changed(row_parent.clone())
                         .map_in(move |ColorFilters(filters)| filters.contains(&color))
                         .dedupe()
-                        .map_true(|_: In<()>| outline()),
+                        .map_true(|In(_)| outline()),
                 )
             }),
     )

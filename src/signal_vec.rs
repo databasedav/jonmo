@@ -1006,7 +1006,7 @@ where
     ///     .values([1, 2, 3, 4, 5])
     ///     .spawn(&mut world);
     ///
-    /// let signal = signal::from_system(|_: In<()>, res: Res<ShowFiltered>| res.0).switch_signal_vec(
+    /// let signal = signal::from_system(|In(_), res: Res<ShowFiltered>| res.0).switch_signal_vec(
     ///     move |In(show_filtered): In<bool>, world: &mut World| {
     ///         if show_filtered {
     ///             list.signal_vec()
@@ -1049,7 +1049,7 @@ where
     ///     .values([100, 200, 300])
     ///     .spawn(&mut world);
     ///
-    /// let signal = signal::from_system(|_: In<()>, res: Res<ListMode>| res.0).switch_signal_vec(
+    /// let signal = signal::from_system(|In(_), res: Res<ListMode>| res.0).switch_signal_vec(
     ///     move |In(mode): In<u8>, world: &mut World| {
     ///         if mode == 0 {
     ///             list_a.signal_vec().map_in(|x: i32| x * 2).left_either()
@@ -1246,7 +1246,7 @@ pub trait SignalVecExt: SignalVec {
     ///     .spawn(&mut world)
     ///     .signal_vec()
     ///     .map_signal(|In(x): In<i32>|
-    ///         signal::from_system(move |_: In<()>| x * 2).dedupe()
+    ///         signal::from_system(move |In(_)| x * 2).dedupe()
     ///     ); // outputs `SignalVec -> [2, 4, 6]`
     /// ```
     fn map_signal<S, F, M>(self, system: F) -> MapSignal<Self, S>
@@ -1295,7 +1295,7 @@ pub trait SignalVecExt: SignalVec {
             let factory_system_id = world.register_system(system);
             let output_signal_entity = LazyEntity::new();
             let output_signal = *signal::from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                clone!((output_signal_entity) move |In(_), world: &mut World| {
                     let mut diffs = world.get_mut::<QueuedVecDiffs<S::Item>>(*output_signal_entity).unwrap();
                     if diffs.0.is_empty() {
                         None
@@ -2089,7 +2089,7 @@ pub trait SignalVecExt: SignalVec {
 
                     let create_index_signal = clone!((processor_entity_handle) move | key: usize | -> BoxedSignal<Option<usize>> {
                         signal::from_system(
-                            clone!((processor_entity_handle) move |_: In<()>, query: Query<&EnumerateState, Allow<Internal>>| {
+                            clone!((processor_entity_handle) move |In(_), query: Query<&EnumerateState, Allow<Internal>>| {
                                 Some(
                                     query
                                         .get(*processor_entity_handle)
@@ -2735,7 +2735,7 @@ pub trait SignalVecExt: SignalVec {
             let create_index_signal = clone!((state_entity_handle) move | key: usize | {
                 signal::from_system(
                     clone!(
-                        (state_entity_handle) move |_: In<()>,
+                        (state_entity_handle) move |In(_),
                         query: Query<&IntersperseState<Self::Item>, Allow<Internal>>| {
                             Some(
                                 query
@@ -3450,7 +3450,7 @@ pub trait SignalVecExt: SignalVec {
 
             // The output signal just drains and emits any queued diffs
             let output_signal = *signal::from_system::<Vec<VecDiff<InnerItem<Self>>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
+                clone!((output_signal_entity) move |In(_), world: &mut World| {
                     let mut diffs = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal_entity).unwrap();
                     if diffs.0.is_empty() {
                         None
@@ -3957,7 +3957,7 @@ pub trait SignalVecExt: SignalVec {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// signal::from_system(|_: In<()>| true).switch_signal_vec(
+    /// signal::from_system(|In(_)| true).switch_signal_vec(
     ///     |In(condition): In<bool>, world: &mut World| {
     ///         if condition {
     ///             MutableVec::builder()
@@ -4309,7 +4309,7 @@ where
 {
     let data_entity = LazyEntity::new();
     let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
-        let source_system = move |_: In<()>, mut mutable_vec_datas: Query<&mut MutableVecData<T>>| {
+        let source_system = move |In(_), mut mutable_vec_datas: Query<&mut MutableVecData<T>>| {
             let mut data = mutable_vec_datas.get_mut(*data_entity).unwrap();
                 if data.pending_diffs.is_empty() {
                     None
@@ -7199,7 +7199,7 @@ pub(crate) mod tests {
             app.update();
             apply_diffs(&mut current_state, get_and_clear_output::<ItemOrSep>(app.world_mut()));
 
-            let placeholder_sep = ItemOrSep::Sep(signal::from_system(|_: In<()>| None::<usize>).boxed_clone());
+            let placeholder_sep = ItemOrSep::Sep(signal::from_system(|In(_)| None::<usize>).boxed_clone());
             assert_eq!(
                 current_state,
                 vec![
