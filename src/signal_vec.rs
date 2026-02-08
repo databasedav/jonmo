@@ -23,7 +23,7 @@ use bevy_ecs::{
     change_detection::Mut, entity_disabling::Internal, prelude::*, schedule::ScheduleLabel, system::SystemId,
 };
 use bevy_platform::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -881,7 +881,7 @@ where
     }
 }
 
-/// A node that flattens a `SignalVec` of `SignalVec`s.
+/// Signal graph node that flattens a [`SignalVec`] of [`SignalVec`]s.
 #[derive(Clone)]
 pub struct Flatten<Upstream> {
     signal: LazySignal,
@@ -1733,7 +1733,7 @@ pub trait SignalVecExt: SignalVec {
                         clone!(
                             (parent_entity) move |In(source_diffs): In<Vec<VecDiff<Self::Item>>>,
                             world: & mut World | {
-                                let parent =* parent_entity;
+                                let parent = *parent_entity;
                                 let mut generated_diffs = vec![];
                                 for diff in source_diffs.into_iter() {
                                     match diff {
@@ -2073,7 +2073,7 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!(
                 (processor_entity_handle) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
-                    let processor_entity =* processor_entity_handle;
+                    let processor_entity = *processor_entity_handle;
                     let mut state = world.get_mut::<EnumerateState>(processor_entity).unwrap();
                     let mut out_diffs = vec![];
 
@@ -2752,7 +2752,7 @@ pub trait SignalVecExt: SignalVec {
             let processor_logic = clone!(
                 (state_entity_handle, create_index_signal) move |In(diffs): In<Vec<VecDiff<Self::Item>>>,
                 world: & mut World | {
-                    let state_entity =* state_entity_handle;
+                    let state_entity = *state_entity_handle;
                     let mut out_diffs = Vec::new();
                     for diff in diffs {
                         match diff {
@@ -3404,483 +3404,487 @@ pub trait SignalVecExt: SignalVec {
         }
     }
 
-    /// Flattens a [`SignalVec`] of [`SignalVec`]s into a single [`SignalVec`].
-    ///
-    /// When the outer [`SignalVec`] adds/removes/moves inner [`SignalVec`]s, or when any inner
-    /// [`SignalVec`] itself changes, the flattened output is updated accordingly.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use bevy_ecs::prelude::*;
-    /// use jonmo::prelude::*;
-    ///
-    /// let mut world = World::new();
-    ///
-    /// let inner1 = MutableVec::builder().values([1, 2]).spawn(&mut world);
-    /// let inner2 = MutableVec::builder().values([3, 4, 5]).spawn(&mut world);
-    ///
-    /// let outer = MutableVec::builder()
-    ///     .values([inner1.signal_vec(), inner2.signal_vec()])
-    ///     .spawn(&mut world);
-    ///
-    /// let flattened = outer.signal_vec().flatten();
-    /// // flattened outputs `[1, 2, 3, 4, 5]`
-    /// ```
-    fn flatten(self) -> Flatten<Self>
-    where
-        Self: Sized,
-        Self::Item: SignalVec + 'static + Clone,
-        <Self::Item as SignalVec>::Item: Clone + Send + Sync + 'static,
-    {
-        type InnerItem<U> = <<U as SignalVec>::Item as SignalVec>::Item;
+    // /// Flattens a [`SignalVec`] of [`SignalVec`]s into a single [`SignalVec`].
+    // ///
+    // /// When the outer [`SignalVec`] adds/removes/moves inner [`SignalVec`]s, or when any inner
+    // /// [`SignalVec`] itself changes, the flattened output is updated accordingly.
+    // ///
+    // /// # Example
+    // ///
+    // /// ```
+    // /// use bevy_ecs::prelude::*;
+    // /// use jonmo::prelude::*;
+    // ///
+    // /// let mut world = World::new();
+    // ///
+    // /// let inner1 = MutableVec::builder().values([1, 2]).spawn(&mut world);
+    // /// let inner2 = MutableVec::builder().values([3, 4, 5]).spawn(&mut world);
+    // ///
+    // /// let outer = MutableVec::builder()
+    // ///     .values([inner1.signal_vec(), inner2.signal_vec()])
+    // ///     .spawn(&mut world);
+    // ///
+    // /// let flattened = outer.signal_vec().flatten();
+    // /// // flattened outputs `[1, 2, 3, 4, 5]`
+    // /// ```
+    // fn flatten(self) -> Flatten<Self>
+    // where
+    //     Self: Sized,
+    //     Self::Item: SignalVec + 'static + Clone,
+    //     <Self::Item as SignalVec>::Item: Clone + Send + Sync + 'static,
+    // {
+    //     type InnerItem<U> = <<U as SignalVec>::Item as SignalVec>::Item;
 
-        #[derive(Component)]
-        struct FlattenState {
-            /// Each item tracks: (processor handle, current length of that inner signal vec)
-            items: Vec<(SignalHandle, usize)>,
-        }
+    //     #[derive(Component)]
+    //     struct FlattenState {
+    //         /// Each item tracks: (processor handle, current length of that inner signal vec)
+    //         items: Vec<(SignalHandle, usize)>,
+    //     }
 
-        /// Component to track which index in the FlattenState.items this processor corresponds to
-        #[derive(Component)]
-        struct FlattenItemIndex(usize);
+    //     /// Component to track which index in the FlattenState.items this processor corresponds to
+    //     #[derive(Component)]
+    //     struct FlattenItemIndex(usize);
 
-        let signal = LazySignal::new(move |world: &mut World| {
-            let output_signal_entity = LazyEntity::new();
+    //     let signal = LazySignal::new(move |world: &mut World| {
+    //         let output_signal_entity = LazyEntity::new();
 
-            // The output signal just drains and emits any queued diffs
-            let output_signal = *signal::from_system::<Vec<VecDiff<InnerItem<Self>>>, _, _, _>(
-                clone!((output_signal_entity) move |In(_), world: &mut World| {
-                    let mut diffs = world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal_entity).unwrap();
-                    if diffs.0.is_empty() {
-                        None
-                    } else {
-                        Some(diffs.0.drain(..).collect())
-                    }
-                }),
-            )
-            .register(world);
-            output_signal_entity.set(*output_signal);
+    //         // The output signal just drains and emits any queued diffs
+    //         let output_signal = *signal::from_system::<Vec<VecDiff<InnerItem<Self>>>, _, _, _>(
+    //             clone!((output_signal_entity) move |In(_), world: &mut World| {
+    //                 let mut diffs =
+    // world.get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal_entity).unwrap();
+    // if diffs.0.is_empty() {                     None
+    //                 } else {
+    //                     Some(diffs.0.drain(..).collect())
+    //                 }
+    //             }),
+    //         )
+    //         .register(world);
+    //         output_signal_entity.set(*output_signal);
 
-            /// Finds all VecReplayTrigger ancestors of a signal
-            fn find_replay_triggers(world: &World, signal: SignalSystem) -> Vec<SignalSystem> {
-                let mut triggers = Vec::new();
-                let mut stack = vec![signal];
-                let mut visited = HashSet::new();
-                while let Some(current) = stack.pop() {
-                    if !visited.insert(current) {
-                        continue;
-                    }
-                    if world.get::<VecReplayTrigger>(*current).is_some() {
-                        triggers.push(current);
-                    }
-                    if let Some(upstream) = world.get::<Upstream>(*current) {
-                        stack.extend(upstream.0.iter().copied());
-                    }
-                }
-                triggers
-            }
+    //         /// Finds all VecReplayTrigger ancestors of a signal
+    //         fn find_replay_triggers(world: &World, signal: SignalSystem) -> Vec<SignalSystem> {
+    //             let mut triggers = Vec::new();
+    //             let mut stack = vec![signal];
+    //             let mut visited = HashSet::new();
+    //             while let Some(current) = stack.pop() {
+    //                 if !visited.insert(current) {
+    //                     continue;
+    //                 }
+    //                 if world.get::<VecReplayTrigger>(*current).is_some() {
+    //                     triggers.push(current);
+    //                 }
+    //                 if let Some(upstream) = world.get::<Upstream>(*current) {
+    //                     stack.extend(upstream.0.iter().copied());
+    //                 }
+    //             }
+    //             triggers
+    //         }
 
-            /// Triggers replay on the given signals
-            fn trigger_replays(world: &mut World, triggers: Vec<SignalSystem>) {
-                for signal in triggers {
-                    trigger_replay::<VecReplayTrigger>(world, *signal);
-                }
-            }
+    //         /// Triggers replay on the given signals
+    //         fn trigger_replays(world: &mut World, triggers: Vec<SignalSystem>) {
+    //             for signal in triggers {
+    //                 trigger_replay::<VecReplayTrigger>(world, *signal);
+    //             }
+    //         }
 
-            /// Creates a processor for an inner SignalVec that translates its diffs to the
-            /// flattened output. Returns (processor handle, replay triggers to call
-            /// later). NOTE: The caller should add the entry to FlattenState.items and
-            /// THEN call trigger_replays.
-            fn create_inner_processor<O: Clone + Send + Sync + 'static>(
-                world: &mut World,
-                output_signal: SignalSystem,
-                index: usize,
-                inner_signal_vec: impl SignalVec<Item = O> + 'static + Clone,
-            ) -> (SignalHandle, Vec<SignalSystem>) {
-                let processor_entity = LazyEntity::new();
+    //         /// Creates a processor for an inner SignalVec that translates its diffs to the
+    //         /// flattened output. Returns (processor handle, replay triggers to call
+    //         /// later). NOTE: The caller should add the entry to FlattenState.items and
+    //         /// THEN call trigger_replays.
+    //         fn create_inner_processor<O: Clone + Send + Sync + 'static>(
+    //             world: &mut World,
+    //             output_signal: SignalSystem,
+    //             index: usize,
+    //             inner_signal_vec: impl SignalVec<Item = O> + 'static + Clone,
+    //         ) -> (SignalHandle, Vec<SignalSystem>) {
+    //             let processor_entity = LazyEntity::new();
 
-                // Processor that handles diffs from the inner SignalVec
-                let processor_logic = clone!((processor_entity) move |In(diffs): In<Vec<VecDiff<O>>>, world: &mut World| {
-                    let self_entity =* processor_entity;
+    //             // Processor that handles diffs from the inner SignalVec
+    //             let processor_logic = clone!((processor_entity) move |In(diffs): In<Vec<VecDiff<O>>>,
+    // world: &mut World| {                 let self_entity = *processor_entity;
 
-                    // Get our current index
-                    let item_index = world.get::<FlattenItemIndex>(self_entity).unwrap().0;
+    //                 // Get our current index
+    //                 let item_index = world.get::<FlattenItemIndex>(self_entity).unwrap().0;
 
-                    // Get the flatten state
-                    let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
+    //                 // Get the flatten state
+    //                 let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
 
-                    // Calculate offset (sum of lengths of all inner vecs before this one)
-                    let offset: usize = state.items[..item_index]
-                        .iter()
-                        .map(|(_, len)| *len)
-                        .sum();
+    //                 // Calculate offset (sum of lengths of all inner vecs before this one)
+    //                 let offset: usize = state.items[..item_index]
+    //                     .iter()
+    //                     .map(|(_, len)| *len)
+    //                     .sum();
 
-                    let mut out_diffs = Vec::new();
+    //                 let mut out_diffs = Vec::new();
 
-                    for diff in diffs {
-                        match diff {
-                            VecDiff::Replace { values } => {
-                                // Remove all old values
-                                let old_len = state.items[item_index].1;
-                                for _ in 0..old_len {
-                                    out_diffs.push(VecDiff::RemoveAt { index: offset });
-                                }
-                                // Insert all new values
-                                for (i, v) in values.iter().enumerate() {
-                                    out_diffs.push(VecDiff::InsertAt {
-                                        index: offset + i,
-                                        value: v.clone(),
-                                    });
-                                }
-                                state.items[item_index].1 = values.len();
-                            }
-                            VecDiff::InsertAt { index, value } => {
-                                state.items[item_index].1 += 1;
-                                out_diffs.push(VecDiff::InsertAt {
-                                    index: offset + index,
-                                    value,
-                                });
-                            }
-                            VecDiff::UpdateAt { index, value } => {
-                                // Length doesn't change for UpdateAt
-                                out_diffs.push(VecDiff::UpdateAt {
-                                    index: offset + index,
-                                    value,
-                                });
-                            }
-                            VecDiff::RemoveAt { index } => {
-                                state.items[item_index].1 -= 1;
-                                out_diffs.push(VecDiff::RemoveAt {
-                                    index: offset + index,
-                                });
-                            }
-                            VecDiff::Move { old_index, new_index } => {
-                                // Length doesn't change for Move
-                                out_diffs.push(VecDiff::Move {
-                                    old_index: offset + old_index,
-                                    new_index: offset + new_index,
-                                });
-                            }
-                            VecDiff::Push { value } => {
-                                let insert_index = offset + state.items[item_index].1;
-                                state.items[item_index].1 += 1;
-                                out_diffs.push(VecDiff::InsertAt {
-                                    index: insert_index,
-                                    value,
-                                });
-                            }
-                            VecDiff::Pop => {
-                                if state.items[item_index].1 > 0 {
-                                    state.items[item_index].1 -= 1;
-                                    out_diffs.push(VecDiff::RemoveAt {
-                                        index: offset + state.items[item_index].1,
-                                    });
-                                }
-                            }
-                            VecDiff::Clear => {
-                                let old_len = state.items[item_index].1;
-                                state.items[item_index].1 = 0;
-                                for _ in 0..old_len {
-                                    out_diffs.push(VecDiff::RemoveAt { index: offset });
-                                }
-                            }
-                        }
-                    }
+    //                 for diff in diffs {
+    //                     match diff {
+    //                         VecDiff::Replace { values } => {
+    //                             // Remove all old values
+    //                             let old_len = state.items[item_index].1;
+    //                             for _ in 0..old_len {
+    //                                 out_diffs.push(VecDiff::RemoveAt { index: offset });
+    //                             }
+    //                             // Insert all new values
+    //                             for (i, v) in values.iter().enumerate() {
+    //                                 out_diffs.push(VecDiff::InsertAt {
+    //                                     index: offset + i,
+    //                                     value: v.clone(),
+    //                                 });
+    //                             }
+    //                             state.items[item_index].1 = values.len();
+    //                         }
+    //                         VecDiff::InsertAt { index, value } => {
+    //                             state.items[item_index].1 += 1;
+    //                             out_diffs.push(VecDiff::InsertAt {
+    //                                 index: offset + index,
+    //                                 value,
+    //                             });
+    //                         }
+    //                         VecDiff::UpdateAt { index, value } => {
+    //                             // Length doesn't change for UpdateAt
+    //                             out_diffs.push(VecDiff::UpdateAt {
+    //                                 index: offset + index,
+    //                                 value,
+    //                             });
+    //                         }
+    //                         VecDiff::RemoveAt { index } => {
+    //                             state.items[item_index].1 -= 1;
+    //                             out_diffs.push(VecDiff::RemoveAt {
+    //                                 index: offset + index,
+    //                             });
+    //                         }
+    //                         VecDiff::Move { old_index, new_index } => {
+    //                             // Length doesn't change for Move
+    //                             out_diffs.push(VecDiff::Move {
+    //                                 old_index: offset + old_index,
+    //                                 new_index: offset + new_index,
+    //                             });
+    //                         }
+    //                         VecDiff::Push { value } => {
+    //                             let insert_index = offset + state.items[item_index].1;
+    //                             state.items[item_index].1 += 1;
+    //                             out_diffs.push(VecDiff::InsertAt {
+    //                                 index: insert_index,
+    //                                 value,
+    //                             });
+    //                         }
+    //                         VecDiff::Pop => {
+    //                             if state.items[item_index].1 > 0 {
+    //                                 state.items[item_index].1 -= 1;
+    //                                 out_diffs.push(VecDiff::RemoveAt {
+    //                                     index: offset + state.items[item_index].1,
+    //                                 });
+    //                             }
+    //                         }
+    //                         VecDiff::Clear => {
+    //                             let old_len = state.items[item_index].1;
+    //                             state.items[item_index].1 = 0;
+    //                             for _ in 0..old_len {
+    //                                 out_diffs.push(VecDiff::RemoveAt { index: offset });
+    //                             }
+    //                         }
+    //                     }
+    //                 }
 
-                    // Queue the translated diffs
-                    if !out_diffs.is_empty() {
-                        world
-                            .get_mut::<QueuedVecDiffs<O>>(*output_signal)
-                            .unwrap()
-                            .0
-                            .extend(out_diffs);
-                        trigger_signal_subgraph(world, [output_signal], Box::new(()));
-                    }
-                });
+    //                 // Queue the translated diffs
+    //                 if !out_diffs.is_empty() {
+    //                     world
+    //                         .get_mut::<QueuedVecDiffs<O>>(*output_signal)
+    //                         .unwrap()
+    //                         .0
+    //                         .extend(out_diffs);
+    //                     trigger_signal_subgraph(world, [output_signal], Box::new(()));
+    //                 }
+    //             });
 
-                // Register the processor
-                let processor_handle = inner_signal_vec.for_each(processor_logic).register(world);
-                processor_entity.set(**processor_handle);
-                world.entity_mut(**processor_handle).insert(FlattenItemIndex(index));
+    //             // Register the processor
+    //             let processor_handle = inner_signal_vec.for_each(processor_logic).register(world);
+    //             processor_entity.set(**processor_handle);
+    //             world.entity_mut(**processor_handle).insert(FlattenItemIndex(index));
 
-                // Find replay triggers but don't trigger them yet
-                let replay_triggers = find_replay_triggers(world, (**processor_handle).into());
+    //             // Find replay triggers but don't trigger them yet
+    //             let replay_triggers = find_replay_triggers(world, (**processor_handle).into());
 
-                (processor_handle, replay_triggers)
-            }
+    //             (processor_handle, replay_triggers)
+    //         }
 
-            // Main manager that handles outer SignalVec diffs
-            let manager_logic = clone!((output_signal_entity) move |In(diffs): In<Vec<VecDiff<Self::Item>>>, world: &mut World| {
-                let output_signal: SignalSystem = (*output_signal_entity).into();
-                let mut out_diffs: Vec<VecDiff<InnerItem<Self>>> = Vec::new();
+    //         // Main manager that handles outer SignalVec diffs
+    //         let manager_logic = clone!((output_signal_entity) move |In(diffs):
+    // In<Vec<VecDiff<Self::Item>>>, world: &mut World| {             let output_signal:
+    // SignalSystem = (*output_signal_entity).into();             let mut out_diffs:
+    // Vec<VecDiff<InnerItem<Self>>> = Vec::new();
 
-                for diff in diffs {
-                    match diff {
-                        VecDiff::Replace { values } => {
-                            // Clean up all old processors
-                            let old_items = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.drain(..).collect::<Vec<_>>()
-                            };
-                            let had_old_items = !old_items.is_empty();
-                            for (handle, _) in old_items {
-                                handle.cleanup(world);
-                            }
-                            // Only emit Clear if there were old items
-                            // Note: The inner processors will emit InsertAt diffs for their initial values,
-                            // so we need Clear to come BEFORE those. We'll queue it directly now.
-                            if had_old_items {
-                                world
-                                    .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
-                                    .unwrap()
-                                    .0
-                                    .push(VecDiff::Clear);
-                            }
+    //             for diff in diffs {
+    //                 match diff {
+    //                     VecDiff::Replace { values } => {
+    //                         // Clean up all old processors
+    //                         let old_items = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.drain(..).collect::<Vec<_>>()                         };
+    //                         let had_old_items = !old_items.is_empty();
+    //                         for (handle, _) in old_items {
+    //                             handle.cleanup(world);
+    //                         }
+    //                         // Only emit Clear if there were old items
+    //                         // Note: The inner processors will emit InsertAt diffs for their initial
+    // values,                         // so we need Clear to come BEFORE those. We'll queue it
+    // directly now.                         if had_old_items {
+    //                             world
+    //                                 .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+    //                                 .unwrap()
+    //                                 .0
+    //                                 .push(VecDiff::Clear);
+    //                         }
 
-                            // Create processors and collect their replay triggers
-                            let mut all_triggers = Vec::new();
-                            for (i, inner_signal_vec) in values.into_iter().enumerate() {
-                                let (handle, triggers) = create_inner_processor(world, output_signal, i, inner_signal_vec);
-                                // Add entry with real handle
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.push((handle, 0));
-                                all_triggers.extend(triggers);
-                            }
-                            // Now trigger all replays (entries exist)
-                            trigger_replays(world, all_triggers);
-                        }
-                        VecDiff::InsertAt { index, value: inner_signal_vec } => {
-                            // Update indices for all items after the insertion point FIRST
-                            {
-                                let handles_to_update: Vec<_> = {
-                                    let state = world.get::<FlattenState>(*output_signal).unwrap();
-                                    state.items
-                                        .iter()
-                                        .enumerate()
-                                        .skip(index)
-                                        .map(|(i, (h, _))| (**h, i + 1))
-                                        .collect()
-                                };
-                                for (handle_entity, new_index) in handles_to_update {
-                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_index;
-                                }
-                            }
+    //                         // Create processors and collect their replay triggers
+    //                         let mut all_triggers = Vec::new();
+    //                         for (i, inner_signal_vec) in values.into_iter().enumerate() {
+    //                             let (handle, triggers) = create_inner_processor(world, output_signal,
+    // i, inner_signal_vec);                             // Add entry with real handle
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.push((handle, 0));                             all_triggers.extend(triggers);
+    //                         }
+    //                         // Now trigger all replays (entries exist)
+    //                         trigger_replays(world, all_triggers);
+    //                     }
+    //                     VecDiff::InsertAt { index, value: inner_signal_vec } => {
+    //                         // Update indices for all items after the insertion point FIRST
+    //                         {
+    //                             let handles_to_update: Vec<_> = {
+    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
+    //                                 state.items
+    //                                     .iter()
+    //                                     .enumerate()
+    //                                     .skip(index)
+    //                                     .map(|(i, (h, _))| (**h, i + 1))
+    //                                     .collect()
+    //                             };
+    //                             for (handle_entity, new_index) in handles_to_update {
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
+    // new_index;                             }
+    //                         }
 
-                            // Create processor
-                            let (handle, triggers) = create_inner_processor(world, output_signal, index, inner_signal_vec);
+    //                         // Create processor
+    //                         let (handle, triggers) = create_inner_processor(world, output_signal,
+    // index, inner_signal_vec);
 
-                            // Insert entry with real handle
-                            {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.insert(index, (handle, 0));
-                            }
+    //                         // Insert entry with real handle
+    //                         {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.insert(index, (handle, 0));                         }
 
-                            // Now trigger replays (entry exists)
-                            trigger_replays(world, triggers);
-                        }
-                        VecDiff::UpdateAt { index, value: inner_signal_vec } => {
-                            // Remove old processor and its values
-                            let (old_handle, old_len, offset) = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                let offset: usize = state.items[..index].iter().map(|(_, len)| *len).sum();
-                                let (old_handle, old_len) = state.items.remove(index);
-                                (old_handle, old_len, offset)
-                            };
-                            old_handle.cleanup(world);
+    //                         // Now trigger replays (entry exists)
+    //                         trigger_replays(world, triggers);
+    //                     }
+    //                     VecDiff::UpdateAt { index, value: inner_signal_vec } => {
+    //                         // Remove old processor and its values
+    //                         let (old_handle, old_len, offset) = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();                             let
+    // offset: usize = state.items[..index].iter().map(|(_, len)| *len).sum();
+    // let (old_handle, old_len) = state.items.remove(index);
+    // (old_handle, old_len, offset)                         };
+    //                         old_handle.cleanup(world);
 
-                            // Emit RemoveAt for old values IMMEDIATELY (before creating new processor)
-                            // because trigger_replays will emit InsertAt diffs
-                            if old_len > 0 {
-                                let mut remove_diffs = Vec::new();
-                                for _ in 0..old_len {
-                                    remove_diffs.push(VecDiff::RemoveAt { index: offset });
-                                }
-                                world
-                                    .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
-                                    .unwrap()
-                                    .0
-                                    .extend(remove_diffs);
-                            }
+    //                         // Emit RemoveAt for old values IMMEDIATELY (before creating new
+    // processor)                         // because trigger_replays will emit InsertAt diffs
+    //                         if old_len > 0 {
+    //                             let mut remove_diffs = Vec::new();
+    //                             for _ in 0..old_len {
+    //                                 remove_diffs.push(VecDiff::RemoveAt { index: offset });
+    //                             }
+    //                             world
+    //                                 .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+    //                                 .unwrap()
+    //                                 .0
+    //                                 .extend(remove_diffs);
+    //                         }
 
-                            // Create new processor
-                            let (handle, triggers) = create_inner_processor(world, output_signal, index, inner_signal_vec);
+    //                         // Create new processor
+    //                         let (handle, triggers) = create_inner_processor(world, output_signal,
+    // index, inner_signal_vec);
 
-                            // Insert entry with real handle
-                            {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.insert(index, (handle, 0));
-                            }
+    //                         // Insert entry with real handle
+    //                         {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.insert(index, (handle, 0));                         }
 
-                            // Now trigger replays (entry exists)
-                            trigger_replays(world, triggers);
-                        }
-                        VecDiff::RemoveAt { index } => {
-                            let (handle, old_len, offset) = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                let offset: usize = state.items[..index].iter().map(|(_, len)| *len).sum();
-                                let (handle, len) = state.items.remove(index);
-                                (handle, len, offset)
-                            };
-                            handle.cleanup(world);
+    //                         // Now trigger replays (entry exists)
+    //                         trigger_replays(world, triggers);
+    //                     }
+    //                     VecDiff::RemoveAt { index } => {
+    //                         let (handle, old_len, offset) = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();                             let
+    // offset: usize = state.items[..index].iter().map(|(_, len)| *len).sum();
+    // let (handle, len) = state.items.remove(index);                             (handle, len,
+    // offset)                         };
+    //                         handle.cleanup(world);
 
-                            // Update indices for items after the removal
-                            {
-                                let handles_to_update: Vec<_> = {
-                                    let state = world.get::<FlattenState>(*output_signal).unwrap();
-                                    state.items
-                                        .iter()
-                                        .enumerate()
-                                        .skip(index)
-                                        .map(|(i, (h, _))| (**h, i))
-                                        .collect()
-                                };
-                                for (handle_entity, new_index) in handles_to_update {
-                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_index;
-                                }
-                            }
+    //                         // Update indices for items after the removal
+    //                         {
+    //                             let handles_to_update: Vec<_> = {
+    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
+    //                                 state.items
+    //                                     .iter()
+    //                                     .enumerate()
+    //                                     .skip(index)
+    //                                     .map(|(i, (h, _))| (**h, i))
+    //                                     .collect()
+    //                             };
+    //                             for (handle_entity, new_index) in handles_to_update {
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
+    // new_index;                             }
+    //                         }
 
-                            for _ in 0..old_len {
-                                out_diffs.push(VecDiff::RemoveAt { index: offset });
-                            }
-                        }
-                        VecDiff::Move { old_index, new_index } => {
-                            let (old_offset, moved_len) = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                let old_offset: usize = state.items[..old_index].iter().map(|(_, len)| *len).sum();
-                                let item = state.items.remove(old_index);
-                                let moved_len = item.1;
-                                state.items.insert(new_index, item);
-                                (old_offset, moved_len)
-                            };
+    //                         for _ in 0..old_len {
+    //                             out_diffs.push(VecDiff::RemoveAt { index: offset });
+    //                         }
+    //                     }
+    //                     VecDiff::Move { old_index, new_index } => {
+    //                         let (old_offset, moved_len) = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();                             let
+    // old_offset: usize = state.items[..old_index].iter().map(|(_, len)| *len).sum();
+    // let item = state.items.remove(old_index);                             let moved_len = item.1;
+    //                             state.items.insert(new_index, item);
+    //                             (old_offset, moved_len)
+    //                         };
 
-                            // Update indices for all affected items
-                            {
-                                let handles_to_update: Vec<_> = {
-                                    let state = world.get::<FlattenState>(*output_signal).unwrap();
-                                    let start = old_index.min(new_index);
-                                    let end = old_index.max(new_index) + 1;
-                                    state.items
-                                        .iter()
-                                        .enumerate()
-                                        .skip(start)
-                                        .take(end - start)
-                                        .map(|(i, (h, _))| (**h, i))
-                                        .collect()
-                                };
-                                for (handle_entity, new_idx) in handles_to_update {
-                                    world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 = new_idx;
-                                }
-                            }
+    //                         // Update indices for all affected items
+    //                         {
+    //                             let handles_to_update: Vec<_> = {
+    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
+    //                                 let start = old_index.min(new_index);
+    //                                 let end = old_index.max(new_index) + 1;
+    //                                 state.items
+    //                                     .iter()
+    //                                     .enumerate()
+    //                                     .skip(start)
+    //                                     .take(end - start)
+    //                                     .map(|(i, (h, _))| (**h, i))
+    //                                     .collect()
+    //                             };
+    //                             for (handle_entity, new_idx) in handles_to_update {
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
+    // new_idx;                             }
+    //                         }
 
-                            // Calculate the new offset after the move
-                            let new_offset: usize = {
-                                let state = world.get::<FlattenState>(*output_signal).unwrap();
-                                state.items[..new_index].iter().map(|(_, len)| *len).sum()
-                            };
+    //                         // Calculate the new offset after the move
+    //                         let new_offset: usize = {
+    //                             let state = world.get::<FlattenState>(*output_signal).unwrap();
+    //                             state.items[..new_index].iter().map(|(_, len)| *len).sum()
+    //                         };
 
-                            // Emit Move diffs for each element in the block
-                            // We need to move elements one by one from old position to new position
-                            if old_offset < new_offset {
-                                // Moving forward: move from end to start to avoid overwriting
-                                for i in (0..moved_len).rev() {
-                                    out_diffs.push(VecDiff::Move {
-                                        old_index: old_offset + i,
-                                        new_index: new_offset + i,
-                                    });
-                                }
-                            } else if old_offset > new_offset {
-                                // Moving backward: move from start to end
-                                for i in 0..moved_len {
-                                    out_diffs.push(VecDiff::Move {
-                                        old_index: old_offset + i,
-                                        new_index: new_offset + i,
-                                    });
-                                }
-                            }
-                            // If offsets are equal, no moves needed
-                        }
-                        VecDiff::Push { value: inner_signal_vec } => {
-                            let index = {
-                                let state = world.get::<FlattenState>(*output_signal).unwrap();
-                                state.items.len()
-                            };
+    //                         // Emit Move diffs for each element in the block
+    //                         // We need to move elements one by one from old position to new position
+    //                         if old_offset < new_offset {
+    //                             // Moving forward: move from end to start to avoid overwriting
+    //                             for i in (0..moved_len).rev() {
+    //                                 out_diffs.push(VecDiff::Move {
+    //                                     old_index: old_offset + i,
+    //                                     new_index: new_offset + i,
+    //                                 });
+    //                             }
+    //                         } else if old_offset > new_offset {
+    //                             // Moving backward: move from start to end
+    //                             for i in 0..moved_len {
+    //                                 out_diffs.push(VecDiff::Move {
+    //                                     old_index: old_offset + i,
+    //                                     new_index: new_offset + i,
+    //                                 });
+    //                             }
+    //                         }
+    //                         // If offsets are equal, no moves needed
+    //                     }
+    //                     VecDiff::Push { value: inner_signal_vec } => {
+    //                         let index = {
+    //                             let state = world.get::<FlattenState>(*output_signal).unwrap();
+    //                             state.items.len()
+    //                         };
 
-                            // Create processor
-                            let (handle, triggers) = create_inner_processor(world, output_signal, index, inner_signal_vec);
+    //                         // Create processor
+    //                         let (handle, triggers) = create_inner_processor(world, output_signal,
+    // index, inner_signal_vec);
 
-                            // Push entry with real handle
-                            {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.push((handle, 0));
-                            }
+    //                         // Push entry with real handle
+    //                         {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.push((handle, 0));                         }
 
-                            // Now trigger replays (entry exists)
-                            trigger_replays(world, triggers);
-                        }
-                        VecDiff::Pop => {
-                            let (handle, old_len, offset) = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                if let Some((handle, len)) = state.items.pop() {
-                                    let offset: usize = state.items.iter().map(|(_, len)| *len).sum();
-                                    (Some(handle), len, offset)
-                                } else {
-                                    (None, 0, 0)
-                                }
-                            };
+    //                         // Now trigger replays (entry exists)
+    //                         trigger_replays(world, triggers);
+    //                     }
+    //                     VecDiff::Pop => {
+    //                         let (handle, old_len, offset) = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();                             if let
+    // Some((handle, len)) = state.items.pop() {                                 let offset: usize =
+    // state.items.iter().map(|(_, len)| *len).sum();                                 (Some(handle),
+    // len, offset)                             } else {
+    //                                 (None, 0, 0)
+    //                             }
+    //                         };
 
-                            if let Some(handle) = handle {
-                                handle.cleanup(world);
-                            }
-                            for _ in 0..old_len {
-                                out_diffs.push(VecDiff::RemoveAt { index: offset });
-                            }
-                        }
-                        VecDiff::Clear => {
-                            let old_items = {
-                                let mut state = world.get_mut::<FlattenState>(*output_signal).unwrap();
-                                state.items.drain(..).collect::<Vec<_>>()
-                            };
-                            for (handle, _) in old_items {
-                                handle.cleanup(world);
-                            }
-                            out_diffs.push(VecDiff::Clear);
-                        }
-                    }
-                }
+    //                         if let Some(handle) = handle {
+    //                             handle.cleanup(world);
+    //                         }
+    //                         for _ in 0..old_len {
+    //                             out_diffs.push(VecDiff::RemoveAt { index: offset });
+    //                         }
+    //                     }
+    //                     VecDiff::Clear => {
+    //                         let old_items = {
+    //                             let mut state =
+    // world.get_mut::<FlattenState>(*output_signal).unwrap();
+    // state.items.drain(..).collect::<Vec<_>>()                         };
+    //                         for (handle, _) in old_items {
+    //                             handle.cleanup(world);
+    //                         }
+    //                         out_diffs.push(VecDiff::Clear);
+    //                     }
+    //                 }
+    //             }
 
-                // Queue the diffs
-                if !out_diffs.is_empty() {
-                    world
-                        .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
-                        .unwrap()
-                        .0
-                        .extend(out_diffs);
-                    trigger_signal_subgraph(world, [output_signal], Box::new(()));
-                }
-            });
+    //             // Queue the diffs
+    //             if !out_diffs.is_empty() {
+    //                 world
+    //                     .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
+    //                     .unwrap()
+    //                     .0
+    //                     .extend(out_diffs);
+    //                 trigger_signal_subgraph(world, [output_signal], Box::new(()));
+    //             }
+    //         });
 
-            let manager_handle = self.for_each(manager_logic).register(world);
+    //         let manager_handle = self.for_each(manager_logic).register(world);
 
-            // Pipe manager to output_signal so output_signal processes AFTER manager fills the queue
-            pipe_signal(world, *manager_handle, output_signal);
+    //         // Pipe manager to output_signal so output_signal processes AFTER manager fills the queue
+    //         pipe_signal(world, *manager_handle, output_signal);
 
-            world
-                .entity_mut(*output_signal)
-                .insert((
-                    FlattenState { items: vec![] },
-                    QueuedVecDiffs::<InnerItem<Self>>(vec![]),
-                ))
-                .insert(SignalHandles::from([manager_handle]));
+    //         world
+    //             .entity_mut(*output_signal)
+    //             .insert((
+    //                 FlattenState { items: vec![] },
+    //                 QueuedVecDiffs::<InnerItem<Self>>(vec![]),
+    //             ))
+    //             .insert(SignalHandles::from([manager_handle]));
 
-            output_signal
-        });
+    //         output_signal
+    //     });
 
-        Flatten {
-            signal,
-            _marker: PhantomData,
-        }
-    }
+    //     Flatten {
+    //         signal,
+    //         _marker: PhantomData,
+    //     }
+    // }
 
     #[cfg(feature = "tracing")]
     #[track_caller]
@@ -7910,600 +7914,601 @@ pub(crate) mod tests {
         cleanup(true)
     }
 
-    #[test]
-    fn test_flatten() {
-        {
-            // A comprehensive test for `SignalVecExt::flatten`. This tests flattening a
-            // SignalVec of SignalVecs into a single SignalVec, covering:
-            // - Initial state
-            // - Inner vec changes (push, pop, update, etc.)
-            // - Outer vec changes (push, pop, remove, move, clear, replace, update)
-            // - Cleanup verification (removed inner vecs should be ignored)
-
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            // --- Setup ---
-            // Create the inner vectors that will be the items of our outer vector.
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-            let vec_c = MutableVec::<u32>::builder().spawn(app.world_mut()); // Start with an empty inner vec
-
-            // Create the outer vector, which holds SignalVecs.
-            // No need for boxed_clone() since all inner vecs are the same concrete type (Source<u32>)
-            let source_of_vecs = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
-                .spawn(app.world_mut());
-
-            // The signal chain under test.
-            let flattened_signal = source_of_vecs.signal_vec().flatten();
-
-            let handle = flattened_signal
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            // --- 1. Initial State ---
-            // The first update should replay the initial state of all inner vectors.
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // Initial state should be Clear + Push for each item
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 11, 20],
-                "Initial state should contain combined contents of all inner vecs."
-            );
-
-            // --- 2. Inner Vec Change: Push to `vec_a` ---
-            // A push to the _first_ inner vector should insert at the correct global index.
-            vec_a.write(app.world_mut()).push(12);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Push to inner vec_a should produce one diff.");
-            assert_eq!(
-                diffs[0],
-                VecDiff::InsertAt { index: 2, value: 12 },
-                "Should insert at index 2 (end of vec_a's block)."
-            );
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 12, 20]);
-
-            // --- 3. Inner Vec Change: Push to `vec_b` ---
-            // A push to the _second_ inner vector should insert at an offset index.
-            vec_b.write(app.world_mut()).push(21);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Push to inner vec_b should produce one diff.");
-            // Global index = len(vec_a) + new_index_in_b = 3 + 1 = 4
-            assert_eq!(
-                diffs[0],
-                VecDiff::InsertAt { index: 4, value: 21 },
-                "Should insert at index 4 (end of vec_b's block)."
-            );
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 12, 20, 21]);
-
-            // --- 4. Inner Vec Change: UpdateAt on vec_a ---
-            vec_a.write(app.world_mut()).set(1, 111);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "UpdateAt on vec_a should produce one diff.");
-            assert_eq!(
-                diffs[0],
-                VecDiff::UpdateAt { index: 1, value: 111 },
-                "Should update at correct global index."
-            );
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 111, 12, 20, 21]);
-
-            // --- 5. Inner Vec Change: RemoveAt on vec_a ---
-            vec_a.write(app.world_mut()).remove(0);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "RemoveAt on vec_a should produce one diff.");
-            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![111, 12, 20, 21]);
-
-            // --- 6. Inner Vec Change: Pop on vec_b ---
-            vec_b.write(app.world_mut()).pop();
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Pop on vec_b should produce one diff.");
-            assert_eq!(diffs[0], VecDiff::RemoveAt { index: 3 });
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![111, 12, 20]);
-
-            // --- 7. Outer Vec Change: Remove `vec_b` ---
-            // Removing an inner vector should remove its entire block of items.
-            source_of_vecs.write(app.world_mut()).remove(1); // Removes vec_b
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // The implementation should produce one RemoveAt diff for vec_b's remaining item.
-            assert_eq!(diffs.len(), 1, "Removing vec_b should produce 1 diff.");
-            apply_diffs(&mut current_state, diffs);
-            // The final state should no longer contain 20.
-            assert_eq!(current_state, vec![111, 12], "State after removing vec_b is incorrect.");
-            // Note: vec_c is now at index 1 in the outer vec.
-
-            // --- 8. Cleanup Verification ---
-            // Updates to the removed `vec_b` should now be ignored.
-            vec_b.write(app.world_mut()).push(99);
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert!(diffs.is_empty(), "Should ignore diffs from the removed vec_b.");
-
-            // --- 9. Outer Vec Change: Push a new vector ---
-            let vec_d = MutableVec::builder().values([40u32, 41]).spawn(app.world_mut());
-            source_of_vecs.write(app.world_mut()).push(vec_d.signal_vec());
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // Pushing a new inner vector should add its initial items to the end.
-            assert_eq!(diffs.len(), 2, "Pushing new vec_d should produce 2 diffs.");
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![111, 12, 40, 41],
-                "State after pushing vec_d is incorrect."
-            );
-
-            // --- 10. Inner Vec Change: Push to empty vec_c ---
-            // vec_c is currently at outer index 1 (between vec_a and vec_d)
-            vec_c.write(app.world_mut()).push(30);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Push to empty vec_c should produce one diff.");
-            // Global index = len(vec_a) = 2
-            assert_eq!(
-                diffs[0],
-                VecDiff::InsertAt { index: 2, value: 30 },
-                "Should insert at correct position between vec_a and vec_d."
-            );
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![111, 12, 30, 40, 41]);
-
-            // --- 11. Outer Vec Change: Move ---
-            // Current outer vec: [vec_a, vec_c, vec_d].
-            // Current state: [111, 12, 30, 40, 41].
-            // Move vec_d (index 2) to the front (index 0).
-            source_of_vecs.write(app.world_mut()).move_item(2, 0);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![40, 41, 111, 12, 30],
-                "State after moving vec_d to front is incorrect."
-            );
-
-            // --- 12. Outer Vec Change: UpdateAt (replace vec_c with a new vec) ---
-            let vec_e = MutableVec::builder().values([50u32, 51, 52]).spawn(app.world_mut());
-            source_of_vecs.write(app.world_mut()).set(2, vec_e.signal_vec()); // Replace vec_c
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            // vec_c had [30], vec_e has [50, 51, 52]
-            assert_eq!(
-                current_state,
-                vec![40, 41, 111, 12, 50, 51, 52],
-                "State after UpdateAt on outer vec is incorrect."
-            );
-
-            // --- 13. Outer Vec Change: Pop ---
-            source_of_vecs.write(app.world_mut()).pop();
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![40, 41, 111, 12],
-                "State after Pop on outer vec is incorrect."
-            );
-
-            // --- 14. Outer Vec Change: Clear ---
-            // Clearing the outer vector should remove all items.
-            source_of_vecs.write(app.world_mut()).clear();
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Clear on outer vec should produce one diff.");
-            assert_eq!(diffs[0], VecDiff::Clear, "Expected a Clear diff.");
-            apply_diffs(&mut current_state, diffs);
-            assert!(current_state.is_empty(), "Final state should be empty after clear.");
-
-            // --- 15. Outer Vec Change: Replace (re-populate after clear) ---
-            let vec_f = MutableVec::builder().values([60u32]).spawn(app.world_mut());
-            let vec_g = MutableVec::builder().values([70u32, 71]).spawn(app.world_mut());
-            source_of_vecs
-                .write(app.world_mut())
-                .replace(vec![vec_f.signal_vec(), vec_g.signal_vec()]);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![60, 70, 71],
-                "State after Replace on outer vec is incorrect."
-            );
-
-            // --- 16. Inner Vec Change: Move within vec_g ---
-            vec_g.write(app.world_mut()).move_item(0, 1);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Move within vec_g should produce one diff.");
-            assert_eq!(
-                diffs[0],
-                VecDiff::Move {
-                    old_index: 1,
-                    new_index: 2
-                },
-                "Move should be translated to correct global indices."
-            );
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![60, 71, 70]);
-
-            // --- 17. Inner Vec Change: Clear on vec_g ---
-            vec_g.write(app.world_mut()).clear();
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // Clear should produce RemoveAt diffs for each item
-            assert_eq!(diffs.len(), 2, "Clear on vec_g should produce 2 diffs.");
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![60]);
-
-            // --- 18. Inner Vec Change: Replace on vec_f ---
-            vec_f.write(app.world_mut()).replace(vec![61, 62, 63]);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![61, 62, 63],
-                "State after Replace on vec_f is incorrect."
-            );
-
-            // --- Cleanup ---
-            handle.cleanup(app.world_mut());
-        }
-
-        // Additional edge case tests
-        {
-            // --- 19. InsertAt on outer vec (insert in middle) ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([30u32, 31]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 30, 31], "Initial state");
-
-            // Insert a new inner vec in the middle
-            let vec_mid = MutableVec::builder().values([20u32, 21, 22]).spawn(app.world_mut());
-            source.write(app.world_mut()).insert(1, vec_mid.signal_vec());
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 11, 20, 21, 22, 30, 31],
-                "InsertAt on outer vec should insert items at correct position."
-            );
-
-            // Verify that updates to the inserted vec work correctly
-            vec_mid.write(app.world_mut()).push(23);
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 11, 20, 21, 22, 23, 30, 31],
-                "Push to inserted vec should work correctly."
-            );
-
-            // Verify that the vec after the insertion still has correct indices
-            vec_b.write(app.world_mut()).push(32);
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 11, 20, 21, 22, 23, 30, 31, 32],
-                "Push to vec after insertion should work correctly."
-            );
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 20. Multiple simultaneous inner vec changes ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 20], "Initial state");
-
-            // Make changes to both inner vecs before update
-            vec_a.write(app.world_mut()).push(11);
-            vec_b.write(app.world_mut()).push(21);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 11, 20, 21],
-                "Multiple simultaneous changes should all be processed."
-            );
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 21. Empty outer vec initially ---
-            // Note: When starting with an empty outer vec, we need to specify the type explicitly.
-            // Using Source<u32> directly avoids boxing.
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let source = MutableVec::<Source<u32>>::builder().spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert!(current_state.is_empty(), "Initial state should be empty");
-
-            // Push first inner vec
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            source.write(app.world_mut()).push(vec_a.signal_vec());
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11], "Push to empty outer vec");
-
-            // Push second inner vec
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-            source.write(app.world_mut()).push(vec_b.signal_vec());
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 20], "Second push to outer vec");
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 21b. Replace outer vec with empty (should emit Clear) ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            // Initial state should populate
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 20], "Initial state");
-
-            // Replace with empty outer vec should emit Clear
-            source.write(app.world_mut()).replace(Vec::<Source<u32>>::new());
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            assert_eq!(diffs.len(), 1, "Replace to empty should produce one diff.");
-            assert!(matches!(diffs[0], VecDiff::Clear), "Expected Clear diff.");
-            apply_diffs(&mut current_state, diffs);
-            assert!(
-                current_state.is_empty(),
-                "State should be empty after Replace to empty."
-            );
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 22. Move forward on outer vec (index 0 -> 2) ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-            let vec_c = MutableVec::builder().values([30u32, 31, 32]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 20, 30, 31, 32], "Initial state");
-
-            // Move vec_a (index 0) to the end (index 2)
-            source.write(app.world_mut()).move_item(0, 2);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![20, 30, 31, 32, 10, 11],
-                "Move forward on outer vec should work correctly."
-            );
-
-            // Verify updates still work after move
-            vec_a.write(app.world_mut()).push(12);
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![20, 30, 31, 32, 10, 11, 12],
-                "Push to moved vec should work correctly."
-            );
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 23. Moving an empty inner vec ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
-            let vec_empty = MutableVec::<u32>::builder().spawn(app.world_mut());
-            let vec_c = MutableVec::builder().values([30u32]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_empty.signal_vec(), vec_c.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 30], "Initial state with empty inner vec");
-
-            // Move the empty vec to the end
-            source.write(app.world_mut()).move_item(1, 2);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // Moving empty vec should produce no move diffs
-            assert!(diffs.is_empty(), "Moving empty inner vec should produce no diffs");
-            assert_eq!(current_state, vec![10, 30], "State unchanged after moving empty vec");
-
-            // Verify the empty vec now works at its new position
-            vec_empty.write(app.world_mut()).push(20);
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(
-                current_state,
-                vec![10, 30, 20],
-                "Push to moved empty vec should insert at end."
-            );
-
-            handle.cleanup(app.world_mut());
-        }
-
-        {
-            // --- 24. Moving a non-empty inner vec vs empty (verify Move diffs emitted) ---
-            let mut app = create_test_app();
-            app.init_resource::<SignalVecOutput<u32>>();
-
-            let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
-            let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
-
-            let source = MutableVec::builder()
-                .values([vec_a.signal_vec(), vec_b.signal_vec()])
-                .spawn(app.world_mut());
-
-            let handle = source
-                .signal_vec()
-                .flatten()
-                .for_each(capture_signal_vec_output)
-                .register(app.world_mut());
-
-            app.update();
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            let mut current_state: Vec<u32> = vec![];
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![10, 11, 20], "Initial state");
-
-            // Move vec_a (2 items) to after vec_b
-            source.write(app.world_mut()).move_item(0, 1);
-            app.update();
-
-            let diffs = get_and_clear_output::<u32>(app.world_mut());
-            // Should emit 2 Move diffs (one for each item in vec_a)
-            assert_eq!(diffs.len(), 2, "Moving vec with 2 items should produce 2 Move diffs");
-            apply_diffs(&mut current_state, diffs);
-            assert_eq!(current_state, vec![20, 10, 11], "State after move");
-
-            handle.cleanup(app.world_mut());
-        }
-
-        cleanup(true);
-    }
+    // #[test]
+    // fn test_flatten() {
+    //     {
+    //         // A comprehensive test for `SignalVecExt::flatten`. This tests flattening a
+    //         // SignalVec of SignalVecs into a single SignalVec, covering:
+    //         // - Initial state
+    //         // - Inner vec changes (push, pop, update, etc.)
+    //         // - Outer vec changes (push, pop, remove, move, clear, replace, update)
+    //         // - Cleanup verification (removed inner vecs should be ignored)
+
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         // --- Setup ---
+    //         // Create the inner vectors that will be the items of our outer vector.
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+    //         let vec_c = MutableVec::<u32>::builder().spawn(app.world_mut()); // Start with an
+    // empty inner vec
+
+    //         // Create the outer vector, which holds SignalVecs.
+    //         // No need for boxed_clone() since all inner vecs are the same concrete type
+    // (Source<u32>)         let source_of_vecs = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         // The signal chain under test.
+    //         let flattened_signal = source_of_vecs.signal_vec().flatten();
+
+    //         let handle = flattened_signal
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         // --- 1. Initial State ---
+    //         // The first update should replay the initial state of all inner vectors.
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // Initial state should be Clear + Push for each item
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 11, 20],
+    //             "Initial state should contain combined contents of all inner vecs."
+    //         );
+
+    //         // --- 2. Inner Vec Change: Push to `vec_a` ---
+    //         // A push to the _first_ inner vector should insert at the correct global index.
+    //         vec_a.write(app.world_mut()).push(12);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Push to inner vec_a should produce one diff.");
+    //         assert_eq!(
+    //             diffs[0],
+    //             VecDiff::InsertAt { index: 2, value: 12 },
+    //             "Should insert at index 2 (end of vec_a's block)."
+    //         );
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 12, 20]);
+
+    //         // --- 3. Inner Vec Change: Push to `vec_b` ---
+    //         // A push to the _second_ inner vector should insert at an offset index.
+    //         vec_b.write(app.world_mut()).push(21);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Push to inner vec_b should produce one diff.");
+    //         // Global index = len(vec_a) + new_index_in_b = 3 + 1 = 4
+    //         assert_eq!(
+    //             diffs[0],
+    //             VecDiff::InsertAt { index: 4, value: 21 },
+    //             "Should insert at index 4 (end of vec_b's block)."
+    //         );
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 12, 20, 21]);
+
+    //         // --- 4. Inner Vec Change: UpdateAt on vec_a ---
+    //         vec_a.write(app.world_mut()).set(1, 111);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "UpdateAt on vec_a should produce one diff.");
+    //         assert_eq!(
+    //             diffs[0],
+    //             VecDiff::UpdateAt { index: 1, value: 111 },
+    //             "Should update at correct global index."
+    //         );
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 111, 12, 20, 21]);
+
+    //         // --- 5. Inner Vec Change: RemoveAt on vec_a ---
+    //         vec_a.write(app.world_mut()).remove(0);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "RemoveAt on vec_a should produce one diff.");
+    //         assert_eq!(diffs[0], VecDiff::RemoveAt { index: 0 });
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![111, 12, 20, 21]);
+
+    //         // --- 6. Inner Vec Change: Pop on vec_b ---
+    //         vec_b.write(app.world_mut()).pop();
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Pop on vec_b should produce one diff.");
+    //         assert_eq!(diffs[0], VecDiff::RemoveAt { index: 3 });
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![111, 12, 20]);
+
+    //         // --- 7. Outer Vec Change: Remove `vec_b` ---
+    //         // Removing an inner vector should remove its entire block of items.
+    //         source_of_vecs.write(app.world_mut()).remove(1); // Removes vec_b
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // The implementation should produce one RemoveAt diff for vec_b's remaining item.
+    //         assert_eq!(diffs.len(), 1, "Removing vec_b should produce 1 diff.");
+    //         apply_diffs(&mut current_state, diffs);
+    //         // The final state should no longer contain 20.
+    //         assert_eq!(current_state, vec![111, 12], "State after removing vec_b is incorrect.");
+    //         // Note: vec_c is now at index 1 in the outer vec.
+
+    //         // --- 8. Cleanup Verification ---
+    //         // Updates to the removed `vec_b` should now be ignored.
+    //         vec_b.write(app.world_mut()).push(99);
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert!(diffs.is_empty(), "Should ignore diffs from the removed vec_b.");
+
+    //         // --- 9. Outer Vec Change: Push a new vector ---
+    //         let vec_d = MutableVec::builder().values([40u32, 41]).spawn(app.world_mut());
+    //         source_of_vecs.write(app.world_mut()).push(vec_d.signal_vec());
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // Pushing a new inner vector should add its initial items to the end.
+    //         assert_eq!(diffs.len(), 2, "Pushing new vec_d should produce 2 diffs.");
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![111, 12, 40, 41],
+    //             "State after pushing vec_d is incorrect."
+    //         );
+
+    //         // --- 10. Inner Vec Change: Push to empty vec_c ---
+    //         // vec_c is currently at outer index 1 (between vec_a and vec_d)
+    //         vec_c.write(app.world_mut()).push(30);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Push to empty vec_c should produce one diff.");
+    //         // Global index = len(vec_a) = 2
+    //         assert_eq!(
+    //             diffs[0],
+    //             VecDiff::InsertAt { index: 2, value: 30 },
+    //             "Should insert at correct position between vec_a and vec_d."
+    //         );
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![111, 12, 30, 40, 41]);
+
+    //         // --- 11. Outer Vec Change: Move ---
+    //         // Current outer vec: [vec_a, vec_c, vec_d].
+    //         // Current state: [111, 12, 30, 40, 41].
+    //         // Move vec_d (index 2) to the front (index 0).
+    //         source_of_vecs.write(app.world_mut()).move_item(2, 0);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![40, 41, 111, 12, 30],
+    //             "State after moving vec_d to front is incorrect."
+    //         );
+
+    //         // --- 12. Outer Vec Change: UpdateAt (replace vec_c with a new vec) ---
+    //         let vec_e = MutableVec::builder().values([50u32, 51, 52]).spawn(app.world_mut());
+    //         source_of_vecs.write(app.world_mut()).set(2, vec_e.signal_vec()); // Replace vec_c
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         // vec_c had [30], vec_e has [50, 51, 52]
+    //         assert_eq!(
+    //             current_state,
+    //             vec![40, 41, 111, 12, 50, 51, 52],
+    //             "State after UpdateAt on outer vec is incorrect."
+    //         );
+
+    //         // --- 13. Outer Vec Change: Pop ---
+    //         source_of_vecs.write(app.world_mut()).pop();
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![40, 41, 111, 12],
+    //             "State after Pop on outer vec is incorrect."
+    //         );
+
+    //         // --- 14. Outer Vec Change: Clear ---
+    //         // Clearing the outer vector should remove all items.
+    //         source_of_vecs.write(app.world_mut()).clear();
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Clear on outer vec should produce one diff.");
+    //         assert_eq!(diffs[0], VecDiff::Clear, "Expected a Clear diff.");
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert!(current_state.is_empty(), "Final state should be empty after clear.");
+
+    //         // --- 15. Outer Vec Change: Replace (re-populate after clear) ---
+    //         let vec_f = MutableVec::builder().values([60u32]).spawn(app.world_mut());
+    //         let vec_g = MutableVec::builder().values([70u32, 71]).spawn(app.world_mut());
+    //         source_of_vecs
+    //             .write(app.world_mut())
+    //             .replace(vec![vec_f.signal_vec(), vec_g.signal_vec()]);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![60, 70, 71],
+    //             "State after Replace on outer vec is incorrect."
+    //         );
+
+    //         // --- 16. Inner Vec Change: Move within vec_g ---
+    //         vec_g.write(app.world_mut()).move_item(0, 1);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Move within vec_g should produce one diff.");
+    //         assert_eq!(
+    //             diffs[0],
+    //             VecDiff::Move {
+    //                 old_index: 1,
+    //                 new_index: 2
+    //             },
+    //             "Move should be translated to correct global indices."
+    //         );
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![60, 71, 70]);
+
+    //         // --- 17. Inner Vec Change: Clear on vec_g ---
+    //         vec_g.write(app.world_mut()).clear();
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // Clear should produce RemoveAt diffs for each item
+    //         assert_eq!(diffs.len(), 2, "Clear on vec_g should produce 2 diffs.");
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![60]);
+
+    //         // --- 18. Inner Vec Change: Replace on vec_f ---
+    //         vec_f.write(app.world_mut()).replace(vec![61, 62, 63]);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![61, 62, 63],
+    //             "State after Replace on vec_f is incorrect."
+    //         );
+
+    //         // --- Cleanup ---
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     // Additional edge case tests
+    //     {
+    //         // --- 19. InsertAt on outer vec (insert in middle) ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([30u32, 31]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 30, 31], "Initial state");
+
+    //         // Insert a new inner vec in the middle
+    //         let vec_mid = MutableVec::builder().values([20u32, 21, 22]).spawn(app.world_mut());
+    //         source.write(app.world_mut()).insert(1, vec_mid.signal_vec());
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 11, 20, 21, 22, 30, 31],
+    //             "InsertAt on outer vec should insert items at correct position."
+    //         );
+
+    //         // Verify that updates to the inserted vec work correctly
+    //         vec_mid.write(app.world_mut()).push(23);
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 11, 20, 21, 22, 23, 30, 31],
+    //             "Push to inserted vec should work correctly."
+    //         );
+
+    //         // Verify that the vec after the insertion still has correct indices
+    //         vec_b.write(app.world_mut()).push(32);
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 11, 20, 21, 22, 23, 30, 31, 32],
+    //             "Push to vec after insertion should work correctly."
+    //         );
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 20. Multiple simultaneous inner vec changes ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 20], "Initial state");
+
+    //         // Make changes to both inner vecs before update
+    //         vec_a.write(app.world_mut()).push(11);
+    //         vec_b.write(app.world_mut()).push(21);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 11, 20, 21],
+    //             "Multiple simultaneous changes should all be processed."
+    //         );
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 21. Empty outer vec initially ---
+    //         // Note: When starting with an empty outer vec, we need to specify the type
+    // explicitly.         // Using Source<u32> directly avoids boxing.
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let source = MutableVec::<Source<u32>>::builder().spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert!(current_state.is_empty(), "Initial state should be empty");
+
+    //         // Push first inner vec
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         source.write(app.world_mut()).push(vec_a.signal_vec());
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11], "Push to empty outer vec");
+
+    //         // Push second inner vec
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+    //         source.write(app.world_mut()).push(vec_b.signal_vec());
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 20], "Second push to outer vec");
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 21b. Replace outer vec with empty (should emit Clear) ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         // Initial state should populate
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 20], "Initial state");
+
+    //         // Replace with empty outer vec should emit Clear
+    //         source.write(app.world_mut()).replace(Vec::<Source<u32>>::new());
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         assert_eq!(diffs.len(), 1, "Replace to empty should produce one diff.");
+    //         assert!(matches!(diffs[0], VecDiff::Clear), "Expected Clear diff.");
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert!(
+    //             current_state.is_empty(),
+    //             "State should be empty after Replace to empty."
+    //         );
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 22. Move forward on outer vec (index 0 -> 2) ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+    //         let vec_c = MutableVec::builder().values([30u32, 31, 32]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec(), vec_c.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 20, 30, 31, 32], "Initial state");
+
+    //         // Move vec_a (index 0) to the end (index 2)
+    //         source.write(app.world_mut()).move_item(0, 2);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![20, 30, 31, 32, 10, 11],
+    //             "Move forward on outer vec should work correctly."
+    //         );
+
+    //         // Verify updates still work after move
+    //         vec_a.write(app.world_mut()).push(12);
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![20, 30, 31, 32, 10, 11, 12],
+    //             "Push to moved vec should work correctly."
+    //         );
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 23. Moving an empty inner vec ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32]).spawn(app.world_mut());
+    //         let vec_empty = MutableVec::<u32>::builder().spawn(app.world_mut());
+    //         let vec_c = MutableVec::builder().values([30u32]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_empty.signal_vec(), vec_c.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 30], "Initial state with empty inner vec");
+
+    //         // Move the empty vec to the end
+    //         source.write(app.world_mut()).move_item(1, 2);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // Moving empty vec should produce no move diffs
+    //         assert!(diffs.is_empty(), "Moving empty inner vec should produce no diffs");
+    //         assert_eq!(current_state, vec![10, 30], "State unchanged after moving empty vec");
+
+    //         // Verify the empty vec now works at its new position
+    //         vec_empty.write(app.world_mut()).push(20);
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(
+    //             current_state,
+    //             vec![10, 30, 20],
+    //             "Push to moved empty vec should insert at end."
+    //         );
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     {
+    //         // --- 24. Moving a non-empty inner vec vs empty (verify Move diffs emitted) ---
+    //         let mut app = create_test_app();
+    //         app.init_resource::<SignalVecOutput<u32>>();
+
+    //         let vec_a = MutableVec::builder().values([10u32, 11]).spawn(app.world_mut());
+    //         let vec_b = MutableVec::builder().values([20u32]).spawn(app.world_mut());
+
+    //         let source = MutableVec::builder()
+    //             .values([vec_a.signal_vec(), vec_b.signal_vec()])
+    //             .spawn(app.world_mut());
+
+    //         let handle = source
+    //             .signal_vec()
+    //             .flatten()
+    //             .for_each(capture_signal_vec_output)
+    //             .register(app.world_mut());
+
+    //         app.update();
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         let mut current_state: Vec<u32> = vec![];
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![10, 11, 20], "Initial state");
+
+    //         // Move vec_a (2 items) to after vec_b
+    //         source.write(app.world_mut()).move_item(0, 1);
+    //         app.update();
+
+    //         let diffs = get_and_clear_output::<u32>(app.world_mut());
+    //         // Should emit 2 Move diffs (one for each item in vec_a)
+    //         assert_eq!(diffs.len(), 2, "Moving vec with 2 items should produce 2 Move diffs");
+    //         apply_diffs(&mut current_state, diffs);
+    //         assert_eq!(current_state, vec![20, 10, 11], "State after move");
+
+    //         handle.cleanup(app.world_mut());
+    //     }
+
+    //     cleanup(true);
+    // }
 }

@@ -633,7 +633,7 @@ pub trait SignalMapExt: SignalMap {
     fn map_value_signal<S, F, M>(self, system: F) -> MapValueSignal<Self, S>
     where
         Self: Sized,
-        Self::Key: Ord + Clone + Send + Sync + Send + Sync + 'static,
+        Self::Key: Ord + Clone + Send + Sync + 'static,
         Self::Value: Send + Sync + 'static,
         S: Signal + Clone + 'static,
         S::Item: Clone + Send + Sync + 'static,
@@ -849,7 +849,7 @@ pub trait SignalMapExt: SignalMap {
     fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
-        Self::Key: PartialEq + Send + Sync + Send + Sync + 'static,
+        Self::Key: PartialEq + Send + Sync + 'static,
         Self::Value: Clone + Send + Sync + 'static,
     {
         Key {

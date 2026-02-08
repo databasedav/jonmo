@@ -312,7 +312,6 @@ impl Builder {
         let child = child.into();
         let on_spawn = move |world: &mut World, parent| {
             let child_entity = world.spawn_empty().id();
-            // Ensure the populations vec is large enough and set this block's population
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
             pops.0[block] = 1;
@@ -328,7 +327,6 @@ impl Builder {
     pub fn child_signal(self, child_option: impl Signal<Item = Option<Builder>>) -> Self {
         let block = self.next_block.fetch_add(1, Ordering::Relaxed);
         let on_spawn = move |world: &mut World, parent: Entity| {
-            // Initialize this block's population to 0
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
 
@@ -369,7 +367,6 @@ impl Builder {
             for _ in 0..children_vec.len() {
                 children_entities.push(world.spawn_empty().id());
             }
-            // Set this block's population
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
             pops.0[block] = population;
@@ -388,7 +385,6 @@ impl Builder {
     pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = Builder>) -> Self {
         let block = self.next_block.fetch_add(1, Ordering::Relaxed);
         let on_spawn = move |world: &mut World, parent: Entity| {
-            // Initialize this block's population to 0
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
 

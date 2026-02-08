@@ -59,7 +59,7 @@
 //!
 //! In addition to the standard push-based flow, signals can be polled synchronously to retrieve
 //! their most recent output. This is useful when a system needs to read signal state on-demand
-//! rather than receiving it as pushed input.
+//! rather than receiving it as pushed input, see [`poll_signal`].
 use alloc::collections::VecDeque;
 use bevy_app::PostUpdate;
 use bevy_derive::Deref;
@@ -833,7 +833,7 @@ fn run_signal_node(world: &mut World, signal: SignalSystem) {
 
     // Run the signal system
     let final_output = if upstreams.is_empty() {
-        // Root signal - run with unit input
+        // Root signal, run with unit input
         runner.run(world, Box::new(()))
     } else if !signal_inputs.is_empty() {
         // Run once per upstream input received, forwarding only the final output.
@@ -1135,7 +1135,7 @@ where
         SignalRegistrationCount::new(),
         SignalInputBuffer::default(),
         SystemRunner {
-            runner: Arc::new(Box::new(move |w, inp| runner.run(w, inp))),
+            runner: Arc::new(Box::new(move |world, input| runner.run(world, input))),
         },
     ));
     if let Some(mut state) = world.get_resource_mut::<SignalGraphState>() {
@@ -1462,14 +1462,14 @@ fn poll_signal_one_shot(In(target): In<SignalSystem>, world: &mut World) -> Opti
             .collect()
     };
 
-    // Compute levels for uncached signals if any (requires &World, so state borrow must end first)
+    // Compute levels for uncached signals if any
     let uncached_levels = if uncached.is_empty() {
         HashMap::default()
     } else {
         compute_levels_for_uncached(world, &reachable, &world.resource::<SignalGraphState>().levels)
     };
 
-    // Bucket by level using references to avoid cloning
+    // Bucket by level
     let by_level = {
         let state = world.resource::<SignalGraphState>();
         let mut by_level: Vec<Vec<SignalSystem>> = Vec::new();
@@ -1509,10 +1509,10 @@ fn poll_signal_one_shot(In(target): In<SignalSystem>, world: &mut World) -> Opti
             let upstreams = get_upstreams(world, signal);
 
             let output = if upstreams.is_empty() {
-                // Source signal - run with unit input
+                // Source signal, run with unit input
                 runner.run(world, Box::new(()))
             } else if let Some(input_list) = inputs.remove(&signal) {
-                // Has inputs from upstreams - run once per input, keep final output
+                // Has inputs from upstreams, run once per input, keep final output
                 let mut final_output = None;
                 for input in input_list {
                     if let Some(out) = runner.run(world, input) {
@@ -1521,14 +1521,14 @@ fn poll_signal_one_shot(In(target): In<SignalSystem>, world: &mut World) -> Opti
                 }
                 final_output
             } else {
-                // No input received - signal doesn't fire
+                // No input received, signal doesn't fire
                 None
             };
 
             // Only store output if this is the target we're polling
             if signal == target {
                 target_output = output;
-                // Target found - no need to propagate further since we're done
+                // Target found, no need to propagate further since we're done
                 continue;
             }
 
@@ -1548,7 +1548,21 @@ fn poll_signal_one_shot(In(target): In<SignalSystem>, world: &mut World) -> Opti
     target_output
 }
 
-/// Get a signal's current value by running all of it's dependencies.
+/// Get a signal's current value by running all of it's dependencies. Use
+/// `.and_then(downcast_any_clone::<T>)` to downcast the output to the expected type.
+///
+/// # Example
+///
+/// ```
+/// use bevy::prelude::*;
+/// use jonmo::{graph::*, prelude::*};
+///
+/// let mut app = App::new();
+/// app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+/// let signal = *signal::once(42usize).register(app.world_mut());
+/// let value = poll_signal(app.world_mut(), signal).and_then(downcast_any_clone::<usize>);
+/// assert_eq!(value, Some(42));
+/// ```
 pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn AnyClone>> {
     world
         .run_system_cached_with(poll_signal_one_shot, signal)
@@ -1567,7 +1581,7 @@ pub fn poll_signal(world: &mut World, signal: SignalSystem) -> Option<Box<dyn An
 ///
 /// let mut app = App::new();
 /// app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
-/// let signal = *signal::from_system(|In(_)| 1).register(app.world_mut());
+/// let signal = *signal::once(1).register(app.world_mut());
 /// poll_signal(app.world_mut(), signal).and_then(downcast_any_clone::<usize>); // outputs an `Option<usize>`
 /// ```
 pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T> {
@@ -1915,9 +1929,7 @@ mod tests {
         let signal_default = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(2));
 
         // Tag one signal with Update
-        world
-            .entity_mut(*signal_update)
-            .insert(ScheduleTag(Update.intern()));
+        world.entity_mut(*signal_update).insert(ScheduleTag(Update.intern()));
 
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
             rebuild_levels(world, &mut state);
@@ -1959,9 +1971,7 @@ mod tests {
             });
 
         // Tag one signal with Update schedule
-        world
-            .entity_mut(*signal_update)
-            .insert(ScheduleTag(Update.intern()));
+        world.entity_mut(*signal_update).insert(ScheduleTag(Update.intern()));
 
         // Build levels first
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
@@ -2088,18 +2098,14 @@ mod tests {
                         Some(())
                     });
                 // Tag child with same schedule as parent
-                world
-                    .entity_mut(*child_signal)
-                    .insert(ScheduleTag(Update.intern()));
+                world.entity_mut(*child_signal).insert(ScheduleTag(Update.intern()));
                 world.resource_mut::<ChildSignalHandle>().0 = Some(child_signal);
             }
             Some(())
         });
 
         // Tag parent signal
-        world
-            .entity_mut(*parent_signal)
-            .insert(ScheduleTag(Update.intern()));
+        world.entity_mut(*parent_signal).insert(ScheduleTag(Update.intern()));
 
         // Process signals - the fixpoint loop should process both parent and child
         let mut process_system = process_signal_graph_for_schedule(Update.intern());

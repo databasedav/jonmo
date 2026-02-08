@@ -17,12 +17,13 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - `.get_mut`s unwrapped and `.get_entity_mut`s changed to `.entity_mut` in cases where they were silently ignoring invariant violations
 
 ### added
+- `SignalExt::schedule`, enabling granular control of which schedule each node in the signal graph runs during
+- `SignalExt::take`
+- `SignalExt::skip`
 - `signal::once`
 - `signal::from_component_changed`
 - `signal::from_resource_changed`
 - `signal::zip!`, a variadic flattened version of `SignalExt::zip`
-- `SignalExt::take`
-- `SignalVecExt::flatten`
 - `track_caller` derive for panicking `LazyEntity` methods
 - panic (debug only) or error log that cloning `jonmo::Builder`s at runtime is a bug
 

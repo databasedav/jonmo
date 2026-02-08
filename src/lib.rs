@@ -72,7 +72,8 @@ cfg_if::cfg_if! {
 /// app.add_plugins(JonmoPlugin::new::<PostUpdate>().with_schedule::<Update>());
 /// ```
 ///
-/// Then use [`.schedule`](signal::SignalExt::schedule) on individual signal chains to control which schedule they run in.
+/// Then use [`.schedule`](signal::SignalExt::schedule) on individual signal chains to control which
+/// schedule they run in.
 pub struct JonmoPlugin {
     schedules: Vec<InternedScheduleLabel>,
     registration_recursion_limit: usize,

@@ -65,14 +65,14 @@ use dyn_clone::{DynClone, clone_trait_object};
 /// While signals are push-based by default, [jonmo](crate) also provides a polling API for cases
 /// where pull-based access is needed. Polling allows you to synchronously query a signal's most
 /// recent output from within another system, providing an escape hatch from the standard push
-/// semantics.
+/// semantics, see [`poll_signal`].
 ///
 /// # Composition
 ///
 /// Signals compose via the combinators in [`SignalExt`]. Methods like [`map`](SignalExt::map),
 /// [`dedupe`](SignalExt::dedupe), [`filter`](SignalExt::filter), and [`switch`](SignalExt::switch)
 /// allow complex dataflows to be built declaratively from simple primitives. Type erasure via
-/// boxing ([`boxed`](SignalExt::boxed)) and [`SignalEither`] enable heterogeneous signal
+/// boxing ([`.boxed`](SignalExt::boxed)) and [`SignalEither`] enable heterogeneous signal
 /// composition when concrete types differ across branches.
 ///
 /// # Related Traits
@@ -80,7 +80,7 @@ use dyn_clone::{DynClone, clone_trait_object};
 /// - [`SignalExt`]: extension trait providing all signal combinators
 /// - [`SignalVec`]: collection-oriented signals with diff-based semantics for [`Vec`] mutations
 /// - [`SignalMap`]: collection-oriented signals with diff-based semantics for
-///   [`BTreeMap`](alloc::collections::BTreeMap) mutations
+///   [`BTreeMap`](bevy_platform::collections::BTreeMap) mutations
 /// - [`SignalDynClone`]: for signals that need to be cloneable in type-erased contexts
 pub trait Signal: Send + Sync + 'static {
     /// Output type.
