@@ -80,7 +80,7 @@ use dyn_clone::{DynClone, clone_trait_object};
 /// - [`SignalExt`]: extension trait providing all signal combinators
 /// - [`SignalVec`]: collection-oriented signals with diff-based semantics for [`Vec`] mutations
 /// - [`SignalMap`]: collection-oriented signals with diff-based semantics for
-///   [`BTreeMap`](bevy_platform::collections::BTreeMap) mutations
+///   [`BTreeMap`](alloc::collections::BTreeMap) mutations
 /// - [`SignalDynClone`]: for signals that need to be cloneable in type-erased contexts
 pub trait Signal: Send + Sync + 'static {
     /// Output type.

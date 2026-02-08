@@ -3074,7 +3074,10 @@ pub trait SignalVecExt: SignalVec {
                                     state.sorted_indices.sort_unstable_by(|&a, &b| {
                                         let val_a = values_for_sort[a].clone();
                                         let val_b = values_for_sort[b].clone();
-                                        world.run_system_with(compare_system_id, (val_a, val_b)).unwrap()
+                                        world
+                                            .run_system_with(compare_system_id, (val_a, val_b))
+                                            .unwrap()
+                                            .then_with(|| a.cmp(&b))
                                     });
                                     let sorted_values =
                                         state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
@@ -3281,9 +3284,9 @@ pub trait SignalVecExt: SignalVec {
                                     state.sorted_indices = (0..state.values.len()).collect();
 
                                     let keys_for_sort = state.keys.clone();
-                                    state
-                                        .sorted_indices
-                                        .sort_unstable_by(|&a, &b| keys_for_sort[a].cmp(&keys_for_sort[b]));
+                                    state.sorted_indices.sort_unstable_by(|&a, &b| {
+                                        keys_for_sort[a].cmp(&keys_for_sort[b]).then_with(|| a.cmp(&b))
+                                    });
                                     let sorted_values =
                                         state.sorted_indices.iter().map(|&i| state.values[i].clone()).collect();
                                     out_diffs.push(VecDiff::Replace { values: sorted_values });
