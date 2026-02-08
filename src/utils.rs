@@ -63,8 +63,8 @@ pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&Chi
 
 /// Dereferences and copies the inner value.
 ///
-/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the inner
-/// value from [`Copy`] newtypes.
+/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the
+/// inner value from [`Copy`] newtypes.
 ///
 /// # Example
 ///
@@ -75,8 +75,7 @@ pub(crate) fn ancestor_map(generations: usize) -> impl Fn(In<Entity>, Query<&Chi
 /// #[derive(Clone, Deref)]
 /// struct Counter(i32);
 ///
-/// signal::always(Counter(42))
-///     .map_in(deref_copied); // outputs `42`
+/// signal::always(Counter(42)).map_in(deref_copied); // outputs `42`
 /// ```
 pub fn deref_copied<T: Deref>(x: T) -> T::Target
 where
@@ -87,8 +86,8 @@ where
 
 /// Dereferences and clones the inner value.
 ///
-/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the inner
-/// value from [`Clone`] newtypes.
+/// Conveniently used with [`SignalExt::map_in`](crate::signal::SignalExt::map_in) to extract the
+/// inner value from [`Clone`] newtypes.
 ///
 /// # Example
 ///
@@ -99,8 +98,7 @@ where
 /// #[derive(Clone, Deref)]
 /// struct Username(String);
 ///
-/// signal::always(Username("test".to_string()))
-///     .map_in(deref_cloned); // outputs `"test"`
+/// signal::always(Username("test".to_string())).map_in(deref_cloned); // outputs `"test"`
 /// ```
 pub fn deref_cloned<T: Deref>(x: T) -> T::Target
 where

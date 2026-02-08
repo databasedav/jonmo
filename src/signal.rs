@@ -1122,12 +1122,10 @@ where
     C: Component + Clone,
 {
     let mut entity = Some(entity);
-    from_system(
-        move |In(_), mut cached: Local<Option<Entity>>, components: Query<&C>| {
-            let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
-            components.get(entity).ok().cloned()
-        },
-    )
+    from_system(move |In(_), mut cached: Local<Option<Entity>>, components: Query<&C>| {
+        let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
+        components.get(entity).ok().cloned()
+    })
 }
 
 /// Creates a [`Signal`] from an [`Entity`] or [`LazyEntity`] and a [`Component`], always
@@ -1139,12 +1137,10 @@ where
     C: Component + Clone,
 {
     let mut entity = Some(entity);
-    from_system(
-        move |In(_), mut cached: Local<Option<Entity>>, components: Query<&C>| {
-            let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
-            Some(components.get(entity).ok().cloned())
-        },
-    )
+    from_system(move |In(_), mut cached: Local<Option<Entity>>, components: Query<&C>| {
+        let entity = *cached.get_or_insert_with(|| entity.take().unwrap().into());
+        Some(components.get(entity).ok().cloned())
+    })
 }
 
 /// Creates a [`Signal`] from an [`Entity`] or [`LazyEntity`] and a [`Component`], only
@@ -1640,7 +1636,7 @@ pub trait SignalExt: Signal {
     }
 
     /// Skips the first `count` values from this [`Signal`], then outputs all subsequent values.
-
+    ///
     /// # Example
     ///
     /// ```
@@ -2983,7 +2979,7 @@ pub trait SignalExt: Signal {
     /// `.schedule::<S>()` applies the schedule `S` to:
     /// 1. The signal it's called on (the "caller")
     /// 2. All upstream signals that don't already have a schedule
-    /// 3. All downstream signals (via hint inheritance), until another `.schedule()` is encountered
+    /// 3. All downstream signals, until another `.schedule()` is encountered
     ///
     /// # Example
     ///
@@ -3008,12 +3004,12 @@ pub trait SignalExt: Signal {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// let signal = signal::from_system(|In(_)| Some(1i32)) // Update (upstream propagation)
+    /// let signal = signal::from_system(|In(_)| Some(1i32)) // Update (inherits from downstream)
     ///     .map_in(|x: i32| x + 1) // Update (caller of .schedule::<Update>())
     ///     .schedule::<Update>()
     ///     .map_in(|x: i32| x * 2) // PostUpdate (caller of .schedule::<PostUpdate>())
     ///     .schedule::<PostUpdate>()
-    ///     .map_in(|x: i32| x - 1); // PostUpdate (inherits from above)
+    ///     .map_in(|x: i32| x - 1); // PostUpdate (inherits from upstream)
     /// ```
     fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> Scheduled<Sched, Self::Item>
     where
@@ -6357,7 +6353,7 @@ mod tests {
 
     #[test]
     fn multi_schedule_chain_tags_correctly() {
-        use crate::graph::{SignalScheduleTag, Upstream};
+        use crate::graph::{ScheduleTag, Upstream};
         use bevy_app::{PostUpdate, Update};
         use bevy_ecs::schedule::ScheduleLabel;
 
@@ -6405,11 +6401,11 @@ mod tests {
         let source_entity = **map1_upstreams.iter().next().unwrap();
 
         // Verify schedule tags
-        let source_tag = world.get::<SignalScheduleTag>(source_entity);
+        let source_tag = world.get::<ScheduleTag>(source_entity);
         assert!(source_tag.is_some(), "source should have a schedule tag");
         assert_eq!(source_tag.unwrap().0, Update.intern(), "source should be tagged Update");
 
-        let map1_tag = world.get::<SignalScheduleTag>(map1_entity);
+        let map1_tag = world.get::<ScheduleTag>(map1_entity);
         assert!(map1_tag.is_some(), "map1 should have a schedule tag");
         assert_eq!(
             map1_tag.unwrap().0,
@@ -6417,7 +6413,7 @@ mod tests {
             "map1 should be tagged Update (caller of schedule::<Update>)"
         );
 
-        let map2_tag = world.get::<SignalScheduleTag>(map2_entity);
+        let map2_tag = world.get::<ScheduleTag>(map2_entity);
         assert!(map2_tag.is_some(), "map2 should have a schedule tag");
         assert_eq!(
             map2_tag.unwrap().0,
@@ -6425,7 +6421,7 @@ mod tests {
             "map2 should be tagged PostUpdate (caller of schedule::<PostUpdate>)"
         );
 
-        let map3_tag = world.get::<SignalScheduleTag>(map3_entity);
+        let map3_tag = world.get::<ScheduleTag>(map3_entity);
         assert!(map3_tag.is_some(), "map3 should have a schedule tag");
         assert_eq!(
             map3_tag.unwrap().0,

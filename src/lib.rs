@@ -24,6 +24,7 @@ pub mod utils;
 cfg_if::cfg_if! {
     if #[cfg(feature = "builder")] {
         pub mod builder;
+        #[doc(inline)]
         pub use builder::Builder;
     }
 }
@@ -46,11 +47,11 @@ cfg_if::cfg_if! {
 /// app.add_plugins(JonmoPlugin::new::<PostUpdate>());
 ///
 /// // Add ordering constraints using configure_sets
-/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-/// # struct SystemSet1;
+/// #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// struct SystemSet1;
 ///
-/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-/// # struct SystemSet2;
+/// #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// struct SystemSet2;
 ///
 /// app.configure_sets(
 ///     PostUpdate,
@@ -71,7 +72,7 @@ cfg_if::cfg_if! {
 /// app.add_plugins(JonmoPlugin::new::<PostUpdate>().with_schedule::<Update>());
 /// ```
 ///
-/// Then use `.schedule::<S>()` on individual signal chains to control which schedule they run in.
+/// Then use [`.schedule`](signal::SignalExt::schedule) on individual signal chains to control which schedule they run in.
 pub struct JonmoPlugin {
     schedules: Vec<InternedScheduleLabel>,
     registration_recursion_limit: usize,

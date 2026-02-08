@@ -121,13 +121,13 @@ impl SignalRegistrationCount {
 /// Used by the multi-schedule processing system to determine which signals
 /// to run during each schedule's processing pass.
 #[derive(Component, Clone, Copy)]
-pub(crate) struct SignalScheduleTag(pub(crate) InternedScheduleLabel);
+pub(crate) struct ScheduleTag(pub(crate) InternedScheduleLabel);
 
 /// Component for downstream schedule inheritance during registration.
 ///
 /// When a signal is connected to an upstream via [`pipe_signal`], if the upstream
 /// has a `ScheduleHint`, the downstream inherits the schedule (unless it already
-/// has a [`SignalScheduleTag`]).
+/// has a [`ScheduleTag`]).
 #[derive(Component, Clone, Copy)]
 pub(crate) struct ScheduleHint(pub(crate) InternedScheduleLabel);
 
@@ -139,16 +139,14 @@ pub(crate) struct ScheduleHint(pub(crate) InternedScheduleLabel);
 /// [`SignalMapExt::schedule`](super::signal_map::SignalMapExt::schedule).
 pub(crate) fn apply_schedule_to_signal(world: &mut World, signal: SignalSystem, schedule: InternedScheduleLabel) {
     // Directly tag caller (overwrites any inherited schedule)
-    world.entity_mut(*signal).insert(SignalScheduleTag(schedule));
-
+    world.entity_mut(*signal).insert(ScheduleTag(schedule));
     // Propagate to unscheduled upstreams
     tag_unscheduled_upstreams(world, signal, schedule);
-
     // Set hint for downstream inheritance
     world.entity_mut(*signal).insert(ScheduleHint(schedule));
 }
 
-/// Tags all upstream signals that don't already have a [`SignalScheduleTag`].
+/// Tags all upstream signals that don't already have a [`ScheduleTag`].
 ///
 /// Traverses the upstream graph from `start` and applies the given `schedule` to any
 /// signal that hasn't been explicitly scheduled. This ensures that when a downstream
@@ -156,17 +154,14 @@ pub(crate) fn apply_schedule_to_signal(world: &mut World, signal: SignalSystem, 
 pub(crate) fn tag_unscheduled_upstreams(world: &mut World, start: SignalSystem, schedule: InternedScheduleLabel) {
     let mut stack = vec![start];
     let mut visited = HashSet::new();
-
     while let Some(current) = stack.pop() {
         if !visited.insert(current) {
             continue;
         }
-
         // Tag if not already tagged
-        if world.get::<SignalScheduleTag>(*current).is_none() {
-            world.entity_mut(*current).insert(SignalScheduleTag(schedule));
+        if world.get::<ScheduleTag>(*current).is_none() {
+            world.entity_mut(*current).insert(ScheduleTag(schedule));
         }
-
         // Continue to upstreams
         if let Some(upstream) = world.get::<Upstream>(*current) {
             for &up in upstream.iter() {
@@ -257,12 +252,12 @@ pub(crate) fn pipe_signal(world: &mut World, source: SignalSystem, target: Signa
     }
 
     // Inherit schedule from upstream if target doesn't already have one
-    if world.get::<SignalScheduleTag>(*target).is_none()
+    if world.get::<ScheduleTag>(*target).is_none()
         && let Some(hint) = world.get::<ScheduleHint>(*source).copied()
     {
         world
             .entity_mut(*target)
-            .insert(SignalScheduleTag(hint.0))
+            .insert(ScheduleTag(hint.0))
             .insert(ScheduleHint(hint.0)); // Pass it on to further downstreams
     }
 
@@ -647,7 +642,7 @@ fn rebuild_levels(world: &mut World, state: &mut SignalGraphState) {
     // Build by_schedule partitioning and signal_schedules cache
     for (&signal, &level) in &state.levels {
         let schedule = world
-            .get::<SignalScheduleTag>(*signal)
+            .get::<ScheduleTag>(*signal)
             .map(|tag| tag.0)
             .unwrap_or(state.default_schedule);
 
@@ -678,7 +673,7 @@ fn remove_signal_from_buckets(state: &mut SignalGraphState, signal: SignalSystem
 fn insert_signal_into_buckets(world: &World, state: &mut SignalGraphState, signal: SignalSystem, new_level: u32) {
     // Get schedule and insert into by_schedule
     let schedule = world
-        .get::<SignalScheduleTag>(*signal)
+        .get::<ScheduleTag>(*signal)
         .map(|tag| tag.0)
         .unwrap_or(state.default_schedule);
 
@@ -1008,7 +1003,7 @@ pub(crate) fn process_signal_graph_for_schedule(schedule: InternedScheduleLabel)
                 .filter(|s| {
                     !processed.contains(s)
                         && world
-                            .get::<SignalScheduleTag>(**s)
+                            .get::<ScheduleTag>(**s)
                             .map(|tag| tag.0 == schedule)
                             .unwrap_or(false)
                 })
@@ -1025,7 +1020,7 @@ pub(crate) fn process_signal_graph_for_schedule(schedule: InternedScheduleLabel)
                     if processed.insert(signal) {
                         // Only process if we haven't already
                         if world
-                            .get::<SignalScheduleTag>(*signal)
+                            .get::<ScheduleTag>(*signal)
                             .map(|tag| tag.0 == schedule)
                             .unwrap_or(false)
                         {
@@ -1749,7 +1744,7 @@ mod tests {
         let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
 
         // Tag the signal with Update schedule
-        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+        world.entity_mut(*signal_a).insert(ScheduleTag(Update.intern()));
 
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
             rebuild_levels(world, &mut state);
@@ -1774,14 +1769,14 @@ mod tests {
         // Tag signal_a with Update schedule and set a hint for downstream
         world
             .entity_mut(*signal_a)
-            .insert(SignalScheduleTag(Update.intern()))
+            .insert(ScheduleTag(Update.intern()))
             .insert(ScheduleHint(Update.intern()));
 
         // Pipe a -> b (b should inherit the schedule from hint)
         pipe_signal(&mut world, signal_a, signal_b);
 
         // signal_b should now have the SignalScheduleTag from the hint
-        let tag = world.get::<SignalScheduleTag>(*signal_b);
+        let tag = world.get::<ScheduleTag>(*signal_b);
         assert!(tag.is_some());
         assert_eq!(tag.unwrap().0, Update.intern());
     }
@@ -1799,17 +1794,17 @@ mod tests {
         // Tag signal_a with Update schedule and set a hint
         world
             .entity_mut(*signal_a)
-            .insert(SignalScheduleTag(Update.intern()))
+            .insert(ScheduleTag(Update.intern()))
             .insert(ScheduleHint(Update.intern()));
 
         // Tag signal_b with Last schedule (explicit tag)
-        world.entity_mut(*signal_b).insert(SignalScheduleTag(Last.intern()));
+        world.entity_mut(*signal_b).insert(ScheduleTag(Last.intern()));
 
         // Pipe a -> b (b's explicit tag should NOT be overridden)
         pipe_signal(&mut world, signal_a, signal_b);
 
         // signal_b should still have Last schedule
-        let tag = world.get::<SignalScheduleTag>(*signal_b);
+        let tag = world.get::<ScheduleTag>(*signal_b);
         assert!(tag.is_some());
         assert_eq!(tag.unwrap().0, Last.intern());
     }
@@ -1843,20 +1838,20 @@ mod tests {
         apply_schedule_to_signal(&mut world, combined, Update.intern());
 
         // Verify the combined signal itself has the schedule
-        let combined_tag = world.get::<SignalScheduleTag>(*combined);
+        let combined_tag = world.get::<ScheduleTag>(*combined);
         assert!(combined_tag.is_some());
         assert_eq!(combined_tag.unwrap().0, Update.intern());
 
         // Verify ALL upstream signals got the schedule tag
-        let tag_a = world.get::<SignalScheduleTag>(*signal_a);
+        let tag_a = world.get::<ScheduleTag>(*signal_a);
         assert!(tag_a.is_some(), "signal_a should have schedule tag");
         assert_eq!(tag_a.unwrap().0, Update.intern());
 
-        let tag_b = world.get::<SignalScheduleTag>(*signal_b);
+        let tag_b = world.get::<ScheduleTag>(*signal_b);
         assert!(tag_b.is_some(), "signal_b should have schedule tag");
         assert_eq!(tag_b.unwrap().0, Update.intern());
 
-        let tag_c = world.get::<SignalScheduleTag>(*signal_c);
+        let tag_c = world.get::<ScheduleTag>(*signal_c);
         assert!(tag_c.is_some(), "signal_c should have schedule tag");
         assert_eq!(tag_c.unwrap().0, Update.intern());
     }
@@ -1903,7 +1898,7 @@ mod tests {
             ("mid_c", mid_c),
             ("final", final_signal),
         ] {
-            let tag = world.get::<SignalScheduleTag>(*signal);
+            let tag = world.get::<ScheduleTag>(*signal);
             assert!(tag.is_some(), "{name} should have schedule tag");
             assert_eq!(tag.unwrap().0, Update.intern(), "{name} should have Update schedule");
         }
@@ -1922,7 +1917,7 @@ mod tests {
         // Tag one signal with Update
         world
             .entity_mut(*signal_update)
-            .insert(SignalScheduleTag(Update.intern()));
+            .insert(ScheduleTag(Update.intern()));
 
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
             rebuild_levels(world, &mut state);
@@ -1953,11 +1948,10 @@ mod tests {
         world.insert_resource(SignalGraphState::default());
         world.insert_resource(Order::default());
 
-        let signal_update =
-            spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
-                order.0.push("update");
-                Some(())
-            });
+        let signal_update = spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
+            order.0.push("update");
+            Some(())
+        });
         let _signal_default =
             spawn_signal::<(), (), Option<()>, _, _>(&mut world, |In(_), mut order: ResMut<Order>| {
                 order.0.push("default");
@@ -1967,7 +1961,7 @@ mod tests {
         // Tag one signal with Update schedule
         world
             .entity_mut(*signal_update)
-            .insert(SignalScheduleTag(Update.intern()));
+            .insert(ScheduleTag(Update.intern()));
 
         // Build levels first
         world.resource_scope(|world, mut state: Mut<SignalGraphState>| {
@@ -2015,7 +2009,7 @@ mod tests {
         );
 
         // Tag signal_a with Update
-        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+        world.entity_mut(*signal_a).insert(ScheduleTag(Update.intern()));
 
         // Pipe a -> b (cross-schedule dependency)
         pipe_signal(&mut world, signal_a, signal_b);
@@ -2096,7 +2090,7 @@ mod tests {
                 // Tag child with same schedule as parent
                 world
                     .entity_mut(*child_signal)
-                    .insert(SignalScheduleTag(Update.intern()));
+                    .insert(ScheduleTag(Update.intern()));
                 world.resource_mut::<ChildSignalHandle>().0 = Some(child_signal);
             }
             Some(())
@@ -2105,7 +2099,7 @@ mod tests {
         // Tag parent signal
         world
             .entity_mut(*parent_signal)
-            .insert(SignalScheduleTag(Update.intern()));
+            .insert(ScheduleTag(Update.intern()));
 
         // Process signals - the fixpoint loop should process both parent and child
         let mut process_system = process_signal_graph_for_schedule(Update.intern());
@@ -2157,18 +2151,18 @@ mod tests {
                                 Some(())
                             },
                         );
-                        world.entity_mut(*signal_c).insert(SignalScheduleTag(Update.intern()));
+                        world.entity_mut(*signal_c).insert(ScheduleTag(Update.intern()));
                         world.resource_mut::<SpawnedSignals>().0.push(signal_c);
                     }
                     Some(())
                 });
-                world.entity_mut(*signal_b).insert(SignalScheduleTag(Update.intern()));
+                world.entity_mut(*signal_b).insert(ScheduleTag(Update.intern()));
                 world.resource_mut::<SpawnedSignals>().0.push(signal_b);
             }
             Some(())
         });
 
-        world.entity_mut(*signal_a).insert(SignalScheduleTag(Update.intern()));
+        world.entity_mut(*signal_a).insert(ScheduleTag(Update.intern()));
 
         // Process signals
         let mut process_system = process_signal_graph_for_schedule(Update.intern());
