@@ -2972,7 +2972,9 @@ pub trait SignalExt: Signal {
     /// Assign a schedule to this signal chain.
     ///
     /// When registered, signals in the chain will be tagged to run in the specified schedule,
-    /// enabling control over when signal processing occurs within each frame.
+    /// enabling control over when signal processing occurs within each frame. Signals without
+    /// an explicit `.schedule()` call run in the [`JonmoPlugin`](crate::JonmoPlugin)'s default
+    /// schedule ([`Last`](bevy_app::Last) unless configured otherwise).
     ///
     /// # Semantics
     ///
@@ -2989,9 +2991,26 @@ pub trait SignalExt: Signal {
     /// use jonmo::prelude::*;
     ///
     /// // All signals in this chain run in the Update schedule
-    /// let signal = signal::from_system(|In(_)| Some(42i32))
+    /// let signal = signal::from_system(|In(_)| 42i32)
     ///     .map_in(|x: i32| x + 1)
     ///     .schedule::<Update>();
+    /// ```
+    ///
+    /// # Plugin Configuration
+    ///
+    /// Any schedule used with `.schedule()` must be registered with
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule). Without this,
+    /// the schedule will not process signals.
+    ///
+    /// ```
+    /// use bevy_app::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// # let mut app = App::new();
+    /// app.add_plugins(
+    ///     JonmoPlugin::new::<PostUpdate>() // signals run in PostUpdate by default
+    ///         .with_schedule::<Update>(), // enables `.schedule::<Update>()`
+    /// );
     /// ```
     ///
     /// # Multi-Schedule Chains
