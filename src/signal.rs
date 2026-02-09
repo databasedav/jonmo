@@ -14,7 +14,7 @@ use super::{
     utils::{LazyEntity, ancestor_map},
 };
 use crate::prelude::clone;
-use bevy_ecs::{entity_disabling::Internal, prelude::*, schedule::ScheduleLabel, system::SystemState};
+use bevy_ecs::{prelude::*, schedule::ScheduleLabel, system::SystemState};
 cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         use core::fmt;
@@ -1896,11 +1896,11 @@ pub trait SignalExt: Signal {
             // The output signal (reader). Reads from state and propagates. Has no upstream dependencies;
             // triggered manually by the forwarder.
             let reader_system = *from_system::<<Self::Item as Signal>::Item, _, _, _>(
-                    clone!((reader_entity) move |In(_), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>, Allow<Internal>>| {
-                        query.get_mut(*reader_entity).unwrap().value.take()
-                    }),
-                )
-                .register(world);
+                clone!((reader_entity) move |In(_), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
+                    query.get_mut(*reader_entity).unwrap().value.take()
+                }),
+            )
+            .register(world);
             reader_entity.set(*reader_system);
             world
                 .entity_mut(*reader_system)
@@ -2066,7 +2066,7 @@ pub trait SignalExt: Signal {
             // dependencies; triggered manually by the forwarder.
             let output_signal_entity = LazyEntity::new();
             let output_signal = *from_system::<Vec<VecDiff<S::Item>>, _, _, _>(
-                clone!((output_signal_entity) move |In(_), mut q: Query<&mut SwitcherQueue<S::Item>, Allow<Internal>>| {
+                clone!((output_signal_entity) move |In(_), mut q: Query<&mut SwitcherQueue<S::Item>>| {
                     let mut queue = q.get_mut(*output_signal_entity).unwrap();
                     if queue.0.is_empty() {
                         None
@@ -2117,7 +2117,7 @@ pub trait SignalExt: Signal {
                     *active_forwarder = Some(new_forwarder_handle);
 
                     // Synchronously send the initial `Replace` diff.
-                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
+                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
                     for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
@@ -2195,7 +2195,7 @@ pub trait SignalExt: Signal {
             // dependencies; triggered manually by the forwarder.
             let output_signal_entity = LazyEntity::new();
             let output_signal = *from_system::<Vec<super::signal_map::MapDiff<S::Key, S::Value>>, _, _, _>(
-                clone!((output_signal_entity) move |In(_), mut q: Query<&mut SwitcherQueue<S::Key, S::Value>, Allow<Internal>>| {
+                clone!((output_signal_entity) move |In(_), mut q: Query<&mut SwitcherQueue<S::Key, S::Value>>| {
                     let mut queue = q.get_mut(*output_signal_entity).unwrap();
                     if queue.0.is_empty() {
                         None
@@ -2247,7 +2247,7 @@ pub trait SignalExt: Signal {
                     *active_forwarder = Some(new_forwarder_handle);
 
                     // Synchronously send the initial `Replace` diff.
-                    let mut upstreams = SystemState::<Query<&Upstream, Allow<Internal>>>::new(world);
+                    let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
                     for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {

@@ -64,7 +64,6 @@ use alloc::collections::VecDeque;
 use bevy_app::PostUpdate;
 use bevy_derive::Deref;
 use bevy_ecs::{
-    entity_disabling::Internal,
     lifecycle::HookContext,
     prelude::*,
     query::{QueryData, QueryFilter},
@@ -641,7 +640,7 @@ fn rebuild_levels(world: &mut World, state: &mut SignalGraphState) {
     state.by_schedule.clear();
     state.signal_schedules.clear();
 
-    let mut all_signals_state = SystemState::<Query<Entity, (With<SystemRunner>, Allow<Internal>)>>::new(world);
+    let mut all_signals_state = SystemState::<Query<Entity, With<SystemRunner>>>::new(world);
     let all_signals: HashSet<SignalSystem> = all_signals_state.get(world).iter().map(SignalSystem).collect();
 
     let result = compute_signal_levels(

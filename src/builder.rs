@@ -453,7 +453,7 @@ impl Builder {
                             let mut parent = world.entity_mut(parent);
                             // Bevy's `remove_children` finds the entity and removes it from its
                             // current position, correctly shifting subsequent children.
-                            parent.remove_children(&[moved_entity]);
+                            parent.detach_children(&[moved_entity]);
                             let parent_entity = parent.id();
 
                             // The new insertion index must be calculated with the offset from any
@@ -498,7 +498,7 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// Returns [`EntityMutableFetchError::EntityDoesNotExist`] if the entity does not exist in the
+    /// Returns [`EntityMutableFetchError::NotSpawned`] if the entity does not exist in the
     /// world.
     pub fn spawn_on_entity(self, world: &mut World, entity: Entity) -> Result<(), EntityMutableFetchError> {
         let mut entity_mut = world.get_entity_mut(entity)?;

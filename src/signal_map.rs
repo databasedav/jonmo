@@ -20,7 +20,7 @@ use super::{
 };
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
-use bevy_ecs::{entity_disabling::Internal, prelude::*, schedule::ScheduleLabel};
+use bevy_ecs::{prelude::*, schedule::ScheduleLabel};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
@@ -1320,7 +1320,7 @@ impl<K, V> MutableBTreeMap<K, V> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>, mut has_replayed: Local<bool>| {
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>, mut has_replayed: Local<bool>| {
                 if replay_onces.contains(*replay_entity) {
                     let first_replay = !core::mem::replace(&mut *has_replayed, true);
                     if first_replay && was_initially_empty {
