@@ -498,7 +498,7 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// Returns [`EntityMutableFetchError::EntityDoesNotExist`] if the entity does not exist in the
+    /// Returns [`EntityMutableFetchError::NotSpawned`] if the entity does not exist in the
     /// world.
     pub fn spawn_on_entity(self, world: &mut World, entity: Entity) -> Result<(), EntityMutableFetchError> {
         let mut entity_mut = world.get_entity_mut(entity)?;
