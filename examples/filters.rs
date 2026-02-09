@@ -3,15 +3,19 @@
 mod utils;
 use utils::*;
 
-use bevy::{ecs::system::IntoObserverSystem, platform::collections::HashSet, prelude::*};
-use jonmo::{prelude::*, utils::SSs};
+use bevy::{platform::collections::HashSet, prelude::*};
+use jonmo::prelude::*;
 use rand::{Rng, prelude::IndexedRandom};
 
 fn main() {
     let mut app = App::new();
     let world = app.world_mut();
-    let datas = MutableVecBuilder::from((0..12).map(|_| random_data()).collect::<Vec<_>>()).spawn(world);
-    let rows = MutableVecBuilder::from((0..5).map(|_| ()).collect::<Vec<_>>()).spawn(world);
+    let datas = MutableVec::builder()
+        .with_values(|v| v.extend((0..12).map(|_| random_data())))
+        .spawn(world);
+    let rows = MutableVec::builder()
+        .with_values(|v| v.extend((0..5).map(|_| ())))
+        .spawn(world);
     app.add_plugins(examples_plugin)
         .insert_resource(Datas(datas.clone()))
         .insert_resource(Rows(rows.clone()))
@@ -83,14 +87,14 @@ struct Sorted;
 
 const GAP: f32 = 5.;
 
-fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> jonmo::Builder {
+    jonmo::Builder::from(Node {
         height: Val::Percent(100.),
         width: Val::Percent(100.),
         ..default()
     })
     .child(
-        JonmoBuilder::from(Node {
+        jonmo::Builder::from(Node {
             flex_direction: FlexDirection::Column,
             align_self: AlignSelf::Start,
             justify_self: JustifySelf::Start,
@@ -99,26 +103,26 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
             ..default()
         })
         .child(
-            JonmoBuilder::from((Node {
+            jonmo::Builder::from((Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 column_gap: Val::Px(GAP * 2.),
                 ..default()
             },))
-            .child(JonmoBuilder::from((
+            .child(jonmo::Builder::from((
                 Node::default(),
                 Text::new("source"),
                 TextColor(Color::WHITE),
                 TextFont::from_font_size(30.),
                 TextLayout::new_with_justify(Justify::Center),
             )))
-            .child(button("+", -2.).apply(on_click(
+            .child(button("+", -2.).observe(
                 |_: On<Pointer<Click>>, datas: Res<Datas>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     datas.0.write(&mut mutable_vec_datas).insert(0, random_data());
                 },
-            )))
+            ))
             .child(
-                JonmoBuilder::from(Node {
+                jonmo::Builder::from(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
                     column_gap: Val::Px(GAP),
@@ -138,7 +142,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 .map_in(clone!((items) move |(index, _)| row(index.dedupe(), items.clone()))),
         )
         .child(
-            JonmoBuilder::from((
+            jonmo::Builder::from((
                 Node {
                     height: Val::Px(55.),
                     justify_content: JustifyContent::Center,
@@ -147,11 +151,11 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> JonmoBuilder {
                 },
                 // BackgroundColor(Color::WHITE),
             ))
-            .child(button("+", -2.).apply(on_click(
+            .child(button("+", -2.).observe(
                 |_: On<Pointer<Click>>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     rows.0.write(&mut mutable_vec_datas).push(());
                 },
-            ))),
+            )),
         ),
     )
 }
@@ -189,7 +193,7 @@ fn random_shape_filters() -> ShapeFilters {
     ShapeFilters(HashSet::from_iter(random_subset(&[Shape::Square, Shape::Circle])))
 }
 
-fn maybe_insert_random_sorted(builder: JonmoBuilder) -> JonmoBuilder {
+fn maybe_insert_random_sorted(builder: jonmo::Builder) -> jonmo::Builder {
     let mut rng = rand::rng();
     if rng.random_bool(0.5) {
         builder.insert(Sorted)
@@ -198,8 +202,8 @@ fn maybe_insert_random_sorted(builder: JonmoBuilder) -> JonmoBuilder {
     }
 }
 
-fn text_node(text: &'static str) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn text_node(text: &'static str) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node::default(),
         Text::new(text),
         TextColor(Color::WHITE),
@@ -214,16 +218,6 @@ fn toggle<T: Eq + core::hash::Hash>(set: &mut HashSet<T>, value: T) {
     }
 }
 
-fn on_click<M>(
-    on_click: impl IntoObserverSystem<Pointer<Click>, (), M> + SSs,
-) -> impl FnOnce(JonmoBuilder) -> JonmoBuilder {
-    move |builder: JonmoBuilder| {
-        builder.on_spawn(move |world, entity| {
-            world.entity_mut(entity).observe(on_click);
-        })
-    }
-}
-
 fn outline() -> Outline {
     Outline {
         width: Val::Px(1.),
@@ -231,26 +225,25 @@ fn outline() -> Outline {
     }
 }
 
-fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(JonmoBuilder) -> JonmoBuilder {
+fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(jonmo::Builder) -> jonmo::Builder {
     move |builder| {
         builder
-            .apply(on_click(
+            .observe(
                 clone!((row_parent) move |_: On<Pointer<Click>>, mut number_filters: Query<&mut NumberFilters>| {
-                    toggle(&mut number_filters.get_mut(row_parent.get()).unwrap().0, parity);
+                    toggle(&mut number_filters.get_mut(*row_parent).unwrap().0, parity);
                 }),
-            ))
+            )
             .component_signal(
-                SignalBuilder::from_component_lazy(row_parent.clone())
-                    .dedupe()
+                signal::from_component_changed(row_parent.clone())
                     .map_in(move |NumberFilters(filters)| filters.contains(&parity))
                     .dedupe()
-                    .map_true(|_: In<()>| outline()),
+                    .map_true_in(outline),
             )
     }
 }
 
-fn number_toggles(row_parent: LazyEntity) -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn number_toggles(row_parent: LazyEntity) -> jonmo::Builder {
+    jonmo::Builder::from(Node {
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(2.),
         ..default()
@@ -271,25 +264,25 @@ fn number_toggles(row_parent: LazyEntity) -> JonmoBuilder {
         text_node("sort")
             .insert(TextFont::from_font_size(13.))
             .insert(BackgroundColor(bevy::color::palettes::basic::GRAY.into()))
-            .apply(on_click(
+            .observe(
                 clone!((row_parent) move |_: On<Pointer<Click>>, mut commands: Commands| {
                     commands.queue(clone!((row_parent) move |world: &mut World| {
-                        let mut entity = world.entity_mut(row_parent.get());
+                        let mut entity = world.entity_mut(*row_parent);
                         if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
                     }))
                 }),
-            ))
+            )
             .component_signal(
-                SignalBuilder::from_lazy_entity(row_parent.clone())
+                signal::from_entity(row_parent.clone())
                     .has_component::<Sorted>()
                     .dedupe()
-                    .map_true(|_: In<()>| outline()),
+                    .map_true_in(outline),
             ),
     )
 }
 
-fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             width: Val::Px(20.),
             height: Val::Px(20.),
@@ -297,22 +290,21 @@ fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> JonmoBuilder {
         },
         BackgroundColor(bevy::color::palettes::basic::GRAY.into()),
     ))
-    .apply(on_click(
+    .observe(
         clone!((row_parent) move |_: On<Pointer<Click>>, mut shape_filters: Query<&mut ShapeFilters>| {
-            toggle(&mut shape_filters.get_mut(row_parent.get()).unwrap().0, shape);
+            toggle(&mut shape_filters.get_mut(*row_parent).unwrap().0, shape);
         }),
-    ))
+    )
     .component_signal(
-        SignalBuilder::from_component_lazy(row_parent.clone())
-            .dedupe()
+        signal::from_component_changed(row_parent.clone())
             .map_in(move |ShapeFilters(filters)| filters.contains(&shape))
             .dedupe()
-            .map_true(|_: In<()>| outline()),
+            .map_true_in(outline),
     )
 }
 
-fn shape_toggles(row_parent: LazyEntity) -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn shape_toggles(row_parent: LazyEntity) -> jonmo::Builder {
+    jonmo::Builder::from(Node {
         flex_direction: FlexDirection::Column,
         justify_content: JustifyContent::Center,
         row_gap: Val::Px(GAP),
@@ -322,8 +314,8 @@ fn shape_toggles(row_parent: LazyEntity) -> JonmoBuilder {
     .child(shape_toggle(row_parent.clone(), Shape::Circle).insert(BorderRadius::MAX))
 }
 
-fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
-    JonmoBuilder::from(Node {
+fn color_toggles(row_parent: LazyEntity) -> jonmo::Builder {
+    jonmo::Builder::from(Node {
         flex_direction: FlexDirection::Column,
         justify_content: JustifyContent::Center,
         row_gap: Val::Px(GAP),
@@ -333,7 +325,7 @@ fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
         [ColorEnum::Blue, ColorEnum::Pink, ColorEnum::White]
             .into_iter()
             .map(move |color| {
-                JonmoBuilder::from((
+                jonmo::Builder::from((
                     Node {
                         width: Val::Px(15.),
                         height: Val::Px(15.),
@@ -344,24 +336,23 @@ fn color_toggles(row_parent: LazyEntity) -> JonmoBuilder {
                     BackgroundColor(color.into()),
                     BorderColor::all(Color::BLACK),
                 ))
-                .apply(on_click(
+                .observe(
                     clone!((row_parent) move |_: On<Pointer<Click>>, mut color_filters: Query<&mut ColorFilters>| {
-                        toggle(&mut color_filters.get_mut(row_parent.get()).unwrap().0, color);
+                        toggle(&mut color_filters.get_mut(*row_parent).unwrap().0, color);
                     }),
-                ))
+                )
                 .component_signal(
-                    SignalBuilder::from_component_lazy(row_parent.clone())
-                        .dedupe()
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |ColorFilters(filters)| filters.contains(&color))
                         .dedupe()
-                        .map_true(|_: In<()>| outline()),
+                        .map_true_in(outline),
                 )
             }),
     )
 }
 
-fn button(text: &'static str, offset: f32) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn button(text: &'static str, offset: f32) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             width: Val::Px((ITEM_SIZE / 2) as f32),
             height: Val::Px((ITEM_SIZE / 2) as f32),
@@ -383,9 +374,9 @@ fn button(text: &'static str, offset: f32) -> JonmoBuilder {
 #[derive(Component, Clone)]
 struct Index(usize);
 
-fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> JonmoBuilder {
+fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jonmo::Builder {
     let row_parent = LazyEntity::new();
-    JonmoBuilder::from((
+    jonmo::Builder::from((
         Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
@@ -401,7 +392,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
     .child(
         button("-", -3.)
             .component_signal(index.map_in(|index| index.map(Index)))
-            .apply(on_click(
+            .observe(
                 |click: On<Pointer<Click>>,
                  rows: Res<Rows>,
                  indices: Query<&Index>,
@@ -410,10 +401,10 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                         rows.0.write(&mut mutable_vec_datas).remove(index);
                     }
                 },
-            )),
+            ),
     )
     .child(
-        JonmoBuilder::from((Node {
+        jonmo::Builder::from((Node {
             flex_direction: FlexDirection::Row,
             width: Val::Px(108.),
             height: Val::Percent(100.),
@@ -426,14 +417,14 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
         .child(color_toggles(row_parent.clone())),
     )
     .child(
-        JonmoBuilder::from((Node {
+        jonmo::Builder::from((Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             column_gap: Val::Px(GAP),
             ..default()
         },))
         .children_signal_vec(
-            SignalBuilder::from_lazy_entity(row_parent.clone())
+            signal::from_entity(row_parent.clone())
                 .has_component::<Sorted>()
                 .dedupe()
                 .switch_signal_vec(move |In(sorted)| {
@@ -445,8 +436,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                     }
                 })
                 .filter_signal(clone!((row_parent) move | In((_, Data { number, .. })) | {
-                    SignalBuilder::from_component_lazy(row_parent.clone())
-                        .dedupe()
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |number_filters: NumberFilters| {
                             number_filters.0.contains(&if number.is_multiple_of(2) {
                                 Parity::Even
@@ -457,14 +447,12 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> Jon
                         .dedupe()
                 }))
                 .filter_signal(clone!((row_parent) move | In((_, Data { shape, .. })) | {
-                    SignalBuilder::from_component_lazy(row_parent.clone())
-                        .dedupe()
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |shape_filters: ShapeFilters| shape_filters.0.contains(&shape))
                         .dedupe()
                 }))
                 .filter_signal(clone!((row_parent) move | In((_, Data { color, .. })) | {
-                    SignalBuilder::from_component_lazy(row_parent.clone())
-                        .dedupe()
+                    signal::from_component_changed(row_parent.clone())
                         .map_in(move |color_filters: ColorFilters| color_filters.0.contains(&color))
                         .dedupe()
                 }))
@@ -487,8 +475,8 @@ enum Parity {
     Odd,
 }
 
-fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }: Data) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }: Data) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             height: Val::Px(ITEM_SIZE as f32),
             width: Val::Px(ITEM_SIZE as f32),
@@ -503,7 +491,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
         },
     ))
     .component_signal(index.map_in(|index| index.map(Index)))
-    .apply(on_click(
+    .observe(
         |click: On<Pointer<Click>>,
          datas: Res<Datas>,
          indices: Query<&Index>,
@@ -512,7 +500,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
                 datas.0.write(&mut mutable_vec_datas).remove(index);
             }
         },
-    ))
+    )
     .child((
         Node::default(),
         Text::new(number.to_string()),

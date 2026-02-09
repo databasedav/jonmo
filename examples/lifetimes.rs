@@ -27,7 +27,9 @@ fn main() {
     // We initialize it with two random colors.
     // It's wrapped in an `Arc<RwLock<...>>` internally, so cloning it is cheap
     // and allows multiple systems to access and modify the same data.
-    let colors = MutableVecBuilder::from([random_color(), random_color()]).spawn(world);
+    let colors = MutableVec::builder()
+        .values([random_color(), random_color()])
+        .spawn(world);
 
     app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---
@@ -78,9 +80,9 @@ struct Lifetime(f32);
 ///
 /// It takes a `SignalVec` of `Color`s as input. This is the reactive "pipe"
 /// that will drive the creation, destruction, and updating of child elements.
-fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
+fn ui_root(colors: impl SignalVec<Item = Color>) -> jonmo::Builder {
     // A standard vertical flexbox to hold our list items.
-    JonmoBuilder::from(Node {
+    jonmo::Builder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
         flex_direction: FlexDirection::Column,
@@ -91,7 +93,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
     })
     // This is the core of the dynamic list.
     // `children_signal_vec` subscribes to a `SignalVec`. For each item in the
-    // vector, it spawns a child entity using the `JonmoBuilder` returned by the closure.
+    // vector, it spawns a child entity using the `jonmo::Builder` returned by the closure.
     // It handles all diffs automatically: `Push` creates a new child, `RemoveAt`
     // despawns one, `Move` reorders them, etc.
     .children_signal_vec(
@@ -103,7 +105,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
         colors.enumerate().map_in(|(index, color)| item(index.dedupe(), color)),
     )
     .child(
-        JonmoBuilder::from((
+        jonmo::Builder::from((
             Node {
                 height: Val::Px(40.),
                 width: Val::Px(100.),
@@ -132,7 +134,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
                 },
             );
         })
-        .child(JonmoBuilder::from((
+        .child(jonmo::Builder::from((
             Node::default(),
             Text::new("+"),
             TextColor(Color::WHITE),
@@ -147,13 +149,13 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> JonmoBuilder {
 #[derive(Component, Clone)]
 struct Index(usize);
 
-/// Constructs a `JonmoBuilder` for a single item in our list.
+/// Constructs a `jonmo::Builder` for a single item in our list.
 ///
 /// # Arguments
 /// * `index` - A `Signal<Item = Option<usize>>` that provides the current index of this item. This
 ///   signal is provided by the `.enumerate()` call in `ui_root`.
 /// * `color` - The `Color` for this specific item.
-fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> JonmoBuilder {
+fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo::Builder {
     // --- The LazyEntity Pattern ---
     // `LazyEntity` is a thread-safe, clone-able handle to an `Entity` that can be
     // created *before* the entity is spawned.
@@ -163,7 +165,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
     // fulfilled later.
     let lifetime_holder = LazyEntity::new();
 
-    JonmoBuilder::from((
+    jonmo::Builder::from((
         Node {
             height: Val::Px(40.0),
             width: Val::Px(350.0),
@@ -176,12 +178,12 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
         Lifetime::default(),
     ))
     // Here we fulfill the promise. `lazy_entity` will set the `Entity` id into the
-    // `lifetime_holder` once this `JonmoBuilder` is spawned into an actual entity.
+    // `lifetime_holder` once this `jonmo::Builder` is spawned into an actual entity.
     // Any signals that were created using `lifetime_holder` will now point to the correct entity.
     .lazy_entity(lifetime_holder.clone())
     .child({
         // The main info panel for the item.
-        JonmoBuilder::from((
+        jonmo::Builder::from((
             Node {
                 height: Val::Percent(100.),
                 width: Val::Percent(90.),
@@ -192,10 +194,10 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
             BackgroundColor(color),
         ))
         .child(
-            // This `JonmoBuilder` will hold the text. Bevy UI text is composed of `TextSection`s,
-            // which are children of a `Text` entity. We use `JonmoBuilder`'s child methods to
+            // This `jonmo::Builder` will hold the text. Bevy UI text is composed of `TextSection`s,
+            // which are children of a `Text` entity. We use `jonmo::Builder`'s child methods to
             // construct these sections reactively.
-            JonmoBuilder::from((
+            jonmo::Builder::from((
                 Node::default(),
                 // Start with a `Text` component with no sections. We'll add them as children.
                 Text::new(""),
@@ -206,7 +208,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
             .child((TextColor(Color::BLACK), TextSpan::new("item ")))
             // Child 2: A reactive text span for the index.
             .child(
-                JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
+                jonmo::Builder::from(TextColor(Color::BLACK)).component_signal(
                     // `component_signal` takes a signal and uses its output to insert/update a component.
                     index
                         .clone()
@@ -217,11 +219,11 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
             .child((TextColor(Color::BLACK), TextSpan::new(" | lifetime: ")))
             // Child 4: A reactive text span for the lifetime.
             .child(
-                JonmoBuilder::from(TextColor(Color::BLACK)).component_signal(
+                jonmo::Builder::from(TextColor(Color::BLACK)).component_signal(
                     // This is where the `LazyEntity` becomes powerful.
                     // We create a signal that reads a component from the entity that `lifetime_holder` will eventually
                     // point to.
-                    SignalBuilder::from_component_lazy(lifetime_holder)
+                    signal::from_component_changed(lifetime_holder)
                         // Map the `Lifetime` component to its inner `f32` value and round it.
                         .map_in(|Lifetime(lifetime)| lifetime.round())
                         // `dedupe` is a crucial optimization. It ensures the rest of the signal chain only runs
@@ -239,7 +241,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
     })
     // Add the "remove" button as a child of the item row.
     .child(
-        JonmoBuilder::from((
+        jonmo::Builder::from((
             Node {
                 height: Val::Percent(100.),
                 width: Val::Percent(10.),
@@ -275,7 +277,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> Jonmo
         // We use `component_signal` again to reactively insert the `Index` component,
         // driven by the same `index` signal we used for the display text.
         .component_signal(index.map_in(|index| index.map(Index)))
-        .child(JonmoBuilder::from((
+        .child(jonmo::Builder::from((
             Node::default(),
             Text::new("x"),
             TextColor(Color::WHITE),

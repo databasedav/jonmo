@@ -4,7 +4,7 @@
     feature = "document-features",
     doc = document_features::document_features!()
 )]
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 extern crate alloc;
 
@@ -13,15 +13,21 @@ use bevy_ecs::{
     prelude::*,
     schedule::{InternedScheduleLabel, ScheduleLabel},
 };
+use bevy_platform::prelude::*;
 
-#[cfg(feature = "builder")]
-pub mod builder;
 pub mod graph;
 pub mod signal;
 pub mod signal_map;
 pub mod signal_vec;
-#[allow(missing_docs)]
 pub mod utils;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "builder")] {
+        pub mod builder;
+        #[doc(inline)]
+        pub use builder::Builder;
+    }
+}
 
 /// Includes the systems required for [jonmo](crate) to function.
 ///
@@ -38,39 +44,65 @@ pub mod utils;
 ///
 /// let mut app = App::new();
 /// // Or customize the schedule
-/// app.add_plugins(JonmoPlugin::new().in_schedule(PostUpdate));
+/// app.add_plugins(JonmoPlugin::new::<PostUpdate>());
 ///
 /// // Add ordering constraints using configure_sets
-/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-/// # struct SystemSet1;
+/// #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// struct SystemSet1;
 ///
-/// # #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-/// # struct SystemSet2;
+/// #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+/// struct SystemSet2;
 ///
 /// app.configure_sets(
 ///     PostUpdate,
 ///     SignalProcessing.before(SystemSet1).before(SystemSet2),
 /// );
 /// ```
+///
+/// # Multi-Schedule Processing
+///
+/// For advanced use cases where signals need to run in different schedules (e.g., to avoid
+/// UI flicker by spawning in `Update` rather than `PostUpdate`), register multiple schedules:
+///
+/// ```rust
+/// use bevy_app::prelude::*;
+/// use jonmo::prelude::*;
+///
+/// # let mut app = App::new();
+/// app.add_plugins(JonmoPlugin::new::<PostUpdate>().with_schedule::<Update>());
+/// ```
+///
+/// Then use [`.schedule`](signal::SignalExt::schedule) on individual signal chains to control which
+/// schedule they run in.
 pub struct JonmoPlugin {
-    schedule: InternedScheduleLabel,
+    schedules: Vec<InternedScheduleLabel>,
+    registration_recursion_limit: usize,
+    on_recursion_limit_exceeded: graph::RecursionLimitBehavior,
 }
 
 impl Default for JonmoPlugin {
     fn default() -> Self {
-        Self {
-            schedule: Last.intern(),
-        }
+        Self::new::<Last>()
     }
 }
 
 impl JonmoPlugin {
-    /// Create a new `JonmoPlugin` with signal processing running in the `Last` schedule.
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new `JonmoPlugin` with the given default schedule.
+    ///
+    /// The default schedule is used for signals without explicit `.schedule::<S>()` calls.
+    /// Additional schedules can be added with `.schedule::<S>()`.
+    pub fn new<S: ScheduleLabel + Default>() -> Self {
+        Self {
+            schedules: vec![S::default().intern()],
+            registration_recursion_limit: graph::DEFAULT_REGISTRATION_RECURSION_LIMIT,
+            on_recursion_limit_exceeded: graph::RecursionLimitBehavior::default(),
+        }
     }
 
-    /// Specify which schedule the signal processing systems should run in.
+    /// Add an additional schedule for signal processing.
+    ///
+    /// Use [`SignalExt::schedule`](crate::signal::SignalExt::schedule)
+    /// on individual signal chains to control which schedule they run in.
     ///
     /// # Example
     ///
@@ -78,10 +110,60 @@ impl JonmoPlugin {
     /// use bevy_app::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// JonmoPlugin::new().in_schedule(Update);
+    /// # let mut app = App::new();
+    /// app.add_plugins(
+    ///     JonmoPlugin::new::<PostUpdate>() // Default schedule
+    ///         .with_schedule::<Update>(), // Additional schedule
+    /// );
     /// ```
-    pub fn in_schedule(mut self, schedule: impl ScheduleLabel) -> Self {
-        self.schedule = schedule.intern();
+    pub fn with_schedule<S: ScheduleLabel + Default>(mut self) -> Self {
+        let interned = S::default().intern();
+        if !self.schedules.contains(&interned) {
+            self.schedules.push(interned);
+        }
+        self
+    }
+
+    /// Set the maximum number of signal registration recursion passes per frame.
+    ///
+    /// During signal processing, signals can spawn new signals (e.g., UI elements
+    /// registering child signals). These new signals are processed in the same frame
+    /// via recursive passes. This limit prevents infinite loops.
+    ///
+    /// Default: 100
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use bevy_app::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// # let mut app = App::new();
+    /// app.add_plugins(JonmoPlugin::new::<Last>().registration_recursion_limit(50));
+    /// ```
+    pub fn registration_recursion_limit(mut self, limit: usize) -> Self {
+        self.registration_recursion_limit = limit;
+        self
+    }
+
+    /// Set the behavior when the signal registration recursion limit is exceeded.
+    ///
+    /// Default: [`RecursionLimitBehavior::Panic`](graph::RecursionLimitBehavior::Panic)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use bevy_app::prelude::*;
+    /// use jonmo::{graph::RecursionLimitBehavior, prelude::*};
+    ///
+    /// # let mut app = App::new();
+    /// // In production, you might want to warn instead of panic
+    /// app.add_plugins(
+    ///     JonmoPlugin::new::<Last>().on_recursion_limit_exceeded(RecursionLimitBehavior::Warn),
+    /// );
+    /// ```
+    pub fn on_recursion_limit_exceeded(mut self, behavior: graph::RecursionLimitBehavior) -> Self {
+        self.on_recursion_limit_exceeded = behavior;
         self
     }
 }
@@ -92,42 +174,60 @@ pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            self.schedule,
-            (
+        // First schedule is the default for signals without explicit scheduling
+        let default_schedule = self.schedules[0];
+
+        // Initialize graph state with configuration
+        app.insert_resource(graph::SignalGraphState::with_options(
+            default_schedule,
+            self.registration_recursion_limit,
+            self.on_recursion_limit_exceeded,
+        ));
+
+        // Register all schedules in the graph state
+        let mut state = app.world_mut().resource_mut::<graph::SignalGraphState>();
+        for &schedule in &self.schedules {
+            state.register_schedule(schedule);
+        }
+
+        // Register processing system for each schedule
+        for &schedule in &self.schedules {
+            app.add_systems(
+                schedule,
                 (
-                    signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
-                    signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
-                ),
-                graph::process_signal_graph,
-                (
-                    graph::despawn_stale_signals,
-                    signal_vec::despawn_stale_mutable_vecs,
-                    signal_map::despawn_stale_mutable_btree_maps,
-                ),
-            )
-                .chain()
-                .in_set(SignalProcessing),
-        );
+                    (
+                        signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
+                        signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
+                    ),
+                    graph::process_signal_graph_for_schedule(schedule),
+                    (
+                        graph::despawn_stale_signals,
+                        signal_vec::despawn_stale_mutable_vecs,
+                        signal_map::despawn_stale_mutable_btree_maps,
+                    ),
+                )
+                    .chain()
+                    .in_set(SignalProcessing),
+            );
+        }
+
+        // Clear persistent inputs at frame end (after all signal processing)
+        app.add_systems(Last, graph::clear_signal_inputs.after(SignalProcessing));
     }
 }
 
 /// `use jonmo::prelude::*;` imports everything one needs to use start using [jonmo](crate).
 pub mod prelude {
     #[cfg(feature = "builder")]
-    pub use crate::builder::JonmoBuilder;
+    pub use crate::builder::{SignalMapTaskExt, SignalTask, SignalTaskExt, SignalVecTaskExt};
     pub use crate::{
         JonmoPlugin,
         graph::SignalHandles,
-        signal::{self, IntoSignalEither, Signal, SignalBuilder, SignalEither, SignalExt},
+        signal::{self, BoxedSignal, IntoSignalEither, Signal, SignalEither, SignalExt},
         signal_map::{
-            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapBuilder, MutableBTreeMapData, SignalMap,
-            SignalMapEither, SignalMapExt,
+            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapData, SignalMap, SignalMapEither, SignalMapExt,
         },
-        signal_vec::{
-            IntoSignalVecEither, MutableVec, MutableVecBuilder, MutableVecData, SignalVec, SignalVecEither,
-            SignalVecExt,
-        },
+        signal_vec::{IntoSignalVecEither, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
         utils::{LazyEntity, clone, deref_cloned, deref_copied},
     };
     #[doc(no_inline)]

@@ -2770,6 +2770,7 @@ dependencies = [
  "bevy",
  "bevy_app",
  "bevy_derive",
+ "bevy_diagnostic",
  "bevy_ecs",
  "bevy_log",
  "bevy_platform",

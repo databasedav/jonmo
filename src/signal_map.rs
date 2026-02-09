@@ -1,24 +1,36 @@
-//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top of
-//! [`BTreeMap`] mutations, see [`MutableBTreeMap`] and [`SignalMapExt`].
+//! Data structures and combinators for constructing reactive [`System`] dependency graphs on top
+//! of [`BTreeMap`] mutations.
+//!
+//! This module provides [`SignalMap`], a collection-oriented signal trait with **diff-based
+//! semantics**. Rather than forwarding entire maps each frame, [`SignalMap`] propagates
+//! [`MapDiff`] values that describe incremental mutations (insert, update, remove, etc.). This
+//! enables efficient, constant-time reactive updates for keyed collections of any size.
+//!
+//! See [`MutableBTreeMap`] for the primary source type and [`SignalMapExt`] for available
+//! combinators. For the general signal graph runtime model and core concepts, see the [`Signal`]
+//! trait documentation.
 use super::{
     graph::{
-        LazySignal, SignalHandle, SignalHandles, SignalSystem, downcast_any_clone, lazy_signal_from_system,
-        pipe_signal, poll_signal, process_signals, register_signal,
+        LazySignal, SignalHandle, SignalHandles, SignalSystem, apply_schedule_to_signal, downcast_any_clone,
+        lazy_signal_from_system, pipe_signal, poll_signal, register_signal, trigger_signal_subgraph,
     },
-    signal::{Signal, SignalBuilder, SignalExt},
+    signal::{self, Signal, SignalExt},
     signal_vec::{ReplayOnce, Replayable, SignalVec, VecDiff},
-    utils::{LazyEntity, SSs},
+    utils::LazyEntity,
 };
 use crate::prelude::clone;
 use alloc::collections::BTreeMap;
-use bevy_ecs::{entity_disabling::Internal, prelude::*};
-#[cfg(feature = "tracing")]
-use bevy_log::debug;
+use bevy_ecs::{entity_disabling::Internal, prelude::*, schedule::ScheduleLabel};
 use bevy_platform::{
     prelude::*,
     sync::{Arc, LazyLock, Mutex},
 };
-use core::{fmt, marker::PhantomData, ops::Deref, sync::atomic::AtomicUsize};
+use core::{
+    fmt,
+    marker::PhantomData,
+    ops::Deref,
+    sync::atomic::{self, AtomicUsize},
+};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to downstream
@@ -104,10 +116,22 @@ impl<K, V> MapDiff<K, V> {
     }
 }
 
-/// Monadic registration facade for structs that encapsulate some [`System`] which is a valid member
-/// of the signal graph downstream of some source [`MutableBTreeMap`]; this is similar to [`Signal`]
-/// but critically requires that the [`System`] outputs [`Option<MapDiff<Self::Key, Self::Value>>`].
-pub trait SignalMap: SSs {
+/// A composable node in [jonmo](crate)'s reactive dependency graph, specialized for **diff-based**
+/// [`BTreeMap`] reactivity.
+///
+/// Unlike [`Signal`] which forwards complete values, a [`SignalMap`] propagates [`MapDiff`]
+/// values describing incremental mutations to an underlying keyed collection. This diff-based
+/// approach enables **constant-time reactive updates** regardless of map size; only the changes
+/// are transmitted and processed, not the entire map.
+///
+/// Downstream consumers receive a stream of [`MapDiff`] variants ([`Insert`](MapDiff::Insert),
+/// [`Update`](MapDiff::Update), [`Remove`](MapDiff::Remove), etc.) that they can apply to
+/// maintain a synchronized view of the source data.
+///
+/// For the general signal graph runtime model, registration pattern, flow control semantics, and
+/// composition strategies, see the [`Signal`] trait documentation, which also applies to
+/// [`SignalMap`].
+pub trait SignalMap: Send + Sync + 'static {
     #[allow(missing_docs)]
     type Key;
     #[allow(missing_docs)]
@@ -158,11 +182,23 @@ impl<K: 'static, V: 'static> SignalMap for Box<dyn SignalMapDynClone<Key = K, Va
 
 /// Signal graph node which applies a [`System`] directly to the "raw" [`Vec<MapDiff>`]s of its
 /// upstream, see [.for_each](SignalMapExt::for_each).
-#[derive(Clone)]
 pub struct ForEach<Upstream, O> {
     upstream: Upstream,
     signal: LazySignal,
     _marker: PhantomData<fn() -> O>,
+}
+
+impl<Upstream, O> Clone for ForEach<Upstream, O>
+where
+    Upstream: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            upstream: self.upstream.clone(),
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> Signal for ForEach<Upstream, O>
@@ -182,10 +218,18 @@ where
 
 /// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
 /// upstream, see [`.map_value`](SignalMapExt::map_value).
-#[derive(Clone)]
 pub struct MapValue<Upstream, O> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, O)>,
+}
+
+impl<Upstream, O> Clone for MapValue<Upstream, O> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, O> SignalMap for MapValue<Upstream, O>
@@ -204,17 +248,25 @@ where
 /// Signal graph node which applies a [`System`] to each [`Value`](SignalMap::Value) of its
 /// upstream, forwarding the output of each resulting [`Signal`], see
 /// [`.map_value`](SignalMapExt::map_value).
-#[derive(Clone)]
 pub struct MapValueSignal<Upstream, S: Signal> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (Upstream, S)>,
+}
+
+impl<Upstream, S: Signal> Clone for MapValueSignal<Upstream, S> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Upstream, S: Signal> SignalMap for MapValueSignal<Upstream, S>
 where
     Upstream: SignalMap,
     S: Signal + 'static,
-    S::Item: Clone + SSs,
+    S::Item: Clone + Send + Sync + 'static,
 {
     type Key = Upstream::Key;
     type Value = S::Item;
@@ -226,12 +278,22 @@ where
 
 /// Signal graph node which maps its upstream [`SignalVec`] to a [`Key`](SignalMap::Key)-lookup
 /// [`Signal`], see [`.key`](SignalMapExt::key).
-#[derive(Clone)]
 pub struct Key<Upstream>
 where
     Upstream: SignalMap,
 {
     inner: ForEach<Upstream, Option<Upstream::Value>>,
+}
+
+impl<Upstream> Clone for Key<Upstream>
+where
+    Upstream: SignalMap + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<Upstream> Signal for Key<Upstream>
@@ -251,13 +313,23 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "tracing")] {
         /// Signal graph node that debug logs its upstream's "raw" [`Vec<MapDiff>`]s, see
         /// [`.debug`](SignalMapExt::debug).
-        #[derive(Clone)]
         pub struct Debug<Upstream>
         where
             Upstream: SignalMap,
         {
             #[allow(clippy::type_complexity)]
             signal: ForEach<Upstream, Vec<MapDiff<Upstream::Key, Upstream::Value>>>,
+        }
+
+        impl<Upstream> Clone for Debug<Upstream>
+        where
+            Upstream: SignalMap + Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    signal: self.signal.clone(),
+                }
+            }
         }
 
         impl<Upstream> SignalMap for Debug<Upstream>
@@ -277,10 +349,18 @@ cfg_if::cfg_if! {
 /// Signal graph node with no upstreams which outputs some [`MutableBTreeMap`]'s sorted
 /// [`Key`](SignalMap::Key)s as a [`SignalVec`], see
 /// [`.signal_vec_keys`](MutableBTreeMap::signal_vec_keys).
-#[derive(Clone)]
 pub struct SignalVecKeys<K> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> K>,
+}
+
+impl<K> Clone for SignalVecKeys<K> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K> SignalVec for SignalVecKeys<K>
@@ -296,10 +376,18 @@ where
 
 /// Signal graph node which maps its upstream [`MutableBTreeMap`] to a [`SignalVec`] of its sorted
 /// `(key, value)`s, see [`.signal_vec_entries`](MutableBTreeMap::signal_vec_entries).
-#[derive(Clone)]
 pub struct SignalVecEntries<K, V> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> Clone for SignalVecEntries<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K, V> SignalVec for SignalVecEntries<K, V>
@@ -318,7 +406,6 @@ where
 /// although note that all [`SignalMap`]s are boxed internally regardless.
 ///
 /// Inspired by <https://github.com/rayon-rs/either>.
-#[derive(Clone)]
 #[allow(missing_docs)]
 pub enum SignalMapEither<L, R>
 where
@@ -327,6 +414,19 @@ where
 {
     Left(L),
     Right(R),
+}
+
+impl<L, R> Clone for SignalMapEither<L, R>
+where
+    L: SignalMap + Clone,
+    R: SignalMap + Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Left(left) => Self::Left(left.clone()),
+            Self::Right(right) => Self::Right(right.clone()),
+        }
+    }
 }
 
 impl<K, V, L, R> SignalMap for SignalMapEither<L, R>
@@ -369,10 +469,12 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(DoubleValues(true));
     ///
-    /// let map = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
+    /// let map = MutableBTreeMap::builder()
+    ///     .values([(1, 10), (2, 20)])
+    ///     .spawn(&mut world);
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<DoubleValues>| res.0)
-    ///     .switch_signal_map(move |In(double): In<bool>, world: &mut World| {
+    /// let signal = signal::from_system(|In(_), res: Res<DoubleValues>| res.0).switch_signal_map(
+    ///     move |In(double): In<bool>, world: &mut World| {
     ///         if double {
     ///             map.signal_map()
     ///                 .map_value(|In(v): In<i32>| v * 2)
@@ -380,7 +482,8 @@ where
     ///         } else {
     ///             map.signal_map().right_either()
     ///         }
-    ///     });
+    ///     },
+    /// );
     /// // both branches produce compatible SignalMapEither types
     /// ```
     fn left_either<R>(self) -> SignalMapEither<Self, R>
@@ -408,11 +511,15 @@ where
     /// let mut world = World::new();
     /// world.insert_resource(MapSelector(false));
     ///
-    /// let map_a = MutableBTreeMapBuilder::from([(1, 10), (2, 20)]).spawn(&mut world);
-    /// let map_b = MutableBTreeMapBuilder::from([(1, 100), (2, 200), (3, 300)]).spawn(&mut world);
+    /// let map_a = MutableBTreeMap::builder()
+    ///     .values([(1, 10), (2, 20)])
+    ///     .spawn(&mut world);
+    /// let map_b = MutableBTreeMap::builder()
+    ///     .values([(1, 100), (2, 200), (3, 300)])
+    ///     .spawn(&mut world);
     ///
-    /// let signal = SignalBuilder::from_system(|_: In<()>, res: Res<MapSelector>| res.0)
-    ///     .switch_signal_map(move |In(use_a): In<bool>, world: &mut World| {
+    /// let signal = signal::from_system(|In(_), res: Res<MapSelector>| res.0).switch_signal_map(
+    ///     move |In(use_a): In<bool>, world: &mut World| {
     ///         if use_a {
     ///             map_a
     ///                 .signal_map()
@@ -421,7 +528,8 @@ where
     ///         } else {
     ///             map_b.signal_map().right_either()
     ///         }
-    ///     });
+    ///     },
+    /// );
     /// // both branches produce compatible SignalMapEither types
     /// ```
     fn right_either<L>(self) -> SignalMapEither<L, Self>
@@ -445,11 +553,11 @@ pub trait SignalMapExt: SignalMap {
     fn for_each<O, IOO, F, M>(self, system: F) -> ForEach<Self, O>
     where
         Self: Sized,
-        Self::Key: 'static,
-        Self::Value: 'static,
-        O: Clone + 'static,
+        Self::Key: Send + Sync + 'static,
+        Self::Value: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
         IOO: Into<Option<O>> + 'static,
-        F: IntoSystem<In<Vec<MapDiff<Self::Key, Self::Value>>>, IOO, M> + SSs,
+        F: IntoSystem<In<Vec<MapDiff<Self::Key, Self::Value>>>, IOO, M> + Send + Sync + 'static,
     {
         ForEach {
             upstream: self,
@@ -468,7 +576,8 @@ pub trait SignalMapExt: SignalMap {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    /// MutableBTreeMap::builder()
+    ///     .values([(1, 2), (3, 4)])
     ///     .spawn(&mut world)
     ///     .signal_map()
     ///     .map_value(|In(x)| x * 2); // outputs `SignalMap -> {1: 2, 3: 4}`
@@ -476,10 +585,10 @@ pub trait SignalMapExt: SignalMap {
     fn map_value<O, F, M>(self, system: F) -> MapValue<Self, O>
     where
         Self: Sized,
-        Self::Key: Clone + 'static,
-        Self::Value: 'static,
-        O: Clone + 'static,
-        F: IntoSystem<In<Self::Value>, O, M> + SSs,
+        Self::Key: Clone + Send + Sync + 'static,
+        Self::Value: Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Value>, O, M> + Send + Sync + 'static,
     {
         let signal = LazySignal::new(move |world: &mut World| {
             let system_id = world.register_system(system);
@@ -514,43 +623,42 @@ pub trait SignalMapExt: SignalMap {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    /// MutableBTreeMap::builder().values([(1, 2), (3, 4)])
     ///     .spawn(&mut world)
     ///     .signal_map()
     ///     .map_value_signal(|In(x)|
-    ///         SignalBuilder::from_system(move |_: In<()>| x * 2).dedupe()
+    ///         signal::from_system(move |In(_)| x * 2).dedupe()
     ///     ); // outputs `SignalMap -> {1: 4, 3: 8}`
     /// ```
     fn map_value_signal<S, F, M>(self, system: F) -> MapValueSignal<Self, S>
     where
         Self: Sized,
-        Self::Key: Ord + Clone + SSs,
-        Self::Value: 'static,
+        Self::Key: Ord + Clone + Send + Sync + 'static,
+        Self::Value: Send + Sync + 'static,
         S: Signal + Clone + 'static,
-        S::Item: Clone + SSs,
-        F: IntoSystem<In<Self::Value>, S, M> + SSs,
+        S::Item: Clone + Send + Sync + 'static,
+        F: IntoSystem<In<Self::Value>, S, M> + Send + Sync + 'static,
     {
+        #[derive(Component)]
+        struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
+
         let signal = LazySignal::new(move |world: &mut World| {
             let factory_system_id = world.register_system(system);
             let output_signal_entity = LazyEntity::new();
-            let output_signal = *SignalBuilder::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
-                clone!((output_signal_entity) move |_: In<()>, world: &mut World| {
-                    if let Some(mut diffs) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(output_signal_entity.get())
-                    {
-                        if diffs.0.is_empty() {
-                            None
-                        } else {
-                            Some(diffs.0.drain(..).collect())
-                        }
-                    } else {
+            let output_signal = *signal::from_system::<Vec<MapDiff<Self::Key, S::Item>>, _, _, _>(
+                clone!((output_signal_entity) move |In(_), world: &mut World| {
+                    let mut diffs = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal_entity).unwrap();
+                    if diffs.0.is_empty() {
                         None
+                    } else {
+                        Some(diffs.0.drain(..).collect())
                     }
                 }),
             )
             .register(world);
             output_signal_entity.set(*output_signal);
 
-            fn spawn_processor<K: Clone + SSs, V: Clone + SSs>(
+            fn spawn_processor<K: Clone + Send + Sync + 'static, V: Clone + Send + Sync + 'static>(
                 world: &mut World,
                 output_signal: SignalSystem,
                 key: K,
@@ -564,13 +672,15 @@ pub trait SignalMapExt: SignalMap {
                 temp_handle.cleanup(world);
                 let processor_handle = inner_signal
                     .map(move |In(value): In<V>, world: &mut World| {
-                        if let Some(mut queue) = world.get_mut::<QueuedMapDiffs<K, V>>(*output_signal) {
-                            queue.0.push(MapDiff::Update {
+                        world
+                            .get_mut::<QueuedMapDiffs<K, V>>(*output_signal)
+                            .unwrap()
+                            .0
+                            .push(MapDiff::Update {
                                 key: key.clone(),
                                 value,
                             });
-                            process_signals(world, [output_signal], Box::new(()));
-                        }
+                        trigger_signal_subgraph(world, [output_signal], Box::new(()));
                     })
                     .register(world);
                 (processor_handle, *inner_signal_id, initial_value)
@@ -690,12 +800,14 @@ pub trait SignalMapExt: SignalMap {
                         }
                     }
                 }
-                if !new_map_diffs.is_empty()
-                    && let Some(mut queue) = world.get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal)
-                {
-                    queue.0.extend(new_map_diffs);
+                if !new_map_diffs.is_empty() {
+                    world
+                        .get_mut::<QueuedMapDiffs<Self::Key, S::Item>>(*output_signal)
+                        .unwrap()
+                        .0
+                        .extend(new_map_diffs);
                 }
-                process_signals(world, [output_signal], Box::new(()));
+                trigger_signal_subgraph(world, [output_signal], Box::new(()));
             };
             let manager_handle = self.for_each(manager_system_logic).register(world);
             world
@@ -728,7 +840,8 @@ pub trait SignalMapExt: SignalMap {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    /// MutableBTreeMap::builder()
+    ///     .values([(1, 2), (3, 4)])
     ///     .spawn(&mut world)
     ///     .signal_map()
     ///     .key(1); // outputs `2`
@@ -736,8 +849,8 @@ pub trait SignalMapExt: SignalMap {
     fn key(self, key: Self::Key) -> Key<Self>
     where
         Self: Sized,
-        Self::Key: PartialEq + Clone + SSs,
-        Self::Value: Clone + Send + 'static,
+        Self::Key: PartialEq + Send + Sync + 'static,
+        Self::Value: Clone + Send + Sync + 'static,
     {
         Key {
             inner: self.for_each(
@@ -780,6 +893,7 @@ pub trait SignalMapExt: SignalMap {
     }
 
     #[cfg(feature = "tracing")]
+    #[track_caller]
     /// Adds debug logging to this [`SignalMap`]'s raw [`MapDiff`] outputs.
     ///
     /// # Example
@@ -789,7 +903,9 @@ pub trait SignalMapExt: SignalMap {
     /// use jonmo::prelude::*;
     ///
     /// let mut world = World::new();
-    /// let mut map = MutableBTreeMapBuilder::from([(1, 2), (3, 4)]).spawn(&mut world);
+    /// let mut map = MutableBTreeMap::builder()
+    ///     .values([(1, 2), (3, 4)])
+    ///     .spawn(&mut world);
     /// let signal = map.signal_map().debug();
     /// // `signal` logs `[ Replace { entries: [ (1, 2), (3, 4) ] } ]`
     /// map.write(&mut world).insert(5, 6);
@@ -798,13 +914,13 @@ pub trait SignalMapExt: SignalMap {
     fn debug(self) -> Debug<Self>
     where
         Self: Sized,
-        Self::Key: fmt::Debug + Clone + 'static,
-        Self::Value: fmt::Debug + Clone + 'static,
+        Self::Key: fmt::Debug + Clone + Send + Sync + 'static,
+        Self::Value: fmt::Debug + Clone + Send + Sync + 'static,
     {
         let location = core::panic::Location::caller();
         Debug {
             signal: self.for_each(move |In(item)| {
-                debug!("[{}] {:#?}", location, item);
+                bevy_log::debug!("[{}] {:#?}", location, item);
                 item
             }),
         }
@@ -822,16 +938,18 @@ pub trait SignalMapExt: SignalMap {
     /// let mut world = World::new();
     /// let condition = true;
     /// let signal = if condition {
-    ///     MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///     MutableBTreeMap::builder()
+    ///         .values([(1, 2), (3, 4)])
     ///         .spawn(&mut world)
     ///         .signal_map()
     ///         .map_value(|In(x): In<i32>| x * 2)
     ///         .boxed() // this is a `MapValue<Source<i32, i32>>`
     /// } else {
-    ///     MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///     MutableBTreeMap::builder()
+    ///         .values([(1, 2), (3, 4)])
     ///         .spawn(&mut world)
     ///         .signal_map()
-    ///         .map_value_signal(|In(x): In<i32>| SignalBuilder::from_system(move |_: In<()>| x * 2))
+    ///         .map_value_signal(|In(x): In<i32>| signal::from_system(move |In(_)| x * 2))
     ///         .boxed() // this is a `MapValueSignal<Source<i32, i32>>`
     /// }; // without the `.boxed()`, the compiler would not allow this
     /// ```
@@ -852,21 +970,21 @@ pub trait SignalMapExt: SignalMap {
     /// use bevy_ecs::prelude::*;
     /// use jonmo::prelude::*;
     ///
-    /// SignalBuilder::from_system(|_: In<()>| true).switch_signal_map(
+    /// signal::from_system(|In(_)| true).switch_signal_map(
     ///     |In(condition): In<bool>, world: &mut World| {
     ///         if condition {
-    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///             MutableBTreeMap::builder()
+    ///                 .values([(1, 2), (3, 4)])
     ///                 .spawn(world)
     ///                 .signal_map()
     ///                 .map_value(|In(x): In<i32>| x * 2)
     ///                 .boxed_clone() // this is a `MapValue<Source<i32, i32>>`
     ///         } else {
-    ///             MutableBTreeMapBuilder::from([(1, 2), (3, 4)])
+    ///             MutableBTreeMap::builder()
+    ///                 .values([(1, 2), (3, 4)])
     ///                 .spawn(world)
     ///                 .signal_map()
-    ///                 .map_value_signal(|In(x): In<i32>| {
-    ///                     SignalBuilder::from_system(move |_: In<()>| x * 2)
-    ///                 })
+    ///                 .map_value_signal(|In(x): In<i32>| signal::from_system(move |In(_)| x * 2))
     ///                 .boxed_clone() // this is a `MapValueSignal<Source<i32, i32>>`
     ///         } // without the `.boxed_clone()`, the compiler would not allow this
     ///     },
@@ -877,6 +995,27 @@ pub trait SignalMapExt: SignalMap {
         Self: Sized + Clone,
     {
         Box::new(self)
+    }
+
+    /// Assign a schedule to this signal map chain, see [`SignalExt::schedule`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the schedule has not been registered with
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule).
+    fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> ScheduledMap<Sched, Self::Key, Self::Value>
+    where
+        Self: Sized + 'static,
+    {
+        let signal = LazySignal::new(move |world: &mut World| {
+            let handle = self.register_signal_map(world);
+            apply_schedule_to_signal(world, *handle, Sched::default().intern());
+            *handle
+        });
+        ScheduledMap {
+            signal,
+            _marker: PhantomData,
+        }
     }
 
     /// Activate this [`SignalMap`] and all its upstreams, causing them to be evaluated every frame
@@ -891,11 +1030,37 @@ pub trait SignalMapExt: SignalMap {
 
 impl<T: ?Sized> SignalMapExt for T where T: SignalMap {}
 
+/// Signal map node wrapper that assigns a schedule to a signal chain, see
+/// [`.schedule`](SignalMapExt::schedule).
+pub struct ScheduledMap<Sched, K, V> {
+    signal: LazySignal,
+    #[allow(clippy::type_complexity)]
+    _marker: PhantomData<fn() -> (Sched, K, V)>,
+}
+
+impl<Sched, K, V> Clone for ScheduledMap<Sched, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Sched: 'static, K: Send + Sync + 'static, V: Send + Sync + 'static> SignalMap for ScheduledMap<Sched, K, V> {
+    type Key = K;
+    type Value = V;
+
+    fn register_boxed_signal_map(self: Box<Self>, world: &mut World) -> SignalHandle {
+        self.signal.register(world).into()
+    }
+}
+
 static STALE_MUTABLE_BTREE_MAPS: LazyLock<Mutex<Vec<Entity>>> = LazyLock::new(Mutex::default);
 
 pub(crate) fn despawn_stale_mutable_btree_maps(world: &mut World) {
-    let mut queue = STALE_MUTABLE_BTREE_MAPS.lock().unwrap();
-    for entity in queue.drain(..) {
+    let queue = STALE_MUTABLE_BTREE_MAPS.lock().unwrap().drain(..).collect::<Vec<_>>();
+    for entity in queue {
         world.despawn(entity);
     }
 }
@@ -993,9 +1158,6 @@ pub struct MutableBTreeMapData<K, V> {
     broadcaster: LazySignal,
 }
 
-#[derive(Component)]
-struct QueuedMapDiffs<K, V>(Vec<MapDiff<K, V>>);
-
 /// Wrapper around a [`BTreeMap`] that emits mutations as [`MapDiff`]s, enabling diff-less
 /// constant-time reactive updates for downstream [`SignalMap`]s.
 pub struct MutableBTreeMap<K, V> {
@@ -1006,7 +1168,7 @@ pub struct MutableBTreeMap<K, V> {
 
 impl<K, V> Clone for MutableBTreeMap<K, V> {
     fn clone(&self) -> Self {
-        self.references.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.references.fetch_add(1, atomic::Ordering::Relaxed);
         Self {
             entity: self.entity,
             references: self.references.clone(),
@@ -1017,7 +1179,7 @@ impl<K, V> Clone for MutableBTreeMap<K, V> {
 
 impl<K, V> Drop for MutableBTreeMap<K, V> {
     fn drop(&mut self) {
-        if self.references.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+        if self.references.fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
             STALE_MUTABLE_BTREE_MAPS.lock().unwrap().push(self.entity);
         }
     }
@@ -1025,10 +1187,18 @@ impl<K, V> Drop for MutableBTreeMap<K, V> {
 
 /// Signal graph node with no upstreams which forwards [`Vec<MapDiff<K, V>>`]s flushed from some
 /// source [`MutableBTreeMap<K, V>`], see [`MutableBTreeMap::signal_map`].
-#[derive(Clone)]
 pub struct Source<K, V> {
     signal: LazySignal,
     _marker: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> Clone for Source<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            signal: self.signal.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<K, V> SignalMap for Source<K, V>
@@ -1055,12 +1225,12 @@ impl Replayable for MapReplayTrigger {
 
 fn new_mutable_btree_map_data<K, V>(map: BTreeMap<K, V>) -> (MutableBTreeMapData<K, V>, LazyEntity)
 where
-    K: Ord + Clone + SSs,
-    V: Clone + SSs,
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     let data_entity = LazyEntity::new();
     let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
-        let source_system = move |_: In<()>, mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
+        let source_system = move |In(_), mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
             let mut data = mutable_btree_map_datas.get_mut(*data_entity).unwrap();
             if data.pending_diffs.is_empty() {
                 None
@@ -1082,6 +1252,32 @@ where
 }
 
 impl<K, V> MutableBTreeMap<K, V> {
+    /// Creates a [`MutableBTreeMapBuilder`] for constructing a [`MutableBTreeMap`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// // Empty MutableBTreeMap
+    /// let map = MutableBTreeMap::<i32, &str>::builder().spawn(&mut world);
+    /// // With initial values
+    /// let map = MutableBTreeMap::builder()
+    ///     .values([(1, "one"), (2, "two")])
+    ///     .spawn(&mut world);
+    /// // With custom initialization
+    /// let map = MutableBTreeMap::builder()
+    ///     .with_values(|m| {
+    ///         m.insert(1, "one");
+    ///     })
+    ///     .spawn(&mut world);
+    /// ```
+    pub fn builder() -> MutableBTreeMapBuilder<K, V> {
+        MutableBTreeMapBuilder::new()
+    }
+
     /// Provides read-only access to the underlying [`BTreeMap`] via either a `&World` or a
     /// `&Query<MutableBTreeMapData<K, V>>`.
     pub fn read<'s>(
@@ -1089,8 +1285,8 @@ impl<K, V> MutableBTreeMap<K, V> {
         mutable_btree_map_data_reader: impl ReadMutableBTreeMapData<'s, K, V>,
     ) -> MutableBTreeMapReadGuard<'s, K, V>
     where
-        K: SSs,
-        V: SSs,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
     {
         MutableBTreeMapReadGuard {
             guard: mutable_btree_map_data_reader.read(self.entity),
@@ -1104,8 +1300,8 @@ impl<K, V> MutableBTreeMap<K, V> {
         mutable_btree_map_data_writer: impl WriteMutableBTreeMapData<'w, K, V>,
     ) -> MutableBTreeMapWriteGuard<'w, K, V>
     where
-        K: SSs,
-        V: SSs,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
     {
         MutableBTreeMapWriteGuard {
             guard: mutable_btree_map_data_writer.write(self.entity),
@@ -1115,8 +1311,8 @@ impl<K, V> MutableBTreeMap<K, V> {
     /// Returns a [`Source`] signal from this [`MutableBTreeMap`].
     pub fn signal_map(&self) -> Source<K, V>
     where
-        K: Clone + Ord + SSs,
-        V: Clone + SSs,
+        K: Clone + Ord + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
     {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
             let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
@@ -1124,15 +1320,22 @@ impl<K, V> MutableBTreeMap<K, V> {
             let was_initially_empty = self_.read(&*world).is_empty();
 
             let replay_entity = LazyEntity::new();
-            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>| {
+            let replay_system = clone!((self_, replay_entity) move |In(upstream_diffs): In<Vec<MapDiff<K, V>>>, replay_onces: Query<&ReplayOnce, Allow<Internal>>, mutable_btree_map_datas: Query<&MutableBTreeMapData<K, V>>, mut has_replayed: Local<bool>| {
                 if replay_onces.contains(*replay_entity) {
-                    if !was_initially_empty {
-                        let initial_map = self_.read(&mutable_btree_map_datas);
-                        Some(vec![MapDiff::Replace { entries: initial_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
-                    } else if upstream_diffs.is_empty() {
-                        None
+                    let first_replay = !core::mem::replace(&mut *has_replayed, true);
+                    if first_replay && was_initially_empty {
+                        if upstream_diffs.is_empty() {
+                            None
+                        } else {
+                            Some(upstream_diffs)
+                        }
                     } else {
-                        Some(upstream_diffs)
+                        let current_map = self_.read(&mutable_btree_map_datas);
+                        if current_map.is_empty() {
+                            None
+                        } else {
+                            Some(vec![MapDiff::Replace { entries: current_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect() }])
+                        }
                     }
                 } else if upstream_diffs.is_empty() { None } else { Some(upstream_diffs) }
             });
@@ -1140,7 +1343,7 @@ impl<K, V> MutableBTreeMap<K, V> {
             replay_entity.set(*replay_signal);
 
             let trigger = Box::new(move |world: &mut World| {
-                process_signals(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
+                trigger_signal_subgraph(world, [replay_signal], Box::new(Vec::<MapDiff<K, V>>::new()));
             });
 
             world.entity_mut(*replay_signal).insert((MapReplayTrigger(trigger), ReplayOnce));
@@ -1159,8 +1362,8 @@ impl<K, V> MutableBTreeMap<K, V> {
     /// sorted order.
     pub fn signal_vec_keys(&self) -> SignalVecKeys<K>
     where
-        K: Ord + Clone + SSs,
-        V: Clone + SSs,
+        K: Ord + Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
     {
         let upstream = self.signal_map();
         let lazy_signal = LazySignal::new(move |world: &mut World| {
@@ -1210,8 +1413,8 @@ impl<K, V> MutableBTreeMap<K, V> {
     /// order.
     pub fn signal_vec_entries(&self) -> SignalVecEntries<K, V>
     where
-        K: Ord + Clone + SSs,
-        V: Clone + SSs,
+        K: Ord + Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
     {
         let upstream = self.signal_map();
         let lazy_signal = LazySignal::new(move |world: &mut World| {
@@ -1268,8 +1471,8 @@ impl<K, V> MutableBTreeMap<K, V> {
 
 impl<K, V> From<&mut World> for MutableBTreeMap<K, V>
 where
-    K: Ord + Clone + SSs,
-    V: Clone + SSs,
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn from(world: &mut World) -> Self {
         let (data, data_entity) = new_mutable_btree_map_data::<K, V>(BTreeMap::new());
@@ -1285,17 +1488,82 @@ where
 
 impl<K, V> FromWorld for MutableBTreeMap<K, V>
 where
-    K: Ord + Clone + SSs,
-    V: Clone + SSs,
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn from_world(world: &mut World) -> Self {
         world.into()
     }
 }
 
-/// Builder for constructing a [`MutableBTreeMap`] with initial values, e.g.
-/// `MutableBTreeMapBuilder::from([(0, 1), (1, 2)]).spawn(&mut World)`.
+/// Builder for constructing a [`MutableBTreeMap`].
+///
+/// # Example
+///
+/// ```
+/// use bevy_ecs::prelude::*;
+/// use jonmo::prelude::*;
+///
+/// let mut world = World::new();
+/// let map = MutableBTreeMap::builder()
+///     .values([(1, "one"), (2, "two")])
+///     .spawn(&mut world);
+/// ```
 pub struct MutableBTreeMapBuilder<K, V>(BTreeMap<K, V>);
+
+impl<K, V> Default for MutableBTreeMapBuilder<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> MutableBTreeMapBuilder<K, V> {
+    /// Creates a new empty builder.
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<K: Ord, V> MutableBTreeMapBuilder<K, V> {
+    /// Sets the initial values of the [`MutableBTreeMap`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// let map = MutableBTreeMap::builder()
+    ///     .values([(1, "one")])
+    ///     .spawn(&mut world);
+    /// ```
+    pub fn values(mut self, values: impl Into<BTreeMap<K, V>>) -> Self {
+        self.0 = values.into();
+        self
+    }
+
+    /// Mutably access the inner [`BTreeMap`] for custom initialization.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    /// use jonmo::prelude::*;
+    ///
+    /// let mut world = World::new();
+    /// let map = MutableBTreeMap::builder()
+    ///     .with_values(|m| {
+    ///         m.insert(1, "one");
+    ///         m.insert(2, "two");
+    ///     })
+    ///     .spawn(&mut world);
+    /// ```
+    pub fn with_values(mut self, f: impl FnOnce(&mut BTreeMap<K, V>)) -> Self {
+        f(&mut self.0);
+        self
+    }
+}
 
 impl<K, V, A> From<A> for MutableBTreeMapBuilder<K, V>
 where
@@ -1308,8 +1576,8 @@ where
 
 impl<K, V> MutableBTreeMapBuilder<K, V>
 where
-    K: Ord + Clone + SSs,
-    V: Clone + SSs,
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     /// Spawns a [`MutableBTreeMap`] using a `&mut World`.
     pub fn spawn(self, world: &mut World) -> MutableBTreeMap<K, V> {
@@ -1338,8 +1606,8 @@ where
 
 impl<K, V> From<&mut Commands<'_, '_>> for MutableBTreeMap<K, V>
 where
-    K: Ord + Clone + SSs,
-    V: Clone + SSs,
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn from(commands: &mut Commands) -> Self {
         let (data, data_entity) = new_mutable_btree_map_data::<K, V>(BTreeMap::new());
@@ -1365,8 +1633,8 @@ where
 
 impl<'s, K, V> ReadMutableBTreeMapData<'s, K, V> for &'s Query<'_, 's, &MutableBTreeMapData<K, V>>
 where
-    K: SSs,
-    V: SSs,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     fn read(self, entity: Entity) -> &'s MutableBTreeMapData<K, V> {
         self.get(entity).unwrap()
@@ -1375,8 +1643,8 @@ where
 
 impl<'s, K, V> ReadMutableBTreeMapData<'s, K, V> for &'s World
 where
-    K: SSs,
-    V: SSs,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     fn read(self, entity: Entity) -> &'s MutableBTreeMapData<K, V> {
         self.get(entity).unwrap()
@@ -1395,8 +1663,8 @@ where
 
 impl<'a, 'w, 's, K, V> WriteMutableBTreeMapData<'a, K, V> for &'a mut Query<'w, 's, &mut MutableBTreeMapData<K, V>>
 where
-    K: SSs,
-    V: SSs,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     fn write(self, entity: Entity) -> Mut<'a, MutableBTreeMapData<K, V>> {
         self.get_mut(entity).unwrap()
@@ -1405,8 +1673,8 @@ where
 
 impl<'w, K, V> WriteMutableBTreeMapData<'w, K, V> for &'w mut World
 where
-    K: SSs,
-    V: SSs,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     fn write(self, entity: Entity) -> Mut<'w, MutableBTreeMapData<K, V>> {
         self.get_mut(entity).unwrap()
@@ -1423,15 +1691,15 @@ pub(crate) mod tests {
     #[derive(Resource, Default, Debug)]
     struct SignalMapOutput<K, V>(Vec<MapDiff<K, V>>)
     where
-        K: SSs + Clone + fmt::Debug,
-        V: SSs + Clone + fmt::Debug;
+        K: Send + Sync + 'static + Clone + fmt::Debug,
+        V: Send + Sync + 'static + Clone + fmt::Debug;
 
     // Helper system that captures incoming diffs and stores them in the
     // SignalMapOutput resource.
     fn capture_map_output<K, V>(In(diffs): In<Vec<MapDiff<K, V>>>, mut output: ResMut<SignalMapOutput<K, V>>)
     where
-        K: SSs + Clone + fmt::Debug,
-        V: SSs + Clone + fmt::Debug,
+        K: Send + Sync + 'static + Clone + fmt::Debug,
+        V: Send + Sync + 'static + Clone + fmt::Debug,
     {
         output.0.extend(diffs);
     }
@@ -1440,8 +1708,8 @@ pub(crate) mod tests {
     // it easy to assert against the output of a single frame's update.
     fn get_and_clear_map_output<K, V>(world: &mut World) -> Vec<MapDiff<K, V>>
     where
-        K: SSs + Clone + fmt::Debug,
-        V: SSs + Clone + fmt::Debug,
+        K: Send + Sync + 'static + Clone + fmt::Debug,
+        V: Send + Sync + 'static + Clone + fmt::Debug,
     {
         world
             .get_resource_mut::<SignalMapOutput<K, V>>()
@@ -1503,8 +1771,8 @@ pub(crate) mod tests {
 
             // The output of our `for_each` system will be the full, reconstructed BTreeMap.
             app.init_resource::<SignalOutput<BTreeMap<u32, String>>>();
-            let source_map =
-                (MutableBTreeMapBuilder::from([(1, "one".to_string()), (2, "two".to_string())])).spawn(app.world_mut());
+            let source_map = (MutableBTreeMap::builder().values([(1, "one".to_string()), (2, "two".to_string())]))
+                .spawn(app.world_mut());
 
             // This system reconstructs the state of the map by applying the diffs it
             // receives. It then outputs the complete, current state of the map. This allows
@@ -1596,7 +1864,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalMapOutput<u32, String>>();
 
             // The source map contains integer values.
-            let source_map = (MutableBTreeMapBuilder::from([(1, 10), (2, 20)])).spawn(app.world_mut());
+            let source_map = (MutableBTreeMap::builder().values([(1, 10), (2, 20)])).spawn(app.world_mut());
 
             // The mapping function transforms an i32 value into a String.
             let mapping_system = |In(val): In<i32>| format!("Val:{val}");
@@ -1688,11 +1956,11 @@ pub(crate) mod tests {
 
             // The source map contains entities. The goal is to create a derived map that
             // contains the _names_ of these entities.
-            let entity_map = (MutableBTreeMapBuilder::from([(1, entity_a), (2, entity_b)])).spawn(app.world_mut());
+            let entity_map = (MutableBTreeMap::builder().values([(1, entity_a), (2, entity_b)])).spawn(app.world_mut());
 
             // This "factory" system takes an entity and creates a signal that tracks its
             // `Name`.
-            let factory_system = |In(entity): In<Entity>| SignalBuilder::from_component::<Name>(entity).dedupe();
+            let factory_system = |In(entity): In<Entity>| signal::from_component::<Name>(entity).dedupe();
 
             // Apply `map_value_signal` to transform the SignalMap<u32, Entity> into a
             // SignalMap<u32, Name>.
@@ -1817,24 +2085,24 @@ pub(crate) mod tests {
     #[derive(Resource, Default, Debug)]
     struct SignalOutput<T>(Option<T>)
     where
-        T: SSs + Clone + fmt::Debug;
+        T: Send + Sync + 'static + Clone + fmt::Debug;
 
     // Helper system that captures incoming values and stores them in the SignalOutput
     // resource.
     fn capture_output<T>(In(value): In<T>, mut output: ResMut<SignalOutput<T>>)
     where
-        T: SSs + Clone + fmt::Debug,
+        T: Send + Sync + 'static + Clone + fmt::Debug,
     {
         output.0 = Some(value);
     }
 
     // Helper to retrieve the last captured value.
-    fn get_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Option<T> {
+    fn get_output<T: Send + Sync + 'static + Clone + fmt::Debug>(world: &mut World) -> Option<T> {
         world.get_resource::<SignalOutput<T>>().and_then(|res| res.0.clone())
     }
 
     // Helper to clear the output, useful for testing no-emission cases.
-    fn clear_output<T: SSs + Clone + fmt::Debug>(world: &mut World) {
+    fn clear_output<T: Send + Sync + 'static + Clone + fmt::Debug>(world: &mut World) {
         if let Some(mut res) = world.get_resource_mut::<SignalOutput<T>>() {
             res.0 = None;
         }
@@ -1847,8 +2115,8 @@ pub(crate) mod tests {
 
             // The output is a Signal<Option`<String>`>.
             app.init_resource::<SignalOutput<Option<String>>>();
-            let source_map =
-                (MutableBTreeMapBuilder::from([(1, "one".to_string()), (2, "two".to_string())])).spawn(app.world_mut());
+            let source_map = (MutableBTreeMap::builder().values([(1, "one".to_string()), (2, "two".to_string())]))
+                .spawn(app.world_mut());
 
             // We will specifically track the value associated with key `2`.
             let key_to_track = 2;
@@ -1935,16 +2203,16 @@ pub(crate) mod tests {
     }
 
     #[derive(Resource, Default, Debug)]
-    struct SignalVecOutput<T: SSs + Clone + fmt::Debug>(Vec<VecDiff<T>>);
+    struct SignalVecOutput<T: Send + Sync + 'static + Clone + fmt::Debug>(Vec<VecDiff<T>>);
 
     fn capture_vec_output<T>(In(diffs): In<Vec<VecDiff<T>>>, mut output: ResMut<SignalVecOutput<T>>)
     where
-        T: SSs + Clone + fmt::Debug,
+        T: Send + Sync + 'static + Clone + fmt::Debug,
     {
         output.0.extend(diffs);
     }
 
-    fn get_and_clear_vec_output<T: SSs + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
+    fn get_and_clear_vec_output<T: Send + Sync + 'static + Clone + fmt::Debug>(world: &mut World) -> Vec<VecDiff<T>> {
         world
             .get_resource_mut::<SignalVecOutput<T>>()
             .map(|mut res| core::mem::take(&mut res.0))
@@ -1966,7 +2234,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<u32>>(); // Keys are u32
 
             // Start with unsorted data to verify initial sort.
-            let source_map = (MutableBTreeMapBuilder::from([(3, 'c'), (1, 'a'), (4, 'd')])).spawn(app.world_mut());
+            let source_map = (MutableBTreeMap::builder().values([(3, 'c'), (1, 'a'), (4, 'd')])).spawn(app.world_mut());
 
             let keys_signal = source_map.signal_vec_keys();
             let handle = keys_signal
@@ -2069,7 +2337,7 @@ pub(crate) mod tests {
             app.init_resource::<SignalVecOutput<(u32, char)>>(); // Entries are (u32, char)
 
             // Start with unsorted data to verify initial sort.
-            let source_map = (MutableBTreeMapBuilder::from([(3, 'c'), (1, 'a'), (4, 'd')])).spawn(app.world_mut());
+            let source_map = (MutableBTreeMap::builder().values([(3, 'c'), (1, 'a'), (4, 'd')])).spawn(app.world_mut());
 
             let entries_signal = source_map.signal_vec_entries();
             let handle = entries_signal
@@ -2243,9 +2511,9 @@ pub(crate) mod tests {
             app.init_resource::<SignalMapOutput<String, i32>>();
 
             // Start with a map containing initial entries
-            let source_map =
-                MutableBTreeMapBuilder::from([("x".to_string(), 1), ("y".to_string(), 2), ("z".to_string(), 3)])
-                    .spawn(app.world_mut());
+            let source_map = MutableBTreeMap::builder()
+                .values([("x".to_string(), 1), ("y".to_string(), 2), ("z".to_string(), 3)])
+                .spawn(app.world_mut());
 
             // Create a signal_map and register it
             let signal = source_map.signal_map();

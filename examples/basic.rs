@@ -26,8 +26,7 @@ fn ui(world: &mut World) {
     let text = world
         .spawn((Node::default(), TextFont::from_font_size(100.), Value(0)))
         .id();
-    let signal = SignalBuilder::from_component(text)
-        .dedupe()
+    let signal = signal::from_component_changed::<Value>(text)
         .map(move |In(value): In<Value>, mut commands: Commands| {
             commands.entity(text).insert(Text(value.0.to_string()));
         })

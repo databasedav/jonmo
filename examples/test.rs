@@ -8,7 +8,7 @@ use jonmo::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    let numbers = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(app.world_mut());
+    let numbers = MutableVec::builder().values([1, 2, 3, 4, 5]).spawn(app.world_mut());
     app.add_plugins(examples_plugin)
         .insert_resource(Numbers(numbers.clone()))
         .add_systems(
@@ -32,12 +32,12 @@ struct Numbers(MutableVec<i32>);
 struct Lifetime(f32);
 
 #[rustfmt::skip]
-fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
-    let list_a = MutableVecBuilder::from([1, 2, 3, 4, 5]).spawn(world).signal_vec();
-    let list_b = MutableVecBuilder::from([3, 4, 5]).spawn(world).signal_vec();
-    let map = MutableBTreeMapBuilder::from([(1, 2), (2, 3)]).spawn(world);
+fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> jonmo::Builder {
+    let list_a = MutableVec::builder().values([1, 2, 3, 4, 5]).spawn(world).signal_vec();
+    let list_b = MutableVec::builder().values([3, 4, 5]).spawn(world).signal_vec();
+    let map = MutableBTreeMap::builder().values([(1, 2), (2, 3)]).spawn(world);
     // map.signal_map().
-    JonmoBuilder::from(Node {
+    jonmo::Builder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
         flex_direction: FlexDirection::Column,
@@ -51,8 +51,8 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
         // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
         numbers
             .signal_vec()
-            // SignalBuilder::from_system(|_: In<()>| 1)
-            // SignalBuilder::from_system(|_: In<()>, toggle: Res<ToggleFilter>| toggle.0)
+            // signal::from_system(|In(_)| 1)
+            // signal::from_system(|In(_), toggle: Res<ToggleFilter>| toggle.0)
             // .dedupe()
             // .switch_signal_vec(move |In(toggle)| {
             //     if toggle {
@@ -66,12 +66,12 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
             // .dedupe()
             // .to_signal_vec()
             .filter_signal(|In(n)| {
-                SignalBuilder::from_system(move |_: In<()>, toggle: Res<ToggleFilter>| {
+                signal::from_system(move |In(_), toggle: Res<ToggleFilter>| {
                     n % 2 == if toggle.0 { 0 } else { 1 }
                 })
             })
             // .map_signal(|In(n): In<i32>| {
-            //     SignalBuilder::from_system(move |_: In<()>| n + 1).dedupe()
+            //     signal::from_system(move |In(_)| n + 1).dedupe()
             // })
             // .debug()
             // .map_in(|n: i32| -n)
@@ -89,7 +89,7 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
             .map(|In(n)| item(n))
             // .intersperse_with(
             //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
-            //         JonmoBuilder::from(Node::default()).component_signal(
+            //         jonmo::Builder::from(Node::default()).component_signal(
             //             index_signal
             //                 .debug()
             //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
@@ -102,8 +102,8 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> JonmoBuilder {
 #[derive(Resource)]
 struct ToggleFilter(bool);
 
-fn item(number: i32) -> JonmoBuilder {
-    JonmoBuilder::from((
+fn item(number: i32) -> jonmo::Builder {
+    jonmo::Builder::from((
         Node {
             height: Val::Px(40.0),
             width: Val::Px(200.0),
@@ -113,7 +113,7 @@ fn item(number: i32) -> JonmoBuilder {
         },
         BackgroundColor(Color::WHITE),
     ))
-    .child(JonmoBuilder::from((
+    .child(jonmo::Builder::from((
         Node {
             height: Val::Percent(100.),
             width: Val::Percent(100.),
