@@ -4,6 +4,8 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## unreleased
 
+# 0.6.0 (2026-02-09)
+
 ### changed
 
 - signal graph processed in deterministic topological order instead of the previous nondeterministic depth first order
