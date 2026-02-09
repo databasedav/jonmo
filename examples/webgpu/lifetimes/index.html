@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; background-color: #2b2c2f;">
+
+<head>
+    <meta charset="utf-8" />
+    <title>jonmo lifetimes example</title>
+    
+    
+<script type="module">
+import init, * as bindings from './jonmo-c9d3a95ceced6351.js';
+const wasm = await init({ module_or_path: './jonmo-c9d3a95ceced6351_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="./jonmo-c9d3a95ceced6351.js" crossorigin="anonymous" integrity="sha384-KOEdJ4ZOjDu5lOa4qKxjBxhT4v5s0VV8WlxBV9Gq7WCdYnt+Wcu5V+S+730jvUCB"><link rel="preload" href="./jonmo-c9d3a95ceced6351_bg.wasm" crossorigin="anonymous" integrity="sha384-FwqFtbiSDb5S4FkyOO6Hbmw1O+B5mrR59/BQ1UeHJsHh9Xe0AIPdufnzkhw8QMWd" as="fetch" type="application/wasm"></head>
+
+<body style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0;">
+    <div id="game" style="height: 100%; width: 100%; margin: 0; padding: 0; border: 0; display: flex;">
+        <canvas id="bevy">
+            js and canvas support is required
+        </canvas>
+    </div>
+</body>
+
+</html>
