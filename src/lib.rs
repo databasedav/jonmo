@@ -184,6 +184,12 @@ impl Plugin for JonmoPlugin {
             self.on_recursion_limit_exceeded,
         ));
 
+        // Register all schedules in the graph state
+        let mut state = app.world_mut().resource_mut::<graph::SignalGraphState>();
+        for &schedule in &self.schedules {
+            state.register_schedule(schedule);
+        }
+
         // Register processing system for each schedule
         for &schedule in &self.schedules {
             app.add_systems(

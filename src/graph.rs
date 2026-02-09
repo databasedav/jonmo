@@ -138,6 +138,16 @@ pub(crate) struct ScheduleHint(pub(crate) InternedScheduleLabel);
 /// [`SignalVecExt::schedule`](super::signal_vec::SignalVecExt::schedule), and
 /// [`SignalMapExt::schedule`](super::signal_map::SignalMapExt::schedule).
 pub(crate) fn apply_schedule_to_signal(world: &mut World, signal: SignalSystem, schedule: InternedScheduleLabel) {
+    let is_registered = world
+        .resource::<SignalGraphState>()
+        .registered_schedules
+        .contains(&schedule);
+    if !is_registered {
+        panic!(
+            "schedule `{schedule:?}` has not been registered with `JonmoPlugin`; \
+             add `.with_schedule::<{schedule:?}>()` to your `JonmoPlugin` configuration"
+        );
+    }
     // Directly tag caller (overwrites any inherited schedule)
     world.entity_mut(*signal).insert(ScheduleTag(schedule));
     // Propagate to unscheduled upstreams
@@ -394,6 +404,8 @@ pub(crate) struct SignalGraphState {
     registration_recursion_limit: usize,
     /// What to do when the recursion limit is exceeded.
     on_recursion_limit_exceeded: RecursionLimitBehavior,
+    /// Schedules that have been registered with `JonmoPlugin`.
+    registered_schedules: HashSet<InternedScheduleLabel>,
 }
 
 /// Default recursion limit for signal registration passes.
@@ -436,7 +448,13 @@ impl SignalGraphState {
             default_schedule,
             registration_recursion_limit,
             on_recursion_limit_exceeded,
+            registered_schedules: HashSet::from([default_schedule]),
         }
+    }
+
+    /// Register a schedule as valid for signal processing.
+    pub(crate) fn register_schedule(&mut self, schedule: InternedScheduleLabel) {
+        self.registered_schedules.insert(schedule);
     }
 }
 
@@ -1828,7 +1846,9 @@ mod tests {
         use bevy_app::Update;
 
         let mut world = World::new();
-        world.insert_resource(SignalGraphState::default());
+        let mut state = SignalGraphState::default();
+        state.registered_schedules.insert(Update.intern());
+        world.insert_resource(state);
 
         // Create three independent root signals (simulating branches that will be combined)
         let signal_a = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
@@ -1875,7 +1895,9 @@ mod tests {
         use bevy_app::Update;
 
         let mut world = World::new();
-        world.insert_resource(SignalGraphState::default());
+        let mut state = SignalGraphState::default();
+        state.registered_schedules.insert(Update.intern());
+        world.insert_resource(state);
 
         // Create a deeper graph:
         //       root_a    root_b    root_c
@@ -2185,5 +2207,19 @@ mod tests {
             order.contains(&"C"),
             "Signal C (spawned by B) should have been processed"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "has not been registered with `JonmoPlugin`")]
+    fn apply_schedule_to_signal_panics_on_unregistered_schedule() {
+        use bevy_app::Update;
+
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+
+        let signal = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+
+        // Update was not registered, this should panic
+        apply_schedule_to_signal(&mut world, signal, Update.intern());
     }
 }

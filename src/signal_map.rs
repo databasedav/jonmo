@@ -998,6 +998,11 @@ pub trait SignalMapExt: SignalMap {
     }
 
     /// Assign a schedule to this signal map chain, see [`SignalExt::schedule`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the schedule has not been registered with
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule).
     fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> ScheduledMap<Sched, Self::Key, Self::Value>
     where
         Self: Sized + 'static,

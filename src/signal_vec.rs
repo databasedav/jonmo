@@ -3992,6 +3992,11 @@ pub trait SignalVecExt: SignalVec {
     }
 
     /// Assign a schedule to this signal vec chain, see [`SignalExt::schedule`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the schedule has not been registered with
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule).
     fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> ScheduledVec<Sched, Self::Item>
     where
         Self: Sized + 'static,

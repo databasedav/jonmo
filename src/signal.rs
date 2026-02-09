@@ -2999,8 +2999,7 @@ pub trait SignalExt: Signal {
     /// # Plugin Configuration
     ///
     /// Any schedule used with `.schedule()` must be registered with
-    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule). Without this,
-    /// the schedule will not process signals.
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule).
     ///
     /// ```
     /// use bevy_app::prelude::*;
@@ -3030,6 +3029,11 @@ pub trait SignalExt: Signal {
     ///     .schedule::<PostUpdate>()
     ///     .map_in(|x: i32| x - 1); // PostUpdate (inherits from upstream)
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the schedule has not been registered with
+    /// [`JonmoPlugin::with_schedule`](crate::JonmoPlugin::with_schedule).
     fn schedule<Sched: ScheduleLabel + Default + 'static>(self) -> Scheduled<Sched, Self::Item>
     where
         Self: Sized + 'static,
