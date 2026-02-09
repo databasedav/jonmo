@@ -92,9 +92,9 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
             width: Val::Px(45.0),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
+            border_radius: BorderRadius::MAX,
             ..default()
         },
-        BorderRadius::MAX,
         BackgroundColor(color),
     ))
     .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {

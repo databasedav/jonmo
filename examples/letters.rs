@@ -179,17 +179,15 @@ fn sum_container() -> jonmo::Builder {
 }
 
 fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> jonmo::Builder {
-    jonmo::Builder::from((
-        Node {
-            width: Val::Px(100.),
-            height: Val::Px(100.),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            padding: UiRect::all(Val::Px(GAP * 2.)),
-            ..default()
-        },
-        BorderRadius::all(Val::Px(GAP * 2.)),
-    ))
+    jonmo::Builder::from((Node {
+        width: Val::Px(100.),
+        height: Val::Px(100.),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        padding: UiRect::all(Val::Px(GAP * 2.)),
+        border_radius: BorderRadius::all(Val::Px(GAP * 2.)),
+        ..default()
+    },))
     .observe(move |_click: On<Pointer<Click>>, mut active_save: ResMut<ActiveSave>| {
         active_save.0 = save_char;
     })
@@ -213,24 +211,24 @@ fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave>
 
 fn text_node() -> jonmo::Builder {
     jonmo::Builder::from((
-        Node::default(),
+        Node {
+            border_radius: BorderRadius::all(Val::Px(GAP)),
+            ..default()
+        },
         TextColor(Color::WHITE),
         TextLayout::new_with_justify(Justify::Center),
-        BorderRadius::all(Val::Px(GAP)),
     ))
 }
 
 fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> jonmo::Builder {
-    jonmo::Builder::from((
-        Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(GAP * 2.),
-            padding: UiRect::all(Val::Px(GAP * 2.)),
-            width: Val::Px(100.),
-            ..default()
-        },
-        BorderRadius::all(Val::Px(GAP * 2.)),
-    ))
+    jonmo::Builder::from((Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(GAP * 2.),
+        padding: UiRect::all(Val::Px(GAP * 2.)),
+        width: Val::Px(100.),
+        border_radius: BorderRadius::all(Val::Px(GAP * 2.)),
+        ..default()
+    },))
     .component_signal(
         data.clone()
             .map_in(|LetterData { pressed, .. }| pressed)

@@ -453,7 +453,7 @@ impl Builder {
                             let mut parent = world.entity_mut(parent);
                             // Bevy's `remove_children` finds the entity and removes it from its
                             // current position, correctly shifting subsequent children.
-                            parent.remove_children(&[moved_entity]);
+                            parent.detach_children(&[moved_entity]);
                             let parent_entity = parent.id();
 
                             // The new insertion index must be calculated with the offset from any
