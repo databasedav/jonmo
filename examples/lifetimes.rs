@@ -138,7 +138,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> jonmo::Builder {
             Node::default(),
             Text::new("+"),
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
         ))),
     )
 }
@@ -202,7 +202,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
                 // Start with a `Text` component with no sections. We'll add them as children.
                 Text::new(""),
                 TextColor(Color::BLACK), // Default color, can be overridden by children.
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
             ))
             // Child 1: A static text span.
             .child((TextColor(Color::BLACK), TextSpan::new("item ")))
@@ -281,7 +281,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
             Node::default(),
             Text::new("x"),
             TextColor(Color::WHITE),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
         ))),
     )
 }

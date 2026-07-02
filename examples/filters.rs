@@ -114,7 +114,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> jonmo::Builder {
                 Text::new("source"),
                 TextColor(Color::WHITE),
                 TextFont::from_font_size(30.),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
             )))
             .child(button("+", -2.).observe(
                 |_: On<Pointer<Click>>, datas: Res<Datas>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
@@ -210,7 +210,7 @@ fn text_node(text: &'static str) -> jonmo::Builder {
         },
         Text::new(text),
         TextColor(Color::WHITE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
     ))
 }
 
@@ -510,7 +510,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
         Node::default(),
         Text::new(number.to_string()),
         TextColor(Color::BLACK),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
     ))
 }
 

@@ -2118,9 +2118,9 @@ pub trait SignalExt: Signal {
 
                     // Synchronously send the initial `Replace` diff.
                     let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
-                    let upstreams = upstreams.get(world);
+                    let upstreams = upstreams.get(world).expect("query params are always valid");
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
-                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                    for signal in [new_signal].into_iter().chain(upstreams) {
                         let entity = *signal;
                         if world.get::<super::signal_vec::VecReplayTrigger>(entity).is_some() {
                             world.entity_mut(entity).insert(ReplayOnce);
@@ -2248,9 +2248,9 @@ pub trait SignalExt: Signal {
 
                     // Synchronously send the initial `Replace` diff.
                     let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
-                    let upstreams = upstreams.get(world);
+                    let upstreams = upstreams.get(world).expect("query params are always valid");
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
-                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                    for signal in [new_signal].into_iter().chain(upstreams) {
                         let entity = *signal;
                         if world.get::<super::signal_map::MapReplayTrigger>(entity).is_some() {
                             world.entity_mut(entity).insert(ReplayOnce);
@@ -3473,9 +3473,11 @@ mod tests {
     use core::time::Duration;
     use test_log::test;
 
-    // Helper component and resource for testing Add Default
-    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default, Resource)]
+    #[derive(Component, Clone, Debug, PartialEq, Reflect, Default)]
     struct TestData(i32);
+
+    #[derive(Resource, Clone, Debug, PartialEq, Reflect, Default)]
+    struct TestResource(i32);
 
     #[derive(Resource, Default, Debug)]
     struct SignalOutput<T: Send + Sync + 'static + Clone + fmt::Debug>(Option<T>);
@@ -5464,26 +5466,26 @@ mod tests {
     #[test]
     fn test_builder_from_resource() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<TestData>>();
+        app.init_resource::<SignalOutput<TestResource>>();
 
         // Test resource exists
-        app.insert_resource(TestData(42));
-        let signal_with = signal::from_resource::<TestData>()
+        app.insert_resource(TestResource(42));
+        let signal_with = signal::from_resource::<TestResource>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
-        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+        assert_eq!(get_output::<TestResource>(app.world()), Some(TestResource(42)));
         signal_with.cleanup(app.world_mut());
 
         // Test resource missing
-        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
-        app.world_mut().remove_resource::<TestData>();
-        let signal_without = signal::from_resource::<TestData>()
+        app.world_mut().resource_mut::<SignalOutput<TestResource>>().0 = None;
+        app.world_mut().remove_resource::<TestResource>();
+        let signal_without = signal::from_resource::<TestResource>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(
-            get_output::<TestData>(app.world()),
+            get_output::<TestResource>(app.world()),
             None,
             "Should terminate when resource is missing"
         );
@@ -5493,25 +5495,28 @@ mod tests {
     #[test]
     fn test_builder_from_resource_option() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<Option<TestData>>>();
+        app.init_resource::<SignalOutput<Option<TestResource>>>();
 
         // Test resource exists
-        app.insert_resource(TestData(42));
-        let signal_with = signal::from_resource_option::<TestData>()
-            .map(capture_output)
-            .register(app.world_mut());
-        app.update();
-        assert_eq!(get_output::<Option<TestData>>(app.world()), Some(Some(TestData(42))));
-        signal_with.cleanup(app.world_mut());
-
-        // Test resource missing
-        app.world_mut().remove_resource::<TestData>();
-        let signal_without = signal::from_resource_option::<TestData>()
+        app.insert_resource(TestResource(42));
+        let signal_with = signal::from_resource_option::<TestResource>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(
-            get_output::<Option<TestData>>(app.world()),
+            get_output::<Option<TestResource>>(app.world()),
+            Some(Some(TestResource(42)))
+        );
+        signal_with.cleanup(app.world_mut());
+
+        // Test resource missing
+        app.world_mut().remove_resource::<TestResource>();
+        let signal_without = signal::from_resource_option::<TestResource>()
+            .map(capture_output)
+            .register(app.world_mut());
+        app.update();
+        assert_eq!(
+            get_output::<Option<TestResource>>(app.world()),
             Some(None),
             "Should output Some(None) when resource is missing"
         );
@@ -5601,43 +5606,43 @@ mod tests {
     #[test]
     fn test_builder_from_resource_changed() {
         let mut app = create_test_app();
-        app.init_resource::<SignalOutput<TestData>>();
+        app.init_resource::<SignalOutput<TestResource>>();
 
         // Insert resource
-        app.insert_resource(TestData(42));
-        let signal = signal::from_resource_changed::<TestData>()
+        app.insert_resource(TestResource(42));
+        let signal = signal::from_resource_changed::<TestResource>()
             .map(capture_output)
             .register(app.world_mut());
 
         // First update should emit because resource was just added (Changed)
         app.update();
-        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(42)));
+        assert_eq!(get_output::<TestResource>(app.world()), Some(TestResource(42)));
 
         // Clear output and update again - should NOT emit because nothing changed
-        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
+        app.world_mut().resource_mut::<SignalOutput<TestResource>>().0 = None;
         app.update();
         assert_eq!(
-            get_output::<TestData>(app.world()),
+            get_output::<TestResource>(app.world()),
             None,
             "Should terminate when resource has not changed"
         );
 
         // Mutate the resource and update - should emit
-        app.world_mut().resource_mut::<TestData>().0 = 100;
+        app.world_mut().resource_mut::<TestResource>().0 = 100;
         app.update();
-        assert_eq!(get_output::<TestData>(app.world()), Some(TestData(100)));
+        assert_eq!(get_output::<TestResource>(app.world()), Some(TestResource(100)));
 
         signal.cleanup(app.world_mut());
 
         // Test resource missing
-        app.world_mut().resource_mut::<SignalOutput<TestData>>().0 = None;
-        app.world_mut().remove_resource::<TestData>();
-        let signal_without = signal::from_resource_changed::<TestData>()
+        app.world_mut().resource_mut::<SignalOutput<TestResource>>().0 = None;
+        app.world_mut().remove_resource::<TestResource>();
+        let signal_without = signal::from_resource_changed::<TestResource>()
             .map(capture_output)
             .register(app.world_mut());
         app.update();
         assert_eq!(
-            get_output::<TestData>(app.world()),
+            get_output::<TestResource>(app.world()),
             None,
             "Should terminate when resource is missing"
         );

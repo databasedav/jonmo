@@ -216,7 +216,7 @@ fn text_node() -> jonmo::Builder {
             ..default()
         },
         TextColor(Color::WHITE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
     ))
 }
 
