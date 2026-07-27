@@ -174,6 +174,10 @@ pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
+        graph::clear_stale_signals();
+        signal_vec::clear_stale_mutable_vecs();
+        signal_map::clear_stale_mutable_btree_maps();
+
         // First schedule is the default for signals without explicit scheduling
         let default_schedule = self.schedules[0];
 

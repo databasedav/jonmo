@@ -1241,6 +1241,10 @@ pub(crate) struct LazySignalHolder(LazySignal);
 
 pub(crate) static STALE_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
+pub(crate) fn clear_stale_signals() {
+    STALE_SIGNALS.lock().unwrap().clear();
+}
+
 fn unlink_downstreams_and_mark(world: &mut World, signal: SignalSystem) {
     if let Some(downstreams) = world.get::<Downstream>(*signal).cloned() {
         for &downstream in downstreams.iter() {

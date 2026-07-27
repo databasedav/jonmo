@@ -4314,6 +4314,10 @@ pub(crate) fn despawn_stale_mutable_vecs(world: &mut World) {
     }
 }
 
+pub(crate) fn clear_stale_mutable_vecs() {
+    STALE_MUTABLE_VECS.lock().unwrap().clear();
+}
+
 fn new_mutable_vec_data<T>(values: Vec<T>) -> (MutableVecData<T>, LazyEntity)
 where
     T: Clone + Send + Sync + 'static,

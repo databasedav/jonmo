@@ -1065,6 +1065,10 @@ pub(crate) fn despawn_stale_mutable_btree_maps(world: &mut World) {
     }
 }
 
+pub(crate) fn clear_stale_mutable_btree_maps() {
+    STALE_MUTABLE_BTREE_MAPS.lock().unwrap().clear();
+}
+
 /// Provides immutable access to the underlying [`BTreeMap`].
 pub struct MutableBTreeMapReadGuard<'s, K, V> {
     guard: &'s MutableBTreeMapData<K, V>,
@@ -1376,11 +1380,16 @@ impl<K, V> MutableBTreeMap<K, V> {
                             *keys = entries.into_iter().map(|(k, _)| k).collect();
                             out_diffs.push(VecDiff::Replace { values: keys.clone() });
                         }
-                        MapDiff::Insert { key, .. } => {
-                            let index = keys.binary_search(&key).unwrap_err();
-                            keys.insert(index, key.clone());
-                            out_diffs.push(VecDiff::InsertAt { index, value: key });
-                        }
+                        MapDiff::Insert { key, .. } => match keys.binary_search(&key) {
+                            Err(index) => {
+                                keys.insert(index, key.clone());
+                                out_diffs.push(VecDiff::InsertAt { index, value: key });
+                            }
+                            Ok(_) => {
+                                // Some upstreams can replay an insert for an already-present key.
+                                // Preserve the sorted key list instead of panicking.
+                            }
+                        },
                         MapDiff::Update { .. } => {
                             // no change to keys
                         }
@@ -1427,14 +1436,24 @@ impl<K, V> MutableBTreeMap<K, V> {
                             *keys = entries.iter().map(|(k, _)| k.clone()).collect();
                             out_diffs.push(VecDiff::Replace { values: entries });
                         }
-                        MapDiff::Insert { key, value } => {
-                            let index = keys.binary_search(&key).unwrap_err();
-                            keys.insert(index, key.clone());
-                            out_diffs.push(VecDiff::InsertAt {
-                                index,
-                                value: (key, value),
-                            });
-                        }
+                        MapDiff::Insert { key, value } => match keys.binary_search(&key) {
+                            Err(index) => {
+                                keys.insert(index, key.clone());
+                                out_diffs.push(VecDiff::InsertAt {
+                                    index,
+                                    value: (key, value),
+                                });
+                            }
+                            Ok(index) => {
+                                // Treat duplicate inserts as in-place updates so downstream
+                                // signal-vec consumers stay coherent even if the upstream
+                                // map diff stream re-emits an existing key.
+                                out_diffs.push(VecDiff::UpdateAt {
+                                    index,
+                                    value: (key, value),
+                                });
+                            }
+                        },
                         MapDiff::Update { key, value } => {
                             if let Ok(index) = keys.binary_search(&key) {
                                 out_diffs.push(VecDiff::UpdateAt {
