@@ -69,22 +69,42 @@ use bevy_ecs::{
     query::{QueryData, QueryFilter},
     schedule::{InternedScheduleLabel, ScheduleLabel},
     system::{SystemId, SystemState},
-    world::DeferredWorld,
+    world::{DeferredWorld, WorldId},
 };
 use bevy_platform::{
     collections::{HashMap, HashSet},
     prelude::*,
     sync::{
-        Arc, LazyLock, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
 use core::{any::Any, hash::Hash, marker::PhantomData};
 use dyn_clone::{DynClone, clone_trait_object};
 
+use crate::cleanup::{CleanupSender, CleanupWorklist};
+
 /// Newtype wrapper for [`Entity`]s that hold systems in the signal graph.
 #[derive(Clone, Copy, Deref, Debug, PartialEq, Eq, Hash)]
 pub struct SignalSystem(pub Entity);
+
+/// A move-only signal-cleanup obligation created by releasing one description owner.
+pub(crate) struct ReleasedSignalCandidate(SignalSystem);
+
+impl ReleasedSignalCandidate {
+    fn new(signal: SignalSystem) -> Self {
+        Self(signal)
+    }
+
+    pub(crate) fn signal(&self) -> SignalSystem {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_new(signal: SignalSystem) -> Self {
+        Self(signal)
+    }
+}
 
 impl From<Entity> for SignalSystem {
     fn from(entity: Entity) -> Self {
@@ -1169,31 +1189,62 @@ pub(crate) struct LazySignalState {
 pub(crate) enum LazySystem {
     #[allow(clippy::type_complexity)]
     System(Option<Box<dyn FnOnce(&mut World) -> SignalSystem + Send + Sync>>),
-    Registered(SignalSystem),
+    Registered {
+        world_id: WorldId,
+        signal: SignalSystem,
+        cleanup: CleanupSender,
+    },
 }
 
 impl LazySystem {
-    fn register(&mut self, world: &mut World) -> SignalSystem {
+    fn register(&mut self, world: &mut World) -> Result<SignalSystem, (WorldId, WorldId)> {
         match self {
             LazySystem::System(f) => {
                 let signal = f.take().unwrap()(world);
-                *self = LazySystem::Registered(signal);
-                signal
+                let world_id = world.id();
+                let cleanup = CleanupSender::bound(world);
+                debug_assert!(matches!(&cleanup, CleanupSender::Bound(_)));
+                *self = LazySystem::Registered {
+                    world_id,
+                    signal,
+                    cleanup,
+                };
+                Ok(signal)
             }
-            LazySystem::Registered(signal) => {
+            LazySystem::Registered { world_id, signal, .. } => {
+                let current_world_id = world.id();
+                if *world_id != current_world_id {
+                    return Err((*world_id, current_world_id));
+                }
                 world
                     .entity_mut(**signal)
                     .get_mut::<SignalRegistrationCount>()
                     .unwrap()
                     .increment();
-                *signal
+                Ok(*signal)
             }
         }
     }
 }
 
+#[derive(Clone, Copy)]
+enum LazyReleaseMode {
+    ExternalRoot,
+    Candidate,
+    ReapedHolder,
+}
+
+enum LazyRelease {
+    ExternalRoot {
+        candidate: ReleasedSignalCandidate,
+        cleanup: CleanupSender,
+    },
+    Candidate(ReleasedSignalCandidate),
+}
+
 pub(crate) struct LazySignal {
     pub(crate) inner: Arc<LazySignalState>,
+    armed: bool,
 }
 
 impl LazySignal {
@@ -1203,16 +1254,86 @@ impl LazySignal {
                 references: AtomicUsize::new(1),
                 system: RwLock::new(LazySystem::System(Some(Box::new(system)))),
             }),
+            armed: true,
         }
     }
 
     pub(crate) fn register(self, world: &mut World) -> SignalSystem {
-        let signal = self.inner.system.write().unwrap().register(world);
+        let registration = self.inner.system.write().unwrap().register(world);
+        let signal = registration.unwrap_or_else(|(registered_world, requested_world)| {
+            panic!(
+                "LazySignal is registered in World {registered_world:?} and cannot be reused in World {requested_world:?}"
+            )
+        });
         let mut entity = world.entity_mut(*signal);
         if !entity.contains::<LazySignalHolder>() {
             entity.insert(LazySignalHolder(self));
         }
         signal
+    }
+
+    pub(crate) fn into_stale_candidate(mut self) -> Option<ReleasedSignalCandidate> {
+        match self.release(LazyReleaseMode::Candidate) {
+            Some(LazyRelease::Candidate(candidate)) => Some(candidate),
+            Some(LazyRelease::ExternalRoot { .. }) => unreachable!(),
+            None => None,
+        }
+    }
+
+    pub(crate) fn release_reaped_holder(mut self) {
+        let release = self.release(LazyReleaseMode::ReapedHolder);
+        debug_assert!(release.is_none());
+    }
+
+    fn release(&mut self, mode: LazyReleaseMode) -> Option<LazyRelease> {
+        if !self.armed {
+            return None;
+        }
+
+        enum RegisteredRelease {
+            ExternalRoot(SignalSystem, CleanupSender),
+            Candidate(SignalSystem),
+        }
+
+        let registered = match mode {
+            LazyReleaseMode::ExternalRoot | LazyReleaseMode::Candidate => {
+                let system = self.inner.system.read().unwrap();
+                match (&*system, mode) {
+                    (LazySystem::Registered { signal, cleanup, .. }, LazyReleaseMode::ExternalRoot) => {
+                        Some(RegisteredRelease::ExternalRoot(*signal, cleanup.clone()))
+                    }
+                    (LazySystem::Registered { signal, .. }, LazyReleaseMode::Candidate) => {
+                        Some(RegisteredRelease::Candidate(*signal))
+                    }
+                    _ => None,
+                }
+            }
+            LazyReleaseMode::ReapedHolder => None,
+        };
+
+        let previous = self
+            .inner
+            .references
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |references| {
+                references.checked_sub(1)
+            })
+            .unwrap_or_else(|_| panic!("LazySignal reference accounting underflowed"));
+        self.armed = false;
+
+        if previous > 2 {
+            return None;
+        }
+
+        match registered {
+            Some(RegisteredRelease::ExternalRoot(signal, cleanup)) => Some(LazyRelease::ExternalRoot {
+                candidate: ReleasedSignalCandidate::new(signal),
+                cleanup,
+            }),
+            Some(RegisteredRelease::Candidate(signal)) => {
+                Some(LazyRelease::Candidate(ReleasedSignalCandidate::new(signal)))
+            }
+            None => None,
+        }
     }
 }
 
@@ -1221,29 +1342,21 @@ impl Clone for LazySignal {
         self.inner.references.fetch_add(1, Ordering::SeqCst);
         LazySignal {
             inner: self.inner.clone(),
+            armed: true,
         }
     }
 }
 
 impl Drop for LazySignal {
     fn drop(&mut self) {
-        // <= 2 because we also wna queue if only the holder remains
-        if self.inner.references.fetch_sub(1, Ordering::SeqCst) <= 2
-            && let LazySystem::Registered(signal) = *self.inner.system.read().unwrap()
-        {
-            STALE_SIGNALS.lock().unwrap().push(signal);
+        if let Some(LazyRelease::ExternalRoot { candidate, cleanup }) = self.release(LazyReleaseMode::ExternalRoot) {
+            cleanup.send_stale_signal(candidate);
         }
     }
 }
 
 #[derive(Component)]
 pub(crate) struct LazySignalHolder(LazySignal);
-
-pub(crate) static STALE_SIGNALS: LazyLock<Mutex<Vec<SignalSystem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-
-pub(crate) fn clear_stale_signals() {
-    STALE_SIGNALS.lock().unwrap().clear();
-}
 
 fn unlink_downstreams_and_mark(world: &mut World, signal: SignalSystem) {
     if let Some(downstreams) = world.get::<Downstream>(*signal).cloned() {
@@ -1264,18 +1377,72 @@ fn unlink_downstreams_and_mark(world: &mut World, signal: SignalSystem) {
     }
 }
 
-pub(crate) fn despawn_stale_signals(world: &mut World) {
-    let signals = STALE_SIGNALS.lock().unwrap().drain(..).collect::<Vec<_>>();
-    for signal in signals {
-        let should_despawn = world
-            .get::<SignalRegistrationCount>(*signal)
-            .map(|registration_count| **registration_count == 0)
-            .unwrap_or(false);
-        if should_despawn {
-            unlink_downstreams_and_mark(world, signal);
-            remove_signal_from_graph_state(world, signal);
-            world.entity_mut(*signal).despawn();
+fn release_reaped_lazy_holder(world: &mut World, signal: SignalSystem) {
+    let holder = world
+        .get_entity_mut(*signal)
+        .ok()
+        .and_then(|mut entity| entity.take::<LazySignalHolder>());
+    if let Some(holder) = holder {
+        holder.0.release_reaped_holder();
+    }
+}
+
+fn cleanup_stale_signal(world: &mut World, signal: SignalSystem) {
+    let eligible = world
+        .get::<SignalRegistrationCount>(*signal)
+        .map(|registration_count| **registration_count == 0)
+        .unwrap_or(false)
+        && should_despawn_signal(world, signal);
+    if !eligible {
+        return;
+    }
+
+    release_reaped_lazy_holder(world, signal);
+    unlink_downstreams_and_mark(world, signal);
+    remove_signal_from_graph_state(world, signal);
+    if let Ok(entity) = world.get_entity_mut(*signal) {
+        entity.despawn();
+    }
+}
+
+fn signal_identity_cmp(left: &SignalSystem, right: &SignalSystem) -> core::cmp::Ordering {
+    left.0.cmp(&right.0)
+}
+
+fn order_signal_candidates(world: &World, candidates: Vec<ReleasedSignalCandidate>) -> Vec<SignalSystem> {
+    let signals = candidates
+        .into_iter()
+        .map(|candidate| candidate.signal())
+        .collect::<HashSet<_>>();
+    let mut relevant = signals.clone();
+    let mut pending = signals.iter().copied().collect::<Vec<_>>();
+    while let Some(signal) = pending.pop() {
+        for upstream in get_upstreams(world, signal) {
+            if relevant.insert(upstream) {
+                pending.push(upstream);
+            }
         }
+    }
+
+    let levels = compute_signal_levels(world, &relevant, |signal| relevant.contains(&signal), |_| None).levels;
+    let mut ordered = signals.into_iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        levels
+            .get(right)
+            .unwrap_or(&0)
+            .cmp(levels.get(left).unwrap_or(&0))
+            .then_with(|| signal_identity_cmp(left, right))
+    });
+    ordered
+}
+
+pub(crate) fn reap_signal_candidates(
+    world: &mut World,
+    candidates: Vec<ReleasedSignalCandidate>,
+    _worklist: &mut CleanupWorklist,
+) {
+    for signal in order_signal_candidates(world, candidates) {
+        cleanup_stale_signal(world, signal);
     }
 }
 
@@ -1410,10 +1577,15 @@ fn cleanup_recursive(world: &mut World, signal: SignalSystem) {
     // The count is zero. Perform the full cleanup. First, get the list of parents.
     let upstreams = world.get::<Upstream>(*signal).cloned();
 
+    let should_despawn = should_despawn_signal(world, signal);
+    if should_despawn {
+        release_reaped_lazy_holder(world, signal);
+    }
+
     // Unlink downstream edges and mark affected nodes for level recomputation.
     unlink_downstreams_and_mark(world, signal);
 
-    if should_despawn_signal(world, signal) {
+    if should_despawn {
         remove_signal_from_graph_state(world, signal);
         if let Ok(entity) = world.get_entity_mut(*signal) {
             entity.despawn();
@@ -1613,10 +1785,13 @@ pub fn downcast_any_clone<T: 'static>(any_clone: Box<dyn AnyClone>) -> Option<T>
 mod tests {
     use super::*;
 
+    use bevy::prelude::{App, MinimalPlugins};
     use bevy_ecs::{
         prelude::{In, Mut, World},
         schedule::ScheduleLabel,
     };
+
+    use crate::{JonmoPlugin, cleanup};
 
     #[derive(Resource, Default)]
     struct Order(Vec<&'static str>);
@@ -2219,10 +2394,320 @@ mod tests {
 
         let mut world = World::new();
         world.insert_resource(SignalGraphState::default());
-
         let signal = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
 
         // Update was not registered, this should panic
         apply_schedule_to_signal(&mut world, signal, Update.intern());
+    }
+
+    fn lazy_cleanup_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(SignalGraphState::default());
+        world
+    }
+
+    fn lazy_cleanup_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+        app
+    }
+
+    #[test]
+    fn lazy_world_cleanup_same_world_repeated_registration_is_preserved() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let first = lazy.clone().register(&mut world);
+        let second = lazy.clone().register(&mut world);
+
+        assert_eq!(first, second);
+        assert_eq!(**world.get::<SignalRegistrationCount>(*first).unwrap(), 2);
+        let system = lazy.inner.system.read().unwrap();
+        let LazySystem::Registered { world_id, cleanup, .. } = &*system else {
+            unreachable!();
+        };
+        assert_eq!(*world_id, world.id());
+        assert!(matches!(cleanup, CleanupSender::Bound(_)));
+        assert_eq!(cleanup.world_id(), Some(world.id()));
+        drop(system);
+
+        cleanup_recursive(&mut world, first);
+        cleanup_recursive(&mut world, second);
+        assert_eq!(**world.get::<SignalRegistrationCount>(*first).unwrap(), 0);
+        drop(lazy);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(*first).is_err());
+    }
+
+    #[test]
+    fn lazy_world_cleanup_cross_world_reuse_rejects_before_collision_access() {
+        let mut world_a = lazy_cleanup_world();
+        let mut world_b = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let signal = lazy.clone().register(&mut world_a);
+        let collision = world_b.spawn(SignalRegistrationCount(41)).id();
+        assert_eq!(*signal, collision);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.clone().register(&mut world_b)));
+
+        assert!(result.is_err());
+        assert_eq!(**world_a.get::<SignalRegistrationCount>(*signal).unwrap(), 1);
+        assert_eq!(**world_b.get::<SignalRegistrationCount>(collision).unwrap(), 41);
+        assert_eq!(cleanup::queued_message_count(&world_a), 0);
+
+        cleanup_recursive(&mut world_a, signal);
+        drop(lazy);
+        cleanup::drain_world_cleanup(&mut world_a);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_ordinary_drop_releases_once_and_sends_one_root() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+        let signal = lazy.clone().register(&mut world);
+        cleanup_recursive(&mut world, signal);
+        assert_eq!(state.references.load(Ordering::SeqCst), 2);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        drop(lazy);
+
+        assert_eq!(state.references.load(Ordering::SeqCst), 1);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        assert!(world.get_entity(*signal).is_err());
+    }
+
+    #[test]
+    fn lazy_world_cleanup_into_candidate_releases_once_without_root() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+        let signal = lazy.clone().register(&mut world);
+        cleanup_recursive(&mut world, signal);
+
+        let candidate = lazy.into_stale_candidate().unwrap();
+
+        assert_eq!(candidate.signal(), signal);
+        assert_eq!(state.references.load(Ordering::SeqCst), 1);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        CleanupSender::bound(&mut world).send_stale_signal(candidate);
+        cleanup::drain_world_cleanup(&mut world);
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert!(world.get_entity(*signal).is_err());
+    }
+
+    #[test]
+    fn lazy_world_cleanup_reaped_holder_releases_once_without_root() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+        let signal = lazy.register(&mut world);
+
+        release_reaped_lazy_holder(&mut world, signal);
+
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert!(world.get::<LazySignalHolder>(*signal).is_none());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_unregistered_final_drop_has_no_root() {
+        let world = World::new();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+
+        drop(lazy);
+
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_drop_after_world_destruction_is_safe() {
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let mut world = lazy_cleanup_world();
+        lazy.clone().register(&mut world);
+
+        drop(world);
+        drop(lazy);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_candidates_are_deduplicated_in_reverse_topological_order() {
+        let mut world = lazy_cleanup_world();
+        let upstream = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let downstream = spawn_signal::<i32, i32, Option<i32>, _, _>(&mut world, |In(value)| Some(value));
+        pipe_signal(&mut world, upstream, downstream);
+
+        let ordered = order_signal_candidates(
+            &world,
+            vec![
+                ReleasedSignalCandidate::new(upstream),
+                ReleasedSignalCandidate::new(downstream),
+                ReleasedSignalCandidate::new(upstream),
+            ],
+        );
+
+        assert_eq!(ordered, [downstream, upstream]);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_candidate_order_crosses_non_candidate_intermediate() {
+        let mut world = lazy_cleanup_world();
+        let upstream = spawn_signal::<(), i32, Option<i32>, _, _>(&mut world, |In(_)| Some(1));
+        let middle = spawn_signal::<i32, i32, Option<i32>, _, _>(&mut world, |In(value)| Some(value));
+        let downstream = spawn_signal::<i32, i32, Option<i32>, _, _>(&mut world, |In(value)| Some(value));
+        pipe_signal(&mut world, upstream, middle);
+        pipe_signal(&mut world, middle, downstream);
+
+        let ordered = order_signal_candidates(
+            &world,
+            vec![
+                ReleasedSignalCandidate::new(upstream),
+                ReleasedSignalCandidate::new(downstream),
+            ],
+        );
+
+        assert_eq!(ordered, [downstream, upstream]);
+        assert!(!ordered.contains(&middle));
+    }
+
+    #[test]
+    fn lazy_world_cleanup_candidate_order_uses_full_entity_identity() {
+        let mut world = lazy_cleanup_world();
+        let stale_entity = world.spawn_empty().id();
+        world.entity_mut(stale_entity).despawn();
+        let live_entity = world.spawn_empty().id();
+        assert_eq!(stale_entity.index(), live_entity.index());
+        assert_ne!(stale_entity.generation(), live_entity.generation());
+
+        let stale = SignalSystem(stale_entity);
+        let live = SignalSystem(live_entity);
+        let identity_order = signal_identity_cmp(&stale, &live);
+        assert_ne!(identity_order, core::cmp::Ordering::Equal);
+        let expected = if identity_order.is_lt() {
+            [stale, live]
+        } else {
+            [live, stale]
+        };
+
+        let first = order_signal_candidates(
+            &world,
+            vec![
+                ReleasedSignalCandidate::new(live),
+                ReleasedSignalCandidate::new(stale),
+                ReleasedSignalCandidate::new(live),
+                ReleasedSignalCandidate::new(stale),
+            ],
+        );
+        let second = order_signal_candidates(
+            &world,
+            vec![
+                ReleasedSignalCandidate::new(stale),
+                ReleasedSignalCandidate::new(live),
+                ReleasedSignalCandidate::new(stale),
+                ReleasedSignalCandidate::new(live),
+            ],
+        );
+
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_duplicate_candidates_are_idempotent() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+        let signal = lazy.clone().register(&mut world);
+        cleanup_recursive(&mut world, signal);
+        drop(lazy);
+        let sender = CleanupSender::bound(&mut world);
+        sender.send_stale_signal(ReleasedSignalCandidate::new(signal));
+        sender.send_stale_signal(ReleasedSignalCandidate::new(signal));
+        assert_eq!(cleanup::queued_message_count(&world), 3);
+
+        cleanup::drain_world_cleanup(&mut world);
+
+        assert!(world.get_entity(*signal).is_err());
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        cleanup::drain_world_cleanup(&mut world);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_direct_holder_reap_emits_no_root() {
+        let mut world = lazy_cleanup_world();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let state = lazy.inner.clone();
+        let signal = lazy.register(&mut world);
+
+        cleanup_recursive(&mut world, signal);
+
+        assert!(world.get_entity(*signal).is_err());
+        assert_eq!(state.references.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn lazy_world_cleanup_two_apps_with_colliding_entities_are_isolated() {
+        let mut app_a = lazy_cleanup_app();
+        let mut app_b = lazy_cleanup_app();
+        let lazy_a = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let lazy_b = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(2));
+        let signal_a = lazy_a.clone().register(app_a.world_mut());
+        let signal_b = lazy_b.clone().register(app_b.world_mut());
+        assert_eq!(*signal_a, *signal_b);
+        cleanup_recursive(app_a.world_mut(), signal_a);
+        cleanup_recursive(app_b.world_mut(), signal_b);
+        drop(lazy_a);
+        drop(lazy_b);
+
+        app_b.update();
+        assert!(app_b.world().get_entity(*signal_b).is_err());
+        assert!(app_a.world().get_entity(*signal_a).is_ok());
+
+        app_a.update();
+        assert!(app_a.world().get_entity(*signal_a).is_err());
+    }
+
+    #[test]
+    fn lazy_world_cleanup_plugin_b_cannot_clear_app_a_pending_root() {
+        let mut app_a = lazy_cleanup_app();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let signal = lazy.clone().register(app_a.world_mut());
+        cleanup_recursive(app_a.world_mut(), signal);
+        drop(lazy);
+        assert_eq!(cleanup::queued_message_count(app_a.world()), 1);
+
+        let _app_b = lazy_cleanup_app();
+
+        assert_eq!(cleanup::queued_message_count(app_a.world()), 1);
+        assert!(app_a.world().get_entity(*signal).is_ok());
+        app_a.update();
+        assert!(app_a.world().get_entity(*signal).is_err());
+    }
+
+    #[test]
+    fn lazy_world_cleanup_pre_plugin_inbox_is_preserved_and_drained() {
+        let mut app = App::new();
+        let lazy = lazy_signal_from_system::<(), i32, Option<i32>, _, _>(|In(_)| Some(1));
+        let signal = lazy.clone().register(app.world_mut());
+        let inbox = cleanup::cleanup_inbox_identity(app.world()).unwrap();
+        cleanup_recursive(app.world_mut(), signal);
+        drop(lazy);
+        assert_eq!(cleanup::queued_message_count(app.world()), 1);
+
+        app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+
+        assert_eq!(cleanup::cleanup_inbox_identity(app.world()), Some(inbox));
+        assert_eq!(cleanup::queued_message_count(app.world()), 1);
+        app.update();
+        assert!(app.world().get_entity(*signal).is_err());
+        assert_eq!(cleanup::queued_message_count(app.world()), 0);
     }
 }

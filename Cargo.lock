@@ -2884,6 +2884,7 @@ dependencies = [
  "bevy_platform",
  "bevy_time",
  "cfg-if",
+ "concurrent-queue",
  "document-features",
  "dyn-clone",
  "enclose",

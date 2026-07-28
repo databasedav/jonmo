@@ -4441,8 +4441,6 @@ mod tests {
             );
             handle.cleanup(app.world_mut());
         }
-
-        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -4542,8 +4540,6 @@ mod tests {
 
             handle.cleanup(app.world_mut());
         }
-
-        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -4686,8 +4682,6 @@ mod tests {
             );
             handle.cleanup(app.world_mut());
         }
-
-        crate::signal_map::tests::cleanup(true);
     }
 
     #[test]
@@ -4810,8 +4804,6 @@ mod tests {
 
             handle.cleanup(app.world_mut());
         }
-
-        crate::signal_map::tests::cleanup(true);
     }
 
     #[test]

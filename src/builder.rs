@@ -625,7 +625,6 @@ mod tests {
     use super::*;
     use crate::{
         self as jonmo, JonmoPlugin,
-        graph::STALE_SIGNALS,
         signal::{self, SignalExt},
         signal_vec::MutableVec,
     };
@@ -637,15 +636,9 @@ mod tests {
 
     /// Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
-        cleanup();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
         app
-    }
-
-    fn cleanup() {
-        STALE_SIGNALS.lock().unwrap().clear();
-        crate::signal_vec::tests::cleanup(true);
     }
 
     #[test]
@@ -1214,8 +1207,6 @@ mod tests {
             app.world_mut().entity_mut(parent_entity_signal).despawn();
             app.update();
         }
-
-        cleanup()
     }
 
     // Marker components for easy identification in the child_signal test
@@ -1380,8 +1371,6 @@ mod tests {
                 "No reactive children should exist after parent is despawned."
             );
         }
-
-        cleanup()
     }
 
     #[test]
@@ -1652,8 +1641,6 @@ mod tests {
                 assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
             }
         }
-
-        cleanup()
     }
 
     /// Helper to get a Vec of all children's entity IDs.
@@ -1871,8 +1858,6 @@ mod tests {
             app.update();
             // The test passes if the above update doesn't panic.
         }
-
-        cleanup()
     }
 
     #[test]

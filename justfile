@@ -8,7 +8,7 @@ fetch_kaaj_justfile:
 import? 'kaaj.just'
 
 test:
-  cargo test tests -- --test-threads=1 && just doctest
+  cargo test tests && just doctest
 
 # TODO: use an actual list https://github.com/casey/just/issues/2458
 exclude_examples := '"test", "utils"'

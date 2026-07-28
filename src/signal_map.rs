@@ -18,19 +18,11 @@ use super::{
     signal_vec::{ReplayOnce, Replayable, SignalVec, VecDiff},
     utils::LazyEntity,
 };
-use crate::prelude::clone;
+use crate::{cleanup::CleanupSender, prelude::clone};
 use alloc::collections::BTreeMap;
 use bevy_ecs::{prelude::*, schedule::ScheduleLabel};
-use bevy_platform::{
-    prelude::*,
-    sync::{Arc, LazyLock, Mutex},
-};
-use core::{
-    fmt,
-    marker::PhantomData,
-    ops::Deref,
-    sync::atomic::{self, AtomicUsize},
-};
+use bevy_platform::{prelude::*, sync::Arc};
+use core::{fmt, marker::PhantomData, ops::Deref};
 use dyn_clone::{DynClone, clone_trait_object};
 
 /// Describes the mutations made to the underlying [`MutableBTreeMap`] that are piped to downstream
@@ -1056,19 +1048,6 @@ impl<Sched: 'static, K: Send + Sync + 'static, V: Send + Sync + 'static> SignalM
     }
 }
 
-static STALE_MUTABLE_BTREE_MAPS: LazyLock<Mutex<Vec<Entity>>> = LazyLock::new(Mutex::default);
-
-pub(crate) fn despawn_stale_mutable_btree_maps(world: &mut World) {
-    let queue = STALE_MUTABLE_BTREE_MAPS.lock().unwrap().drain(..).collect::<Vec<_>>();
-    for entity in queue {
-        world.despawn(entity);
-    }
-}
-
-pub(crate) fn clear_stale_mutable_btree_maps() {
-    STALE_MUTABLE_BTREE_MAPS.lock().unwrap().clear();
-}
-
 /// Provides immutable access to the underlying [`BTreeMap`].
 pub struct MutableBTreeMapReadGuard<'s, K, V> {
     guard: &'s MutableBTreeMapData<K, V>,
@@ -1159,32 +1138,33 @@ where
 pub struct MutableBTreeMapData<K, V> {
     map: BTreeMap<K, V>,
     pending_diffs: Vec<MapDiff<K, V>>,
-    broadcaster: LazySignal,
+}
+
+struct MutableBTreeMapOwner {
+    entity: Entity,
+    cleanup: CleanupSender,
+    broadcaster: Option<LazySignal>,
+}
+
+impl Drop for MutableBTreeMapOwner {
+    fn drop(&mut self) {
+        let stale_broadcaster = self.broadcaster.take().and_then(LazySignal::into_stale_candidate);
+        self.cleanup.send_mutable_btree_map(self.entity, stale_broadcaster);
+    }
 }
 
 /// Wrapper around a [`BTreeMap`] that emits mutations as [`MapDiff`]s, enabling diff-less
 /// constant-time reactive updates for downstream [`SignalMap`]s.
 pub struct MutableBTreeMap<K, V> {
-    entity: Entity,
-    references: Arc<AtomicUsize>,
+    owner: Arc<MutableBTreeMapOwner>,
     _marker: PhantomData<fn() -> (K, V)>,
 }
 
 impl<K, V> Clone for MutableBTreeMap<K, V> {
     fn clone(&self) -> Self {
-        self.references.fetch_add(1, atomic::Ordering::Relaxed);
         Self {
-            entity: self.entity,
-            references: self.references.clone(),
+            owner: self.owner.clone(),
             _marker: PhantomData,
-        }
-    }
-}
-
-impl<K, V> Drop for MutableBTreeMap<K, V> {
-    fn drop(&mut self) {
-        if self.references.fetch_sub(1, atomic::Ordering::Relaxed) == 1 {
-            STALE_MUTABLE_BTREE_MAPS.lock().unwrap().push(self.entity);
         }
     }
 }
@@ -1227,32 +1207,70 @@ impl Replayable for MapReplayTrigger {
     }
 }
 
-fn new_mutable_btree_map_data<K, V>(map: BTreeMap<K, V>) -> (MutableBTreeMapData<K, V>, LazyEntity)
+fn new_mutable_btree_map_source<K, V>(map: BTreeMap<K, V>) -> (MutableBTreeMapData<K, V>, LazyEntity, LazySignal)
 where
     K: Ord + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
     let data_entity = LazyEntity::new();
-    let broadcaster = LazySignal::new(clone!((data_entity) move |world: &mut World| {
-        let source_system = move |In(_), mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
+    let broadcaster = lazy_signal_from_system::<(), Vec<MapDiff<K, V>>, _, _, _>(
+        clone!((data_entity) move |In(_), mut mutable_btree_map_datas: Query<&mut MutableBTreeMapData<K, V>>| {
             let mut data = mutable_btree_map_datas.get_mut(*data_entity).unwrap();
             if data.pending_diffs.is_empty() {
                 None
             } else {
                 Some(core::mem::take(&mut data.pending_diffs))
             }
-        };
-
-        register_signal::<(), Vec<MapDiff<K, V>>, _, _, _>(world, source_system)
-    }));
+        }),
+    );
     (
         MutableBTreeMapData {
             map,
             pending_diffs: Vec::new(),
-            broadcaster,
         },
         data_entity,
+        broadcaster,
     )
+}
+
+fn mutable_btree_map_from_parts<K, V>(
+    entity: Entity,
+    cleanup: CleanupSender,
+    broadcaster: LazySignal,
+) -> MutableBTreeMap<K, V> {
+    MutableBTreeMap {
+        owner: Arc::new(MutableBTreeMapOwner {
+            entity,
+            cleanup,
+            broadcaster: Some(broadcaster),
+        }),
+        _marker: PhantomData,
+    }
+}
+
+fn spawn_mutable_btree_map<K, V>(world: &mut World, map: BTreeMap<K, V>) -> MutableBTreeMap<K, V>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    let cleanup = CleanupSender::bound(world);
+    let (data, data_entity, broadcaster) = new_mutable_btree_map_source(map);
+    let entity = world.spawn(data).id();
+    data_entity.set(entity);
+    mutable_btree_map_from_parts(entity, cleanup, broadcaster)
+}
+
+fn spawn_mutable_btree_map_commands<K, V>(commands: &mut Commands, map: BTreeMap<K, V>) -> MutableBTreeMap<K, V>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    let (cleanup, binder) = CleanupSender::deferred();
+    let (data, data_entity, broadcaster) = new_mutable_btree_map_source(map);
+    let entity = commands.spawn(data).id();
+    data_entity.set(entity);
+    commands.queue(move |world: &mut World| binder.bind(world));
+    mutable_btree_map_from_parts(entity, cleanup, broadcaster)
 }
 
 impl<K, V> MutableBTreeMap<K, V> {
@@ -1282,6 +1300,17 @@ impl<K, V> MutableBTreeMap<K, V> {
         MutableBTreeMapBuilder::new()
     }
 
+    fn entity(&self) -> Entity {
+        self.owner.entity
+    }
+
+    fn broadcaster(&self) -> &LazySignal {
+        self.owner
+            .broadcaster
+            .as_ref()
+            .expect("live MutableBTreeMap owner is missing its broadcaster")
+    }
+
     /// Provides read-only access to the underlying [`BTreeMap`] via either a `&World` or a
     /// `&Query<MutableBTreeMapData<K, V>>`.
     pub fn read<'s>(
@@ -1293,7 +1322,7 @@ impl<K, V> MutableBTreeMap<K, V> {
         V: Send + Sync + 'static,
     {
         MutableBTreeMapReadGuard {
-            guard: mutable_btree_map_data_reader.read(self.entity),
+            guard: mutable_btree_map_data_reader.read(self.entity()),
         }
     }
 
@@ -1308,7 +1337,7 @@ impl<K, V> MutableBTreeMap<K, V> {
         V: Send + Sync + 'static,
     {
         MutableBTreeMapWriteGuard {
-            guard: mutable_btree_map_data_writer.write(self.entity),
+            guard: mutable_btree_map_data_writer.write(self.entity()),
         }
     }
 
@@ -1319,7 +1348,7 @@ impl<K, V> MutableBTreeMap<K, V> {
         V: Clone + Send + Sync + 'static,
     {
         let replay_lazy_signal = LazySignal::new(clone!((self => self_) move |world: &mut World| {
-            let broadcaster_system = world.get::<MutableBTreeMapData<K, V>>(self_.entity).unwrap().broadcaster.clone().register(world);
+            let broadcaster_system = self_.broadcaster().clone().register(world);
 
             let was_initially_empty = self_.read(&*world).is_empty();
 
@@ -1494,14 +1523,7 @@ where
     V: Clone + Send + Sync + 'static,
 {
     fn from(world: &mut World) -> Self {
-        let (data, data_entity) = new_mutable_btree_map_data::<K, V>(BTreeMap::new());
-        let entity = world.spawn(data).id();
-        data_entity.set(entity);
-        Self {
-            entity,
-            references: Arc::new(AtomicUsize::new(1)),
-            _marker: PhantomData,
-        }
+        spawn_mutable_btree_map(world, BTreeMap::new())
     }
 }
 
@@ -1600,26 +1622,12 @@ where
 {
     /// Spawns a [`MutableBTreeMap`] using a `&mut World`.
     pub fn spawn(self, world: &mut World) -> MutableBTreeMap<K, V> {
-        let (data, data_entity) = new_mutable_btree_map_data::<K, V>(self.0);
-        let entity = world.spawn(data).id();
-        data_entity.set(entity);
-        MutableBTreeMap {
-            entity,
-            references: Arc::new(AtomicUsize::new(1)),
-            _marker: PhantomData,
-        }
+        spawn_mutable_btree_map(world, self.0)
     }
 
     /// Spawns a [`MutableBTreeMap`] using a `&mut Commands`.
     pub fn spawnc(self, commands: &mut Commands) -> MutableBTreeMap<K, V> {
-        let (data, data_entity) = new_mutable_btree_map_data::<K, V>(self.0);
-        let entity = commands.spawn(data).id();
-        data_entity.set(entity);
-        MutableBTreeMap {
-            entity,
-            references: Arc::new(AtomicUsize::new(1)),
-            _marker: PhantomData,
-        }
+        spawn_mutable_btree_map_commands(commands, self.0)
     }
 }
 
@@ -1629,14 +1637,7 @@ where
     V: Clone + Send + Sync + 'static,
 {
     fn from(commands: &mut Commands) -> Self {
-        let (data, data_entity) = new_mutable_btree_map_data::<K, V>(BTreeMap::new());
-        let entity = commands.spawn(data).id();
-        data_entity.set(entity);
-        Self {
-            entity,
-            references: Arc::new(AtomicUsize::new(1)),
-            _marker: PhantomData,
-        }
+        spawn_mutable_btree_map_commands(commands, BTreeMap::new())
     }
 }
 
@@ -1703,8 +1704,9 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{JonmoPlugin, signal_vec::SignalVecExt};
+    use crate::{JonmoPlugin, cleanup, signal_vec::SignalVecExt};
     use bevy::prelude::*;
+    use bevy_ecs::world::CommandQueue;
 
     // Helper resource to capture the output diffs from a SignalMap for assertions.
     #[derive(Resource, Default, Debug)]
@@ -1738,7 +1740,6 @@ pub(crate) mod tests {
 
     // Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
-        cleanup(true);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
         app
@@ -1776,11 +1777,390 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn cleanup(vecs_too: bool) {
-        STALE_MUTABLE_BTREE_MAPS.lock().unwrap().clear();
-        if vecs_too {
-            crate::signal_vec::tests::cleanup(false);
-        }
+    #[test]
+    fn mutable_btree_map_world_cleanup_owner_clones_emit_one_final_root() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let neighbor: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let source_entity = source.entity();
+        let neighbor_entity = neighbor.entity();
+        let clone = source.clone();
+        assert!(Arc::ptr_eq(&source.owner, &clone.owner));
+
+        drop(clone);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        assert!(world.get_entity(source_entity).is_ok());
+
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(source_entity).is_err());
+        assert!(world.get_entity(neighbor_entity).is_ok());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        drop(neighbor);
+        cleanup::drain_world_cleanup(&mut world);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_builder_spawn_preserves_values_and_entity() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let source = MutableBTreeMap::builder().values([(1, 10), (2, 20)]).spawn(&mut world);
+        let entity = source.entity();
+        assert_eq!(source.read(&world).get(&1), Some(&10));
+        source.write(&mut world).insert(3, 30);
+        assert_eq!(source.read(&world).get(&3), Some(&30));
+
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_from_world_preserves_exact_entity() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let source = <MutableBTreeMap<i32, i32> as FromWorld>::from_world(&mut world);
+        let entity = source.entity();
+        assert!(source.read(&world).is_empty());
+
+        drop(source);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_builder_commands_apply_before_drop() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let mut queue = CommandQueue::default();
+        let source = {
+            let mut commands = Commands::new(&mut queue, &world);
+            MutableBTreeMap::builder()
+                .values([(4, 40), (5, 50)])
+                .spawnc(&mut commands)
+        };
+        let entity = source.entity();
+        assert_eq!(source.owner.cleanup.world_id(), None);
+
+        queue.apply(&mut world);
+        assert_eq!(source.owner.cleanup.world_id(), Some(world.id()));
+        assert_eq!(source.read(&world).get(&4), Some(&40));
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_builder_commands_drop_before_apply() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let mut queue = CommandQueue::default();
+        let source = {
+            let mut commands = Commands::new(&mut queue, &world);
+            MutableBTreeMap::builder().values([(8, 80)]).spawnc(&mut commands)
+        };
+        let entity = source.entity();
+
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        queue.apply(&mut world);
+        assert!(world.get::<MutableBTreeMapData<i32, i32>>(entity).is_some());
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_from_commands_apply_before_drop() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let mut queue = CommandQueue::default();
+        let source: MutableBTreeMap<i32, i32> = {
+            let mut commands = Commands::new(&mut queue, &world);
+            (&mut commands).into()
+        };
+        let entity = source.entity();
+
+        queue.apply(&mut world);
+        assert_eq!(source.owner.cleanup.world_id(), Some(world.id()));
+        source.write(&mut world).insert(3, 30);
+        assert_eq!(source.read(&world).get(&3), Some(&30));
+        drop(source);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_from_commands_drop_before_apply() {
+        let mut world = World::new();
+        let neighbor = world.spawn_empty().id();
+        let mut queue = CommandQueue::default();
+        let source: MutableBTreeMap<i32, i32> = {
+            let mut commands = Commands::new(&mut queue, &world);
+            (&mut commands).into()
+        };
+        let entity = source.entity();
+
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        queue.apply(&mut world);
+        assert!(world.get::<MutableBTreeMapData<i32, i32>>(entity).is_some());
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert!(world.get_entity(neighbor).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_discarded_commands_are_safe() {
+        let reservation_world = World::new();
+        let mut queue = CommandQueue::default();
+        let source: MutableBTreeMap<i32, i32> = {
+            let mut commands = Commands::new(&mut queue, &reservation_world);
+            (&mut commands).into()
+        };
+        drop(source);
+        drop(queue);
+        drop(reservation_world);
+
+        let mut unrelated_world = World::new();
+        let unrelated: MutableBTreeMap<i32, i32> = (&mut unrelated_world).into();
+        let unrelated_entity = unrelated.entity();
+        cleanup::drain_world_cleanup(&mut unrelated_world);
+        assert!(unrelated_world.get_entity(unrelated_entity).is_ok());
+        drop(unrelated);
+        cleanup::drain_world_cleanup(&mut unrelated_world);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_worlds_with_colliding_entities_are_isolated() {
+        let mut world_a = World::new();
+        let mut world_b = World::new();
+        let source_a: MutableBTreeMap<i32, i32> = (&mut world_a).into();
+        let source_b: MutableBTreeMap<i32, i32> = (&mut world_b).into();
+        let entity_a = source_a.entity();
+        let entity_b = source_b.entity();
+        assert_eq!(entity_a, entity_b);
+
+        drop(source_a);
+        cleanup::drain_world_cleanup(&mut world_b);
+        assert!(world_b.get_entity(entity_b).is_ok());
+        assert!(world_a.get_entity(entity_a).is_ok());
+
+        cleanup::drain_world_cleanup(&mut world_a);
+        assert!(world_a.get_entity(entity_a).is_err());
+        assert!(world_b.get_entity(entity_b).is_ok());
+        drop(source_b);
+        cleanup::drain_world_cleanup(&mut world_b);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_plugin_b_preserves_app_a_pending_root() {
+        let mut app_a = App::new();
+        app_a.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+        let source: MutableBTreeMap<i32, i32> = app_a.world_mut().into();
+        let entity = source.entity();
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(app_a.world()), 1);
+
+        let mut app_b = App::new();
+        app_b.add_plugins((MinimalPlugins, JonmoPlugin::default()));
+        assert_eq!(cleanup::queued_message_count(app_a.world()), 1);
+        app_b.update();
+        assert!(app_a.world().get_entity(entity).is_ok());
+
+        app_a.update();
+        assert!(app_a.world().get_entity(entity).is_err());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_stale_generation_does_not_remove_replacement() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let stale = source.entity();
+        world.entity_mut(stale).despawn();
+        let replacement = world.spawn_empty().id();
+        assert_eq!(stale.index(), replacement.index());
+        assert_ne!(stale.generation(), replacement.generation());
+
+        drop(source);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(replacement).is_ok());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_unregistered_broadcaster_is_one_root() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let entity = source.entity();
+        world.entity_mut(entity).despawn();
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_registered_broadcaster_is_reaped_causally() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let data_entity = source.entity();
+        let broadcaster = source.broadcaster().clone().register(&mut world);
+        let broadcaster_entity = *broadcaster;
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        let handle: SignalHandle = broadcaster.into();
+        handle.cleanup(&mut world);
+        assert!(world.get_entity(broadcaster_entity).is_ok());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        let registered_again = source.broadcaster().clone().register(&mut world);
+        assert_eq!(registered_again, broadcaster_entity.into());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        let second_handle: SignalHandle = registered_again.into();
+        second_handle.cleanup(&mut world);
+        assert!(world.get_entity(broadcaster_entity).is_ok());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(data_entity).is_err());
+        assert!(world.get_entity(broadcaster_entity).is_err());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_missing_data_still_reaps_broadcaster() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let data_entity = source.entity();
+        let broadcaster = source.broadcaster().clone().register(&mut world);
+        let broadcaster_entity = *broadcaster;
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        let handle: SignalHandle = broadcaster.into();
+        handle.cleanup(&mut world);
+        assert!(world.get_entity(broadcaster_entity).is_ok());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        world.entity_mut(data_entity).despawn();
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        drop(source);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(broadcaster_entity).is_err());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_descriptions_have_no_owner_cycle() {
+        let mut world = World::new();
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let entity = source.entity();
+        let owner = Arc::downgrade(&source.owner);
+        let map_signal = source.signal_map();
+        let keys_signal = source.signal_vec_keys();
+        let entries_signal = source.signal_vec_entries();
+        assert_eq!(Arc::strong_count(&source.owner), 4);
+
+        drop(source);
+        drop(map_signal);
+        drop(keys_signal);
+        assert!(owner.upgrade().is_some());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        drop(entries_signal);
+        assert!(owner.upgrade().is_none());
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_registered_source_releases_owner() {
+        let mut world = World::new();
+        world.insert_resource(crate::graph::SignalGraphState::default());
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let entity = source.entity();
+        let owner = Arc::downgrade(&source.owner);
+        let handle = source
+            .signal_map()
+            .for_each(|In(_): In<Vec<MapDiff<i32, i32>>>| ())
+            .register(&mut world);
+        cleanup::drain_world_cleanup(&mut world);
+
+        drop(source);
+        assert!(owner.upgrade().is_some());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+        handle.cleanup(&mut world);
+        assert!(owner.upgrade().is_none());
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(entity).is_err());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_opaque_runner_drop_becomes_next_root() {
+        let mut world = World::new();
+        world.insert_resource(crate::graph::SignalGraphState::default());
+        let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+        let data_entity = source.entity();
+        let owner = Arc::downgrade(&source.owner);
+        let description = lazy_signal_from_system::<(), (), Option<()>, _, _>(move |In(_)| {
+            let _ = &source;
+            Some(())
+        });
+        let registered = description.clone().register(&mut world);
+        let signal_entity = *registered;
+        let handle: SignalHandle = registered.into();
+
+        handle.cleanup(&mut world);
+        assert!(world.get_entity(signal_entity).is_ok());
+        assert!(world.get_entity(data_entity).is_ok());
+        assert!(owner.upgrade().is_some());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        drop(description);
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(signal_entity).is_err());
+        assert!(owner.upgrade().is_none());
+        assert!(world.get_entity(data_entity).is_ok());
+        assert_eq!(cleanup::queued_message_count(&world), 1);
+
+        // The owner was opaque inside the runner, so its Drop used CleanupSender and
+        // linearized an external root after the first drain's boundary.
+        cleanup::drain_world_cleanup(&mut world);
+        assert!(world.get_entity(data_entity).is_err());
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+
+        cleanup::drain_world_cleanup(&mut world);
+        assert_eq!(cleanup::queued_message_count(&world), 0);
+    }
+
+    #[test]
+    fn mutable_btree_map_world_cleanup_drop_after_world_destruction_is_safe() {
+        let source = {
+            let mut world = World::new();
+            let source: MutableBTreeMap<i32, i32> = (&mut world).into();
+            drop(world);
+            source
+        };
+
+        drop(source);
     }
 
     #[test]
@@ -1870,8 +2250,6 @@ pub(crate) mod tests {
             );
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[test]
@@ -1957,8 +2335,6 @@ pub(crate) mod tests {
             assert_eq!(diffs[0], MapDiff::Clear, "Clear diff was not propagated correctly");
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[test]
@@ -2096,8 +2472,6 @@ pub(crate) mod tests {
             assert_eq!(diffs[0], MapDiff::Clear, "Clear diff is incorrect");
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     // Helper resource to capture the output from a standard Signal for assertions.
@@ -2217,8 +2591,6 @@ pub(crate) mod tests {
             );
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[derive(Resource, Default, Debug)]
@@ -2344,8 +2716,6 @@ pub(crate) mod tests {
             // --- 8. Cleanup ---
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[test]
@@ -2460,8 +2830,6 @@ pub(crate) mod tests {
             // --- 8. Cleanup ---
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[test]
@@ -2516,8 +2884,6 @@ pub(crate) mod tests {
 
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 
     #[test]
@@ -2567,7 +2933,5 @@ pub(crate) mod tests {
 
             handle.cleanup(app.world_mut());
         }
-
-        cleanup(true);
     }
 }

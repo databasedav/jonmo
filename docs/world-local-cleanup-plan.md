@@ -2,56 +2,50 @@
 
 ## Status
 
-Proposed implementation plan for issue 1: replace process-global stale cleanup queues with cleanup inboxes owned by individual Bevy `World`s.
+Issue 1 is implemented and ready to close. Signal, mutable-vec, and mutable-map producers use cleanup inboxes owned by individual Bevy `World`s; no process-global cleanup queue remains, and normal-parallel tests pass without reset helpers or forced serialization.
 
-This plan is the first step in the canonical landing order:
+Same-invocation cleanup is guaranteed for explicit move-only obligations transferred into the current `CleanupWorklist`. Every request sent through `CleanupSender` is an external root; if an arbitrary destructor emits it after the current boundary, it is processed by the next scheduled drain. This limitation preserves finite root snapshots and deferral of unrelated post-boundary work. This document remains the canonical architecture and rationale for issue 1; registration leases, collection correctness, move-first signal delivery, and later landing steps remain separate work.
 
-1. World-local cleanup.
-2. [`collection-correctness-plan.md`](collection-correctness-plan.md).
-3. [`registration-lease-plan.md`](registration-lease-plan.md).
-4. [`move-first-signal-delivery-plan.md`](move-first-signal-delivery-plan.md).
+## Historical problem statement
 
-It lands first so all later semantic and ownership tests can run reliably in parallel and subsequent lease work has one safe world-bound lifecycle inbox.
-
-## Problem statement
-
-Jonmo currently stores world-relative `Entity` identifiers in three process-global queues:
+Before this refactor, Jonmo stored world-relative `Entity` identifiers in three process-global queues:
 
 - `STALE_SIGNALS` in `src/graph.rs`
 - `STALE_MUTABLE_VECS` in `src/signal_vec.rs`
 - `STALE_MUTABLE_BTREE_MAPS` in `src/signal_map.rs`
 
-Every app installs systems that drain those same globals. The first world to run consumes all pending requests, regardless of which world owns the entities. Entity IDs are only meaningful inside their originating `World`, so this can:
+Each app installed systems that drained those same globals. The first world to run consumed all pending requests, regardless of which world owned the entities. Entity IDs are only meaningful inside their originating `World`, so this could:
 
 - Despawn unrelated entities in another world when IDs collide.
 - Consume another world's request and leak the intended target.
 - Make parallel tests interfere with one another.
 - Lose pending work when another plugin instance clears the globals.
 
-The current working tree also clears all three queues from `JonmoPlugin::build`. That must be removed; plugin construction in one app must never mutate another app's cleanup state.
+The pre-refactor plugin also cleared all three queues from `JonmoPlugin::build`, allowing plugin construction in one app to mutate another app's cleanup state.
 
 ## Decision summary
 
-Adopt one private lock-free cleanup inbox per `World`:
+The implementation uses one private lock-free cleanup inbox per `World`:
 
 1. Each world owns a `WorldCleanupQueue` resource backed by an unbounded concurrent queue.
 2. Cleanup-producing handles retain either an immediately bound sender or a deferred sender created only for `Commands` construction.
 3. `Drop` enqueues a typed request without requiring `&mut World` or acquiring a Jonmo-managed mutex.
 4. A cleanup system drains only its own world's inbox.
 5. `BoundCleanupTarget` is the sole primitive that delivers requests to a world and retains only a `Weak` inbox reference.
-6. Direct `World` constructors store `CleanupSender::Bound` and pay no `OnceLock`, pending-queue, or extra route-allocation cost.
+6. Direct `World` constructors store `CleanupSender::Bound` and pay no `OnceLock`, pending queue, handoff atomic, or extra route-allocation cost.
 7. Deferred `Commands` constructors store `CleanupSender::Deferred` and queue one non-cloneable, consuming `CleanupBinder`.
-8. Only the deferred route uses a `OnceLock`, private concurrent pending queue, and push-then-recheck protocol.
-9. Drain passes insert one queue boundary and take only requests linearized before that boundary as root work.
-10. Root handlers append causally related follow-ups to a local `CleanupWorklist`, never back into the concurrent inbox.
-11. The local worklist runs to exhaustion in the same drain invocation with no retry-wave constant.
-12. Every local append consumes or disarms a finite cleanup ownership obligation; handlers never create new cleanup ownership.
-13. Cleanup requests are idempotent and order-independent; queue arrival order is never semantic ownership state.
-14. Mutable vec/map owners privately retain the exact full generational entity and broadcaster ownership created for that source.
-15. Duplicate, stale, late, and post-world-destruction requests are harmless.
-16. No process-global map from `WorldId` to queue is introduced.
-17. Cleanup remains deferred until a scheduled drain pass, but causal follow-ups normally settle in that same invocation.
-18. Strict lock-freedom is claimed only on targets with suitable native atomics; atomic-emulation targets may internally use critical sections.
+8. Only the deferred route uses a `OnceLock`, private concurrent pending queue, and one `AtomicUsize` handoff word shared by sender entry, sender exit, and binder publication.
+9. The handoff word's top bit is a monotonic `BOUND` flag; its remaining bits are a checked in-flight sender count. This single atomic modification order closes the send-versus-bind visibility race.
+10. Drain passes insert one queue boundary and take only requests linearized before that boundary as root work.
+11. Root handlers transfer explicit move-only obligations directly into a local `CleanupWorklist`; they do not promote inbox sends based on logical causality.
+12. The local worklist runs to exhaustion in the same drain invocation with no retry-wave constant.
+13. Every local append consumes or disarms a finite cleanup ownership obligation; handlers never create new cleanup ownership.
+14. Cleanup requests are idempotent and order-independent; queue arrival order is never semantic ownership state.
+15. Mutable vec/map owners privately retain the exact full generational entity and broadcaster ownership created for that source.
+16. Duplicate, stale, late, and post-world-destruction requests are harmless.
+17. No process-global map from `WorldId` to queue is introduced.
+18. Selected roots and explicit move-only obligations transferred into their `CleanupWorklist` settle in that invocation. Every `CleanupSender` send remains an external root selected only by a boundary that follows its linearization.
+19. Strict lock-freedom is claimed only on targets with suitable native atomics; atomic-emulation targets may internally use critical sections.
 
 ## Goals
 
@@ -64,8 +58,8 @@ Adopt one private lock-free cleanup inbox per `World`:
 - Provide a general typed inbox that issue 2 can later use for registration-definition cleanup.
 - Keep cleanup enqueue and root snapshotting free of Jonmo-managed mutexes.
 - Never mutate a Bevy world while collecting a root snapshot.
-- Distinguish external/concurrent root requests from explicit same-invocation causal follow-ups.
-- Settle finite causal cleanup chains without an arbitrary retry or wave limit.
+- Classify every `CleanupSender` send as an external root, irrespective of call context or logical cause.
+- Settle finite chains of explicitly represented move-only `CleanupWorklist` obligations without an arbitrary retry or wave limit.
 
 ## Non-goals
 
@@ -95,30 +89,32 @@ This plan does not:
 10. Sending after world destruction is a safe no-op.
 11. Plugin initialization never replaces, clears, or invalidates an existing inbox.
 12. Enqueue, deferred binding, and root snapshot collection acquire no Jonmo-managed mutex.
-13. A drain boundary selects a finite root prefix: requests linearized after it remain in the inbox for a later invocation.
+13. Every `CleanupSender` send enters the external root stream. A drain boundary selects a finite root prefix; sends linearized after it remain in the inbox for a later invocation.
 14. No cleanup request handler runs until the complete root snapshot has been removed from the inbox.
 15. Concurrent deferred send/bind/flush operations lose and duplicate no requests.
-16. Cleanup requests are idempotent and semantically order-independent; concurrent pending flushes may reorder root requests.
-17. Handlers publish causal follow-ups only to the invocation-local `CleanupWorklist`.
-18. Every local follow-up is derived by consuming/disarming an owned cleanup obligation, releasing an acquisition, or transitioning an existing target toward removal.
-19. No local handler creates a new cleanup owner, reacquires a released obligation, or republishes the same obligation.
-20. Duplicate, missing, and ineligible targets synthesize no new obligation; independently owned candidate tokens already carried by a request are still transferred exactly once.
-21. Each mutable vec/map owner stores exactly the full generational entity and broadcaster created by its private constructor.
-22. Mutable root requests can only be constructed through those private owner paths and target the stored entity unchanged.
-23. Signal cleanup acts only on valid signal entities that satisfy existing eligibility checks.
-24. A lazy signal registered in one world cannot silently access an entity with a colliding ID in another world.
-25. The request enum and worklist can later carry owned registration-definition candidate batches without another transport redesign.
-26. Queue closure is not used during ordinary operation; an enqueue failure is an internal invariant violation, not permission to discard live-world cleanup.
+16. Every deferred sender entry, sender exit, and binder publication participates in one `AtomicUsize` modification order.
+17. The handoff `BOUND` bit is monotonic and checked in-flight-count updates cannot carry into, borrow from, clear, or otherwise alter it.
+18. Cleanup requests are idempotent and semantically order-independent; concurrent pending flushes may reorder root requests.
+19. Same-invocation follow-up work enters `CleanupWorklist` only through typed methods that consume an explicit move-only obligation.
+20. A local obligation must already be carried by a selected root or be explicitly moved from a known token- or lease-owning world component. ECS mutation, graph reachability, destructor execution, or logical causality alone cannot synthesize local work.
+21. No local handler creates a new cleanup owner, reacquires a released obligation, or republishes the same obligation.
+22. Duplicate, missing, and ineligible targets synthesize no new obligation; independently owned candidate tokens already carried by a request are still transferred exactly once.
+23. Each mutable vec/map owner stores exactly the full generational entity and broadcaster created by its private constructor.
+24. Mutable root requests can only be constructed through those private owner paths and target the stored entity unchanged.
+25. Signal cleanup acts only on valid signal entities that satisfy existing eligibility checks.
+26. A lazy signal registered in one world cannot silently access an entity with a colliding ID in another world.
+27. The request enum and worklist can later carry owned registration-definition candidate batches without another transport redesign.
+28. Queue closure is not used during ordinary operation; an enqueue failure is an internal invariant violation, not permission to discard live-world cleanup.
 
-## Proposed module
+## Implemented module
 
-Add a private module:
+The private module is:
 
 ```text
 src/cleanup.rs
 ```
 
-Declare it privately from `src/lib.rs`:
+It is declared privately from `src/lib.rs`:
 
 ```rust
 mod cleanup;
@@ -126,10 +122,12 @@ mod cleanup;
 
 ### Cleanup requests
 
-Use a typed request enum rather than boxed arbitrary world closures:
+The implementation uses a typed request enum rather than boxed arbitrary world closures:
 
 ```rust
-pub(crate) struct ReleasedSignalCandidate(SignalSystem); // deliberately non-Clone
+// Defined beside SignalSystem in graph.rs. Its production constructor is private
+// to graph.rs, and the token deliberately implements neither Clone nor Copy.
+pub(crate) struct ReleasedSignalCandidate(SignalSystem);
 
 enum CleanupRequest {
     StaleSignal(ReleasedSignalCandidate),
@@ -147,7 +145,7 @@ enum CleanupRequest {
 }
 ```
 
-Mutable root requests aggregate the exact backing entity with any signal candidate produced by explicitly releasing that source's broadcaster. `ReleasedSignalCandidate` is a private move-only obligation token: identity may be copied out for validation, but the token itself cannot be cloned or appended twice through safe APIs. This preserves both causality and the local termination measure across the no-`World` boundary rather than relying on the broadcaster's field destructor to enqueue a second independent root.
+Mutable root requests aggregate the exact backing entity with any signal candidate produced by explicitly releasing that source's broadcaster. `ReleasedSignalCandidate` is a crate-visible, move-only obligation token defined beside `SignalSystem` in `src/graph.rs`; its wrapped identity and production constructor remain private to that module. Other production modules may receive, inspect through a read-only identity accessor, and consume a token, but cannot fabricate one from a copied `SignalSystem`. A `#[cfg(test)]` factory supports infrastructure tests without broadening production authority. This preserves both causality and the local termination measure across the no-`World` boundary rather than relying on the broadcaster's field destructor to enqueue a second independent root.
 
 Typed requests provide:
 
@@ -159,7 +157,7 @@ Typed requests provide:
 
 ### Local causal worklist
 
-The concurrent inbox is only for root work produced without `&mut World`. Once a root snapshot is collected, handlers use a private local worklist:
+The concurrent inbox is the destination for every `CleanupSender` send. Once a bounded root snapshot is collected, only explicit move-only obligations transferred through typed `CleanupWorklist` methods may participate in the current invocation:
 
 ```rust
 enum CleanupAction {
@@ -198,17 +196,17 @@ impl CleanupWorklist {
 
 The worklist is phased rather than a naïve FIFO:
 
-1. Drain ownership-release actions, including nested dynamic leases added by issue 2.
+1. Drain explicit move-only release actions, including future leases moved from known lease-owning components by issue 2.
 2. Accumulate/deduplicate the move-only node/definition candidate obligations produced by those releases.
 3. Only after the release-action queue is empty, reap candidates in deterministic reverse-topological order.
-4. If explicit component draining during reaping discovers another owned release action, return to the release phase before continuing candidate reaping.
+4. If reaping explicitly takes a known obligation-owning component and moves another release obligation into the worklist, return to the release phase before continuing candidate reaping.
 5. Stop when both action and candidate stores are empty.
 
-This ordering ensures an outer dynamic node is not tested for reaping while a nested inner lease still owns an edge into it. `CleanupWorklist` is not `Clone`, is never shared with producer threads, and has no general public `push` surface. Typed methods keep local action/candidate creation auditable. External senders cannot access it, so unrelated requests arriving during dispatch remain in the world inbox behind the previously consumed root boundary.
+This ordering prevents premature reaping only for ownership explicitly represented in the worklist or explicitly moved from known components. It does not inspect arbitrary values captured by `SystemRunner`, Bevy systems, callbacks, or user closures. Any `CleanupSender` send caused by dropping such a capture remains an external root behind the current boundary. `CleanupWorklist` is not `Clone`, is never shared with producer threads, and has no general public `push` surface; typed methods keep local obligation transfer auditable.
 
 ### Queue dependency and portability boundary
 
-Use a maintained unbounded concurrent queue rather than implementing memory reclamation or lock-free linked storage inside Jonmo. The initial candidate is `concurrent-queue` with default features disabled:
+The implementation uses the maintained `concurrent-queue` unbounded queue with default features disabled rather than implementing memory reclamation or lock-free linked storage inside Jonmo:
 
 ```toml
 concurrent-queue = { version = "2.5", default-features = false }
@@ -221,7 +219,7 @@ Reasons:
 - Its optional `std` and `portable-atomic` integration can be mapped to Jonmo's feature matrix after target validation.
 - Jonmo keeps `unsafe_code = "deny"`; the queue algorithm remains in an audited dependency rather than new local unsafe code.
 
-Before landing, verify the exact feature wiring for Jonmo's supported native-atomic, wasm, and `critical-section` targets. `crossbeam-queue::SegQueue` is an acceptable alternative only if its pointer-atomic target restrictions cover the same supported matrix. Do not implement an ad hoc atomic linked list.
+Final validation records the exact feature wiring for Jonmo's supported native-atomic, wasm, and `critical-section` targets. An ad hoc atomic linked list remains outside the design.
 
 “Lock-free” in this plan means Jonmo's enqueue and drain protocol acquires no explicit mutex and the queue uses lock-free atomics on targets that provide the required native operations. When atomics are emulated through `portable-atomic` or a target critical-section backend, the platform may internally mask interrupts or serialize operations; documentation must not claim universal hardware lock-freedom.
 
@@ -283,6 +281,7 @@ struct BoundCleanupTarget {
 struct DeferredCleanupRoute {
     target: OnceLock<BoundCleanupTarget>,
     pending: ConcurrentQueue<CleanupRequest>,
+    handoff: AtomicUsize,
 }
 
 pub(crate) struct CleanupBinder {
@@ -322,7 +321,7 @@ impl CleanupBinder {
 }
 ```
 
-`bevy_platform::sync::OnceLock` and the private pending queue exist only inside `DeferredCleanupRoute`. Directly bound senders do not allocate a deferred route and do not carry an unused concurrent queue.
+`bevy_platform::sync::OnceLock`, the private pending queue, and the `AtomicUsize` handoff word exist only inside `DeferredCleanupRoute`. Directly bound senders do not allocate a deferred route and do not carry unused deferred synchronization state.
 
 #### `BoundCleanupTarget`: the single delivery primitive
 
@@ -375,12 +374,12 @@ The sender belongs to the returned mutable owner. The unique binder belongs to t
 `CleanupBinder::bind(self, world)`:
 
 1. Obtains `BoundCleanupTarget::new(world)`.
-2. Publishes it into the deferred route's `OnceLock`.
-3. Treats an already-initialized target as an internal invariant violation, because producing or applying the unique binder twice should be impossible.
-4. Flushes all currently pending requests through `BoundCleanupTarget::send`.
+2. Initializes the deferred route's `OnceLock`; an already-initialized target is an internal invariant violation because producing or applying the unique binder twice should be impossible.
+3. Publishes the monotonic `BOUND` bit with an `AcqRel` `fetch_or` on the shared handoff word and verifies that the previous state was not already bound.
+4. Flushes pending requests through `BoundCleanupTarget::send`.
 5. Consumes and drops the binder.
 
-No request is moved as part of destination publication. Publishing and pending-queue flushing are separate concurrent operations, avoiding a compound state transition that would require a mutex.
+The target is initialized before the release portion of the handoff publication, so a sender that acquires a handoff state containing `BOUND` may safely read it. No request is moved as part of destination publication. Publication and pending-queue flushing remain separate concurrent operations, but their visibility is coordinated through the single handoff atomic rather than inferred from independent `OnceLock` and queue observations.
 
 #### Shared send dispatch
 
@@ -397,21 +396,34 @@ fn send(&self, request: CleanupRequest) {
 
 The enum branch is paid only when cleanup is requested, normally on final owner drop. It does not create two world-delivery implementations: the deferred route only stages requests until it can delegate to `BoundCleanupTarget::send`.
 
-#### Deferred push-then-recheck protocol
+#### Deferred single-atomic handoff protocol
+
+The handoff word is partitioned as follows:
+
+```rust
+const HANDOFF_BOUND: usize = 1usize << (usize::BITS - 1);
+const HANDOFF_IN_FLIGHT_MASK: usize = HANDOFF_BOUND - 1;
+```
+
+The top bit is a sticky `BOUND` flag. The lower bits count sends that have entered the deferred route but have not yet left it. All count changes and binder publication are `AcqRel` read-modify-write operations on this one atomic, creating one modification order for the handoff decision.
 
 `DeferredCleanupRoute::send` uses this algorithm:
 
-1. If `target.get()` already returns a destination, delegate directly to `BoundCleanupTarget::send`.
-2. Otherwise, push the request into `pending`.
-3. Recheck `target` after the push.
-4. If binding became visible, help flush pending requests through the published bound target.
-5. If the target is still unset, return; the unique binder performs the eventual flush.
+1. Enter with a checked `fetch_update` that increments only the lower in-flight count and returns the prior handoff state.
+2. If that prior state already contains `BOUND`, acquire the initialized target, deliver directly through `BoundCleanupTarget::send`, and leave with a checked decrement.
+3. Otherwise, push the request into `pending`.
+4. Leave with a checked decrement on the same handoff atomic.
+5. If the state observed while leaving contains sticky `BOUND`, acquire the initialized target and help flush pending requests. Otherwise, the unique binder will perform the eventual flush.
 
-The second target check closes the only apparent lost-request race:
+`CleanupBinder::bind` initializes the target, publishes `BOUND` with `fetch_or(AcqRel)`, then flushes. The shared atomic closes the race that independent `OnceLock::get()` and queue operations cannot close by themselves:
 
-- If the pending push linearizes before binding's flush, the binder or a concurrent helper pops it.
-- If binding's flush finishes before the pending push, the sender's second check observes the target and performs another flush.
-- If they overlap, concurrent pop operations remove each pending request at most once.
+- **Sender exit precedes binder publication in the handoff modification order.** The pending push is sequenced before the release portion of the sender's exit RMW. The binder's later acquiring RMW observes that release directly or through intervening AcqRel RMWs, then flushes after publication. The completed pre-bind request is therefore visible to a binder/helper flush.
+- **Binder publication precedes sender exit.** The bound bit is never cleared, so the sender's exit RMW observes a state containing `BOUND`. Its acquire side observes target initialization and it flushes after its pending push.
+- **Sender enters after binder publication.** Its entry RMW observes `BOUND` with acquire semantics, reads the initialized target, and sends directly without staging.
+- **Sender pauses after entry but before its pending push.** The binder may publish and flush an empty queue, but the resumed sender pushes before leaving; its exit observes sticky `BOUND` and flushes the newly staged request.
+- **Several senders and flushers overlap.** Each request is either sent directly once or pushed once. Each successful concurrent queue pop transfers one staged request to only one flusher, preserving the exact multiset even though delivery order may change.
+
+Checked `fetch_update` operations reject lower-bit overflow and underflow before arithmetic. Increment cannot carry into `BOUND`; decrement cannot borrow from or clear it; binder `fetch_or` preserves all in-flight bits. Invalid count states are invariant failures and leave the handoff word unchanged.
 
 `flush_pending` repeatedly pops pending requests and forwards them through the published `BoundCleanupTarget` until the queue is observed empty. The binder and senders may call it concurrently. Cleanup requests must therefore be order-independent: one flusher can pop request A, pause, and enqueue it after another flusher has forwarded request B. Exact multiset preservation is required; preservation of concurrent producer order is not.
 
@@ -525,7 +537,7 @@ Root snapshot algorithm:
 2. Push one private `CleanupMessage::DrainBoundary` into that inbox.
 3. Pop messages into a root `Vec<CleanupRequest>` until that boundary is observed.
 4. Stop touching the concurrent inbox.
-5. Leave messages linearized after the boundary, including unrelated concurrent drops, for a later drain invocation.
+5. Leave every request linearized after the boundary—including `CleanupSender` sends triggered by destructors while dispatching or reaping current roots—for a later drain invocation.
 
 The queue must provide linearizable FIFO behavior. With one exclusive world consumer, the boundary splits the external root stream into a finite current prefix and later suffix even while producers continue sending.
 
@@ -548,31 +560,33 @@ loop {
 }
 ```
 
-Handlers never publish causal follow-ups through `CleanupSender`; they append release actions or candidate obligations through typed `CleanupWorklist` methods. Candidate reaping starts only after the current release-action queue reaches a fixed point.
+Selected roots are dispatched in the current invocation. Beyond root dispatch, same-invocation processing applies only to move-only obligations explicitly transferred into `CleanupWorklist`; handlers that own such obligations append them directly through typed worklist methods. Candidate reaping starts only after the current explicit release-action queue reaches a fixed point.
 
-- Cleanup generated from the consumed ownership represented by a root settles in the same invocation.
-- Unrelated external drops during dispatch remain in the concurrent inbox.
-- No retry wave or arbitrary maximum iteration count is required.
+Any `CleanupSender` call—including one synchronously triggered by dropping a field, component, `SystemRunner`, or opaque capture during dispatch—is a new external root. If it linearizes after the current boundary, it waits for a later invocation. No generic transitive single-drain guarantee is made for arbitrary Rust destructor graphs.
+
+- The explicit local worklist runs to exhaustion without a retry wave or arbitrary maximum iteration count.
+- Every post-boundary external root remains in the concurrent inbox until a later drain.
 - No queue operation encloses ECS mutation.
 
 The boundary itself never reaches a request handler. If root extraction panics unexpectedly, no ECS mutation has begun; implementation and tests should keep message extraction non-panicking.
 
+### Opaque destructor boundary
+
+Safe Rust provides no generic introspection of values captured by a type-erased `SystemRunner`, Bevy system, callback, or user closure. Cleanup-producing ownership hidden in such a capture is therefore not an explicit local obligation. If reaping drops the capture and its destructor calls `CleanupSender`, that request is an external root. A send linearized after the current boundary is processed by the next scheduled drain, which may be later in the same frame when multiple Jonmo schedules are configured.
+
+The permanent `mutable_btree_map_world_cleanup_opaque_runner_drop_becomes_next_root` regression records this contract: the first drain reaps the stale signal and queues the opaque runner's mutable-map root behind the consumed boundary; the second drain removes the map; a third drain is idempotent. This preserves finite root snapshots and avoids capturing unrelated concurrent work.
+
 ### Termination invariant
 
-The local worklist is finite by ownership consumption, not by a retry constant. Every appended follow-up must be justified by one of these monotonic transitions:
+The local worklist is finite over explicitly represented move-only obligations, not over the arbitrary Rust destructor graph. Every local append must consume an obligation already carried by a selected root or explicitly moved from a known obligation-owning component, such as a `ReleasedSignalCandidate`, future lease, or non-cloneable candidate batch.
 
-- An armed cleanup-producing description/reference is explicitly released exactly once.
-- A registration/edge acquisition is released exactly once.
-- An existing entity or definition transitions toward removal exactly once.
-- A finite owned candidate batch is transferred into the worklist.
-
-Handlers may not construct new cleanup owners, reacquire released obligations, or synthesize follow-ups not backed by a consumed payload/obligation. A missing entity may still transfer an independently owned candidate carried by its root request, but may not derive additional entity cleanup. Define a test-only accounting snapshot for armed description references, active acquisitions, existing cleanup targets, and queued local requests; representative deep chains must monotonically consume that finite potential and terminate with an empty worklist.
+ECS mutation, entity removal, graph traversal, and destructor execution do not themselves authorize a local append. Drops from opaque captures may send external roots, but those roots are outside the current worklist's termination measure. Handlers may not construct new cleanup owners, reacquire released obligations, or synthesize work not backed by a consumed payload. Test accounting covers explicit local obligations and proves that they are consumed exactly once.
 
 This is a private-code invariant rather than protection against arbitrary user-supplied requests: `CleanupRequest` and unrestricted worklist insertion remain inaccessible outside the cleanup implementation and typed cooperating modules.
 
 ## Mutable ownership objects and explicit broadcaster release
 
-Replace bespoke atomic final-owner detection for mutable collections with one private owner allocation per source. Move broadcaster ownership out of the generic ECS data component and into that authoritative source owner so final drop can package the causal signal candidate into one root request.
+The implementation replaces bespoke atomic final-owner detection for mutable collections with one private owner allocation per source. Broadcaster ownership lives in that authoritative source owner so final drop packages the explicitly released signal candidate into one aggregate external root.
 
 ### Mutable vec
 
@@ -615,9 +629,9 @@ This removes manually synchronized source reference counters, preserves public h
 
 ## Lazy signal world affinity and explicit release
 
-Issue 1 must stop one registered lazy identity from silently reusing its entity in another world and must separate ownership release from where the resulting candidate is delivered.
+Issue 1 prevents one registered lazy identity from silently reusing its entity in another world and separates ownership release from where the resulting candidate is delivered.
 
-As temporary issue-1 protection, until issue 2 makes `SignalSystem` itself world-aware, the registered lazy state should retain:
+As temporary issue-1 protection, until issue 2 makes `SignalSystem` itself world-aware, the registered lazy state retains:
 
 - The originating `WorldId` or cleanup-inbox identity.
 - The registered `SignalSystem`.
@@ -629,7 +643,7 @@ On subsequent registration:
 2. Reject a mismatch before entity lookup or count mutation.
 3. Never interpret an equal `Entity` from another world as the same signal.
 
-Add one centralized exactly-once release primitive inside `LazySignal`. Each handle is armed when created/cloned and is disarmed only by an explicit consuming release method:
+`LazySignal` has one centralized exactly-once release primitive. Each handle is armed when created/cloned and is disarmed only by an explicit consuming release method:
 
 ```rust
 pub(crate) struct LazySignal {
@@ -649,19 +663,19 @@ Both explicit methods perform the same reference/liveness decrement as ordinary 
 - `release_reaped_holder` is used only when the corresponding definition is already definitively being reaped; it decrements holder ownership without generating a redundant candidate for the entity currently being removed.
 - Ordinary armed `Drop` remains the no-`World` fallback: it releases once and sends any candidate through the stored bound cleanup sender as a new root.
 
-Before despawning a stale signal entity under issue 1's temporary holder model, remove its `LazySignalHolder` and call `release_reaped_holder`; do not let that holder's field destructor enqueue a duplicate root. Audit all entities despawned by cleanup so no armed cleanup-producing field is implicitly dropped when it should be released into the current causal transaction.
+Before despawning a stale signal entity under issue 1's temporary holder model, cleanup explicitly takes its known `LazySignalHolder` and calls `release_reaped_holder`; that known holder does not enqueue a duplicate root. This does not imply introspection of `SystemRunner` or user-closure captures: ordinary drops from opaque captures send external roots through `CleanupSender`.
 
 Supporting independent materialization of one lazy definition into several worlds requires a per-world lazy cache and is out of scope. Issue 2 replaces the temporary affinity and holder/reference-threshold details with world-aware `SignalSystem`, explicit `live_descriptions`, weak definition metadata, and candidate batches; the exactly-once explicit-release/worklist boundary remains.
 
-## Plugin integration
+## Current plugin integration
 
-Update `JonmoPlugin::build`:
+`JonmoPlugin::build`:
 
-1. Delete all `clear_stale_*` calls.
-2. Call `app.init_resource::<WorldCleanupQueue>()` rather than inserting/replacing the resource.
-3. Replace the three plural stale-drain systems with `drain_world_cleanup`.
-4. Preserve current ordering after signal graph processing.
-5. If multiple schedules are configured, registering the same exclusive drain function in each schedule is acceptable only after validating Bevy's system-instance and ordering behavior.
+1. Contains no `clear_stale_*` call.
+2. Calls `app.init_resource::<WorldCleanupQueue>()` rather than inserting/replacing the resource.
+3. Uses `drain_world_cleanup` instead of plural stale-drain systems.
+4. Preserves ordering after signal graph processing.
+5. Registers the exclusive drain function in each configured schedule; post-boundary roots wait for the next scheduled drain invocation.
 
 On-demand initialization remains required because mutable sources may be created before `JonmoPlugin` is added. Plugin initialization must preserve an already initialized queue.
 
@@ -714,7 +728,9 @@ On-demand initialization remains required because mutable sources may be created
 - Remove all manual global queue reset helpers/imports.
 - Remove `--test-threads=1` only after the parallel suite is reliable.
 
-## Implementation phases
+## Historical implementation phases
+
+The following records the completed issue-1 landing sequence.
 
 ### Phase 0: Characterize failures
 
@@ -739,9 +755,9 @@ Implement:
 - `BoundCleanupTarget` as the sole inbox-delivery primitive
 - `CleanupSender::{Bound, Deferred}` without deferred storage on the direct path
 - Non-cloneable, consuming `CleanupBinder`
-- Deferred `OnceLock`, concurrent pending queue, and push-then-recheck race handling
+- Deferred `OnceLock`, concurrent pending queue, and single-`AtomicUsize` bound-bit/in-flight-count handoff
 - Boundary-delimited root snapshotting
-- Invocation-local `CleanupWorklist` and typed causal append methods
+- Invocation-local `CleanupWorklist` and typed explicit-obligation transfer methods
 - Singular idempotent, order-independent signal/vec/map request handlers that accept the worklist
 - Test-only monotonic cleanup-obligation accounting
 - Focused module tests
@@ -757,8 +773,8 @@ Acceptance:
 - Sending after world destruction is safe.
 - Concurrent send/bind/flush loses and duplicates nothing.
 - A drain boundary creates a finite root snapshot and no queue operation encloses dispatch.
-- External roots arriving after the boundary remain queued while explicit local follow-ups settle in the same invocation.
-- The local worklist terminates by monotonic obligation consumption without a retry constant.
+- Every `CleanupSender` send linearized after the boundary remains queued, while explicit move-only obligations already transferred into the local worklist settle in the same invocation.
+- The local worklist terminates by monotonic consumption of those explicit obligations without a retry constant.
 - Cleanup enqueue and root snapshot collection acquire no Jonmo-managed mutex.
 
 ### Phase 2: Migrate signals atomically
@@ -767,7 +783,7 @@ Acceptance:
 - Initialize the cleanup resource on demand even when signals register before the plugin.
 - Route ordinary no-`World` stale signal roots through that world's sender.
 - Add armed exactly-once release, `into_stale_candidate`, and reaped-holder disarm paths.
-- Make stale signal handlers transfer causal candidates through `CleanupWorklist` and explicitly release holders before despawn.
+- Make stale signal handlers transfer explicitly owned candidates through `CleanupWorklist` and explicitly release known holders before despawn.
 - Delete the signal global queue and clear function.
 - Remove the legacy signal drain/clear references from plugin wiring in the same commit.
 - Remove signal-specific test reset imports/helpers in the same commit.
@@ -796,7 +812,7 @@ Acceptance:
 - Direct and deferred handles route only to their world.
 - Immediate drop before deferred binding does not leak.
 - Every constructor test proves final drop despawns its own stored entity and leaves neighboring entities intact.
-- Broadcaster release is aggregated into the mutable root and processed causally in the same drain invocation.
+- Broadcaster release is aggregated into the mutable root and its explicit candidate is transferred into the worklist for same-invocation processing.
 - No mutable-data field destructor emits a follow-up inbox root.
 
 ### Phase 4: Migrate mutable map atomically
@@ -829,18 +845,21 @@ Acceptance:
 - `CleanupBinder` is non-cloneable and consuming; add a compile-fail assertion if the project's test tooling supports one.
 - A deferred sender buffers one and several requests before binding.
 - Binding flushes buffered requests exactly once through the bound-target primitive.
-- Send before bind, send after bind, and all instrumented interleavings around publication/push/recheck lose and duplicate nothing.
+- Send before bind, send after bind, and instrumented pauses after sender entry and after pending push lose and duplicate nothing.
+- Intermediate handoff-state assertions cover unbound in-flight senders, `BOUND` with in-flight senders, and the final bound/zero-in-flight state.
 - Several concurrent helper flushers deliver each uniquely numbered request exactly once; delivery order is not asserted.
+- A completed multi-sender pre-bind batch is delivered as the exact produced multiset after binding.
+- Checked in-flight overflow/underflow tests prove invalid updates leave the handoff word, including `BOUND`, unchanged.
 - Deterministic barrier-controlled std tests cover send racing with bind and send racing with resource destruction.
 - A stress test repeats concurrent send/bind batches and compares the delivered request multiset with the produced multiset.
 - A test-only inbox weak reference no longer upgrades after world/resource destruction.
 - An old bound target cannot send to a replacement inbox allocation.
 - A send strictly after destruction is a no-op; a racing send may only reach an orphan inbox.
 - A drain boundary selects only the root prefix present before the boundary and leaves the external suffix for the next invocation.
-- Root handlers append explicit causal follow-ups locally; unrelated concurrent roots remain in the inbox.
-- A deep finite causal chain drains to an empty worklist in one invocation with no retry constant.
+- Every `CleanupSender` send after the boundary, including destructor-generated sends during dispatch, remains in the external suffix.
+- A deep finite chain of explicitly transferred move-only obligations drains to an empty worklist in one invocation with no retry constant.
 - Duplicate, missing, and ineligible targets synthesize no new obligations; pre-owned candidate tokens are transferred exactly once.
-- Test-only obligation accounting decreases monotonically across representative mutable/signal chains.
+- Test-only obligation accounting decreases monotonically across representative explicit local token and candidate chains.
 - An intentionally invalid test handler that republishes an obligation is rejected by private API structure or detected by debug/test accounting.
 - The live inbox and deferred pending queues are never closed during ordinary operation.
 
@@ -876,7 +895,8 @@ For each collection type and every constructor family (`From<&mut World>`, `From
 - Mutable data no longer owns the broadcaster; owner access preserves source behavior and introduces no `Arc` cycle.
 - Final source-owner drop releases its broadcaster once and embeds the candidate in the aggregate root.
 - Processing that root transfers the candidate to the local worklist and settles eligible signal cleanup in the same invocation.
-- An unrelated concurrent root arriving during that causal chain remains in the inbox for the next invocation.
+- Any `CleanupSender` send occurring during that explicit worklist chain—including one logically related through an opaque destructor capture—remains in the inbox for the next scheduled drain.
+- The opaque-runner regression proves that candidate reaping may queue a captured final owner's root behind the first boundary, the second drain settles it, and a third drain is idempotent.
 - Multiple configured schedules share the same world inbox and obey documented root-snapshot timing.
 
 ### Feature matrix
@@ -900,21 +920,21 @@ Runtime concurrency tests run under `std`; compile-only no_std checks do not pro
 - `World::get_resource_or_init`/`init_resource` availability in Bevy 0.18.
 - `Commands::queue` ordering after `commands.spawn`.
 - Deferred application boundaries relative to the cleanup drain system.
-- `bevy_platform::sync::{Arc, Weak, OnceLock}` across `std`, `no_std`, critical-section, and wasm.
+- `bevy_platform::sync::{Arc, Weak, OnceLock}` and `bevy_platform::sync::atomic::AtomicUsize` across `std`, `no_std`, critical-section, and wasm.
 - The selected concurrent queue's FIFO linearization, `no_std`, allocator, native-atomic, wasm, and portable-atomic behavior.
 - Required feature unification between the queue's atomic backend and Bevy's `critical-section` configuration.
 - Resource teardown ordering.
 - Behavior when a command queue is dropped without application.
 - Registering one exclusive drain function in multiple configured schedules.
 
-Do not promise that a root dropped after the current boundary cleans in the same frame. Once a root is selected, explicitly represented finite causal follow-ups should settle in that drain invocation; deferred command ordering still requires tests.
+Every `CleanupSender` send is an external root. A send linearized after the current boundary is not guaranteed to clean in the same frame or invocation, even when current cleanup triggered it. Same-invocation processing is guaranteed only for explicit move-only obligations transferred into the current `CleanupWorklist`; deferred command ordering remains a separate concern.
 
 ## no_std and drop-context constraints
 
 The initial implementation is compatible with allocator-backed no_std task contexts, not arbitrary interrupt/ISR drop contexts:
 
 - An unbounded concurrent queue may allocate a new segment while enqueueing.
-- `Arc`/`Weak`, `OnceLock`, and queue operations require atomic support or a configured atomic-emulation backend.
+- `Arc`/`Weak`, `OnceLock`, the `AtomicUsize` handoff, and queue operations require atomic support or a configured atomic-emulation backend.
 - On targets without suitable native atomics, `portable-atomic` or the platform backend may internally use critical sections; such execution is not strictly lock-free at the hardware level.
 - Queue algorithms may spin transiently under contention even though Jonmo acquires no explicit mutex.
 - Allocator use and request-payload destruction remain unsuitable for arbitrary interrupt context.
@@ -929,7 +949,7 @@ Jonmo's drop paths must not panic on queue errors. Failed sends to a dead weak i
 
 Risk: send-before-bind races can strand requests in the private pending queue after the binder has already flushed it.
 
-Mitigation: isolate this state machine in `DeferredCleanupRoute`; publish the destination with `OnceLock`; every pre-bind send pushes before rechecking the target; both the unique binder and deferred senders help flush; add deterministic interleaving and repeated multiset stress tests.
+Mitigation: isolate this state machine in `DeferredCleanupRoute`; initialize the destination with `OnceLock`, but publish readiness through the same `AtomicUsize` used for checked sender entry/exit; make `BOUND` sticky; have the binder and senders that leave after publication help flush; add deterministic state-gap, checked-count, and repeated multiset stress tests. Do not rely on a second `OnceLock::get()` to order an independently synchronized pending-queue push.
 
 ### Divergent bound/deferred behavior
 
@@ -969,9 +989,9 @@ Mitigation: keep owner fields and request construction private; construct each o
 
 ### Cleanup timing and causal classification
 
-Risk: a cleanup-producing value is dropped implicitly during a handler instead of being explicitly released, so its causally related request goes to the concurrent inbox and waits for a later invocation.
+Risk: code assumes logical causality causes destructor-generated cleanup to join the current invocation.
 
-Mitigation: audit every cleanup-time despawn/removal for armed owners; extract/disarm known holders before despawn; aggregate mutable broadcaster release into the root; add tests asserting the inbox does not grow during representative local causal chains. Truly external requests linearized after the root boundary intentionally wait for a later invocation.
+Mitigation: define the boundary structurally. Every `CleanupSender` send is an external root. Known cleanup-owning fields may be explicitly taken, disarmed, and moved into `CleanupWorklist` when stronger same-invocation timing is required, but opaque captures are not introspected. Their ordinary drops remain safe external roots and may require the next scheduled drain.
 
 ### Local worklist termination
 
@@ -993,7 +1013,7 @@ Mitigation: keep root routing and `CleanupWorklist` generic; preserve temporary 
 
 ## Handoff to registration leases
 
-After this plan lands, issue 2 replaces the temporary `StaleSignal` threshold/holder path with batched `LazyDefinitionCandidates(Arc<[SignalSystem]>)` work. A final description drop outside world access sends that batch as one world-local root. Candidate batches discovered while releasing leases or reaping definitions under `&mut World` append directly to the current local worklist. One ownership transition must not emit both old and new variants. Issue 2 should reuse:
+Issue 2 replaces the temporary `StaleSignal` threshold/holder path with batched `LazyDefinitionCandidates(Arc<[SignalSystem]>)` work. A final description drop outside world access sends that batch as one world-local root. Candidate batches explicitly owned while releasing leases or reaping known definition components under `&mut World` append directly to the current local worklist. One ownership transition must not emit both old and new variants. Issue 2 should reuse:
 
 - `WorldCleanupQueue`
 - `CleanupSender`
@@ -1004,7 +1024,7 @@ After this plan lands, issue 2 replaces the temporary `StaleSignal` threshold/ho
 - Monotonic local obligation consumption
 - Dead-world no-op behavior
 
-Issue 2 must not introduce another lifecycle queue or route causal lease/reaping follow-ups back through the concurrent inbox. Automatic dropped-registration-lease release remains explicitly deferred unless a later plan defines an owned exact-plan root and exactly-once semantics.
+Registration leases cover acquisitions represented in registration blueprints and leases stored in known world components. They do not enumerate or extract arbitrary values captured by `SystemRunner`, Bevy systems, callbacks, or user closures. Explicit lease, slot, or candidate obligations already available under `&mut World` must move directly into the active `CleanupWorklist`; any request sent through `CleanupSender`, including one caused by reaping an opaque capture, remains an external root. Issue 2 must not introduce another lifecycle queue. Automatic dropped-registration-lease release remains deferred unless a later plan defines an owned exact-plan root and exactly-once semantics.
 
 ## Acceptance criteria
 
@@ -1013,7 +1033,7 @@ The issue is complete when:
 - No process-global stale cleanup queues remain.
 - No plugin path globally clears cleanup work.
 - Cleanup enqueue, deferred handoff, and boundary root snapshotting use no Jonmo-managed mutex.
-- Direct senders contain no deferred route, `OnceLock`, pending queue, or extra route allocation.
+- Direct senders contain no deferred route, `OnceLock`, pending queue, handoff atomic, or extra route allocation.
 - Deferred constructors create exactly one non-cloneable binder and one shared deferred route.
 - Every direct producer holds one bound target; every successfully applied deferred constructor publishes exactly one bound target through its consumed binder.
 - Direct handles clean eventually; deferred handles dropped before command application clean eventually only when the command queue is applied successfully.
@@ -1024,9 +1044,9 @@ The issue is complete when:
 - Cross-world lazy reuse fails before entity access.
 - Handles dropped after world destruction are safe.
 - Concurrent send/bind/flush tests prove request-multiset preservation.
-- Boundary tests prove each root snapshot is finite and defers unrelated suffix roots.
-- Explicit causal worklist tests settle related mutable/signal cleanup in one invocation without a retry constant.
-- Test accounting demonstrates monotonic finite obligation consumption.
+- Boundary tests prove every `CleanupSender` send is an external root selected only when it precedes the current boundary; all suffix roots are deferred.
+- Explicit move-only worklist tests settle their mutable/signal obligations in one invocation without a retry constant.
+- Test accounting demonstrates monotonic finite consumption of explicit local obligations without claiming to bound arbitrary destructor graphs.
 - Manual test queue clearing is removed.
 - The full library suite passes repeatedly with normal parallel execution.
 - Supported no_std/critical-section/wasm checks pass under the documented allocator-backed non-ISR constraint.

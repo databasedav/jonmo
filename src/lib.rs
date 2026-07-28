@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+mod cleanup;
+
 use bevy_app::prelude::*;
 use bevy_ecs::{
     prelude::*,
@@ -174,9 +176,7 @@ pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
-        graph::clear_stale_signals();
-        signal_vec::clear_stale_mutable_vecs();
-        signal_map::clear_stale_mutable_btree_maps();
+        app.init_resource::<cleanup::WorldCleanupQueue>();
 
         // First schedule is the default for signals without explicit scheduling
         let default_schedule = self.schedules[0];
@@ -204,11 +204,7 @@ impl Plugin for JonmoPlugin {
                         signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
                     ),
                     graph::process_signal_graph_for_schedule(schedule),
-                    (
-                        graph::despawn_stale_signals,
-                        signal_vec::despawn_stale_mutable_vecs,
-                        signal_map::despawn_stale_mutable_btree_maps,
-                    ),
+                    cleanup::drain_world_cleanup,
                 )
                     .chain()
                     .in_set(SignalProcessing),
