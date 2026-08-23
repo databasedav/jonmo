@@ -1100,13 +1100,7 @@ impl SignalHandle {
 }
 
 fn cleanup_signal_handles(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-    let handles: Vec<_> = world
-        .entity_mut(entity)
-        .get_mut::<SignalHandles>()
-        .unwrap()
-        .0
-        .drain(..)
-        .collect();
+    let handles = core::mem::take(&mut world.entity_mut(entity).get_mut::<SignalHandles>().unwrap().0);
     let mut commands = world.commands();
     for handle in handles {
         commands.queue(|world: &mut World| handle.cleanup(world));

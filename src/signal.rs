@@ -2120,7 +2120,7 @@ pub trait SignalExt: Signal {
                     let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
-                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                    for signal in [new_signal].into_iter().chain(upstreams) {
                         let entity = *signal;
                         if world.get::<super::signal_vec::VecReplayTrigger>(entity).is_some() {
                             world.entity_mut(entity).insert(ReplayOnce);
@@ -2250,7 +2250,7 @@ pub trait SignalExt: Signal {
                     let mut upstreams = SystemState::<Query<&Upstream>>::new(world);
                     let upstreams = upstreams.get(world);
                     let upstreams = UpstreamIter::new(&upstreams, new_signal).collect::<Vec<_>>();
-                    for signal in [new_signal].into_iter().chain(upstreams.into_iter()) {
+                    for signal in [new_signal].into_iter().chain(upstreams) {
                         let entity = *signal;
                         if world.get::<super::signal_map::MapReplayTrigger>(entity).is_some() {
                             world.entity_mut(entity).insert(ReplayOnce);

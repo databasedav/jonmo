@@ -651,7 +651,7 @@ pub trait SignalMapExt: SignalMap {
                     if diffs.0.is_empty() {
                         None
                     } else {
-                        Some(diffs.0.drain(..).collect())
+                        Some(core::mem::take(&mut diffs.0))
                     }
                 }),
             )
