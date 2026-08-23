@@ -38,11 +38,12 @@ generate_wasm_example_index library example has_assets *features:
   echo '(import kaaj).wasm_example_index_template' | nickel eval --field index_html --manifest-path nickel/Nickel-pkg.ncl -- 'library="{{ library }}"' 'example="{{ example }}"' --override 'features=["{{ features }}"]' --override 'has_assets="{{ has_assets }}"' | sed 's/^"//; s/"$//; s/\\"/"/g; s/\\n/\n/g'
 
 build_wasm_example library example has_assets *features:
-  just generate_wasm_example_index {{ library }} {{ example }} {{ has_assets }} {{ features }} > index.html
+  just generate_wasm_example_index {{ library }} {{ example }} {{ has_assets }} {{ features }}$(cargo metadata --no-deps --format-version 1 | jq -r --arg name '{{ example }}' '[.packages[].targets[] | select(.kind[] == "example" and .name == $name) | ."required-features" // []] | flatten | if length > 0 then "," + join(",") else "" end') > index.html
   RUSTFLAGS='--cfg getrandom_backend="wasm_js"' trunk build --locked --release --public-url . --example {{ example }}
 
+# nickel format does not yet parse package imports such as `import kaaj`
 format_nickels:
-  nickel format --manifest-path nickel/Nickel-pkg.ncl nickel/*.ncl
+  nickel format nickel/Nickel-pkg.ncl kaaj/Nickel-pkg.ncl kaaj/main.ncl kaaj/src/*.ncl
 
 export_nickel nickel:
   nickel export --format yaml --field {{ nickel }}_ nickel/main.ncl
