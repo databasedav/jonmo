@@ -1298,7 +1298,7 @@ pub trait SignalVecExt: SignalVec {
                     if diffs.0.is_empty() {
                         None
                     } else {
-                        Some(diffs.0.drain(..).collect())
+                        Some(core::mem::take(&mut diffs.0))
                     }
                 }),
             )
@@ -1318,7 +1318,7 @@ pub trait SignalVecExt: SignalVec {
                         VecDiff::Replace { values } => {
                             let old_processors = {
                                 let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
-                                manager_state.processors.drain(..).collect::<Vec<_>>()
+                                core::mem::take(&mut manager_state.processors)
                             };
                             for (handle, _) in old_processors {
                                 handle.cleanup(world);
@@ -1470,7 +1470,7 @@ pub trait SignalVecExt: SignalVec {
                         VecDiff::Clear => {
                             let old_processors = {
                                 let mut manager_state = world.get_mut::<ManagerState<S>>(*output_signal).unwrap();
-                                manager_state.processors.drain(..).collect::<Vec<_>>()
+                                core::mem::take(&mut manager_state.processors)
                             };
                             for (handle, _) in old_processors {
                                 handle.cleanup(world);
@@ -2004,10 +2004,9 @@ pub trait SignalVecExt: SignalVec {
                                     with_filter_signal_data(
                                         world,
                                         parent,
-                                        |mut data: Mut<FilterSignalData<Self::Item>>| data
-                                            .diffs
-                                            .drain(..)
-                                            .collect::<Vec<_>>(),
+                                        |mut data: Mut<FilterSignalData<Self::Item>>| {
+                                            core::mem::take(&mut data.diffs)
+                                        },
                                     );
                                 queued_diffs.extend(generated_diffs);
                                 if queued_diffs.is_empty() {

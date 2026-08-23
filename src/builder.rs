@@ -589,12 +589,7 @@ impl<S: SignalMap + Sized + Send + Sync + 'static> SignalMapTaskExt for S {}
 
 fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
     let entity = ctx.entity;
-    let fs = world
-        .get_mut::<OnDespawnCallbacks>(entity)
-        .unwrap()
-        .0
-        .drain(..)
-        .collect::<Vec<_>>();
+    let fs = core::mem::take(&mut world.get_mut::<OnDespawnCallbacks>(entity).unwrap().0);
     for f in fs {
         f(&mut world, entity);
     }
