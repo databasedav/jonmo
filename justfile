@@ -1,6 +1,6 @@
 set allow-duplicate-recipes
 
-KAAJ_HAALKA_COMMIT := "7ca5d3303f7b5672bcae3c67094665f5630abd38"
+KAAJ_HAALKA_COMMIT := "76f9d4427977a475624a90c397e682a37931be51"
 
 fetch_kaaj_justfile:
   curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
