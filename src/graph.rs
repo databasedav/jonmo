@@ -641,7 +641,12 @@ fn rebuild_levels(world: &mut World, state: &mut SignalGraphState) {
     state.signal_schedules.clear();
 
     let mut all_signals_state = SystemState::<Query<Entity, With<SystemRunner>>>::new(world);
-    let all_signals: HashSet<SignalSystem> = all_signals_state.get(world).iter().map(SignalSystem).collect();
+    let all_signals: HashSet<SignalSystem> = all_signals_state
+        .get(world)
+        .expect("query params are always valid")
+        .iter()
+        .map(SignalSystem)
+        .collect();
 
     let result = compute_signal_levels(
         world,
