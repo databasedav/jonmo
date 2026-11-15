@@ -1,6 +1,6 @@
 set allow-duplicate-recipes
 
-KAAJ_HAALKA_COMMIT := "76f9d4427977a475624a90c397e682a37931be51"
+KAAJ_HAALKA_COMMIT := "3b496e5d55d86fc57703a90c7c731fe430ec6ac0"
 
 fetch_kaaj_justfile:
   curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
@@ -10,6 +10,12 @@ import? 'kaaj.just'
 # nickel format does not yet parse package imports such as `import kaaj`
 format_nickels:
   nickel format nickel/Nickel-pkg.ncl
+
+doc *extras:
+  cargo +stable doc --all-features --no-deps --locked {{ extras }}
+
+clippy *extras:
+  cargo +stable clippy --all-features --all-targets --locked --no-deps {{ extras }} -- --deny warnings
 
 test:
   cargo test tests -- --test-threads=1 && just doctest

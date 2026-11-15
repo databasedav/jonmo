@@ -444,12 +444,13 @@ impl Builder {
                             children_entities[index] = child_entity;
                         }
                         VecDiff::Move { old_index, new_index } => {
-                            // First, update our local tracker to match the new logical order. This is the
-                            // source of truth for which entity corresponds to which index.
+                            // First, update our local tracker to match the new logical order. This
+                            // is the source of truth for which entity corresponds to which index.
                             let moved_entity = children_entities.remove(old_index);
                             children_entities.insert(new_index, moved_entity);
 
-                            // Now, apply the same reordering to the actual parent entity in the world.
+                            // Now, apply the same reordering to the actual parent entity in the
+                            // world.
                             let mut parent = world.entity_mut(parent);
                             // Bevy's `remove_children` finds the entity and removes it from its
                             // current position, correctly shifting subsequent children.
@@ -1162,7 +1163,8 @@ mod tests {
             app.update();
 
             // --- 6. Test: Child's Signals Function Correctly ---
-            // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+            // Use LazyEntity + signal::Builder pattern instead of removed
+            // component_signal_from_parent
             let child_entity = LazyEntity::new();
             let child_builder_with_signal = jonmo::Builder::new().lazy_entity(child_entity.clone()).on_signal(
                 signal::from_parent(child_entity.clone())
@@ -1485,7 +1487,8 @@ mod tests {
             // Verifies that children can have their own complex logic (signals, hierarchy) and that
             // they are properly cleaned up when the parent is despawned.
             {
-                // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+                // Use LazyEntity + signal::Builder pattern instead of removed
+                // component_signal_from_parent
                 let complex_child_entity = LazyEntity::new();
                 let complex_child_builder = jonmo::Builder::new()
                     .lazy_entity(complex_child_entity.clone())
@@ -1695,7 +1698,8 @@ mod tests {
             // The SignalVec that will drive the children.
             let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
 
-            // The parent builder, with static children sandwiching the reactive ones to test ordering.
+            // The parent builder, with static children sandwiching the reactive ones to test
+            // ordering.
             let parent_builder = jonmo::Builder::new()
                 .insert(ParentComp)
                 .child(jonmo::Builder::new().insert(StaticChildBefore))

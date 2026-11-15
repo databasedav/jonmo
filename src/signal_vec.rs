@@ -2617,11 +2617,13 @@ pub trait SignalVecExt: SignalVec {
                                 // Removing the only item.
                                 out_diffs.push(VecDiff::RemoveAt { index: 0 });
                             } else if index == old_len - 1 {
-                                // Removing the last item: remove the item and the separator before it.
+                                // Removing the last item: remove the item and the separator before
+                                // it.
                                 out_diffs.push(VecDiff::Pop); // item
                                 out_diffs.push(VecDiff::Pop); // separator
                             } else {
-                                // Removing from start/middle: remove the item and the separator after it.
+                                // Removing from start/middle: remove the item and the separator
+                                // after it.
                                 out_diffs.push(VecDiff::RemoveAt { index: 2 * index }); // item
                                 out_diffs.push(VecDiff::RemoveAt { index: 2 * index }); // separator
                             }
@@ -2727,8 +2729,8 @@ pub trait SignalVecExt: SignalVec {
             // 2. Create a handle for the state-holding entity.
             let state_entity_handle = LazyEntity::new();
 
-            // 3. Define the helper to create an index signal for a given separator key. This signal reads from
-            //    the central state component.
+            // 3. Define the helper to create an index signal for a given separator key. This signal
+            //    reads from the central state component.
             let create_index_signal = clone!((state_entity_handle) move | key: usize | {
                 signal::from_system(
                     clone!(
@@ -3126,20 +3128,24 @@ pub trait SignalVecExt: SignalVec {
                                     // 3. Update the underlying value in our source-of-truth vec.
                                     state.values[index] = value.clone();
 
-                                    // 4. Find where the *new* value should be inserted in the now N-1 element list.
+                                    // 4. Find where the *new* value should be inserted in the now
+                                    //    N-1 element list.
                                     let new_pos = search(world, compare_system_id, &*state, index).unwrap_err();
 
-                                    // 5. Re-insert the item's index into our tracking at the new position.
+                                    // 5. Re-insert the item's index into our tracking at the new
+                                    //    position.
                                     state.sorted_indices.insert(new_pos, index);
 
-                                    // 6. If the item's final sorted position is the same, emit a single UpdateAt.
-                                    //    Otherwise, emit a move as RemoveAt + InsertAt.
+                                    // 6. If the item's final sorted position is the same, emit a
+                                    //    single UpdateAt. Otherwise, emit a move as RemoveAt +
+                                    //    InsertAt.
                                     if new_pos == old_pos {
                                         out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
                                     } else {
                                         out_diffs.push(VecDiff::RemoveAt { index: old_pos });
                                         // The new insertion index must account for the removal.
-                                        // If the new position is after the old one, the removal shifted it left.
+                                        // If the new position is after the old one, the removal
+                                        // shifted it left.
                                         let final_insert_pos = if new_pos > old_pos { new_pos - 1 } else { new_pos };
                                         out_diffs.push(VecDiff::InsertAt {
                                             index: final_insert_pos,
@@ -3335,19 +3341,23 @@ pub trait SignalVecExt: SignalVec {
                                     // 2. Remove the old entry from sorted tracking.
                                     state.sorted_indices.remove(old_pos);
 
-                                    // 3. Update the underlying value and its key in our source-of-truth vecs.
+                                    // 3. Update the underlying value and its key in our
+                                    //    source-of-truth vecs.
                                     let new_key = get_key(world, value.clone());
                                     state.values[index] = value.clone();
                                     state.keys[index] = new_key;
 
-                                    // 4. Find where the *new* value should be inserted in the now N-1 element list.
+                                    // 4. Find where the *new* value should be inserted in the now
+                                    //    N-1 element list.
                                     let new_pos = search(&*state, index).unwrap_err();
 
-                                    // 5. Re-insert the item's index into our tracking at the new position.
+                                    // 5. Re-insert the item's index into our tracking at the new
+                                    //    position.
                                     state.sorted_indices.insert(new_pos, index);
 
-                                    // 6. If the item's final sorted position is the same, emit a single UpdateAt.
-                                    //    Otherwise, emit a move as RemoveAt + InsertAt.
+                                    // 6. If the item's final sorted position is the same, emit a
+                                    //    single UpdateAt. Otherwise, emit a move as RemoveAt +
+                                    //    InsertAt.
                                     if old_pos == new_pos {
                                         out_diffs.push(VecDiff::UpdateAt { index: old_pos, value });
                                     } else {
@@ -3441,8 +3451,8 @@ pub trait SignalVecExt: SignalVec {
     //         items: Vec<(SignalHandle, usize)>,
     //     }
 
-    //     /// Component to track which index in the FlattenState.items this processor corresponds to
-    //     #[derive(Component)]
+    //     /// Component to track which index in the FlattenState.items this processor corresponds
+    // to     #[derive(Component)]
     //     struct FlattenItemIndex(usize);
 
     //     let signal = LazySignal::new(move |world: &mut World| {
@@ -3501,8 +3511,9 @@ pub trait SignalVecExt: SignalVec {
     //             let processor_entity = LazyEntity::new();
 
     //             // Processor that handles diffs from the inner SignalVec
-    //             let processor_logic = clone!((processor_entity) move |In(diffs): In<Vec<VecDiff<O>>>,
-    // world: &mut World| {                 let self_entity = *processor_entity;
+    //             let processor_logic = clone!((processor_entity) move |In(diffs):
+    // In<Vec<VecDiff<O>>>, world: &mut World| {                 let self_entity =
+    // *processor_entity;
 
     //                 // Get our current index
     //                 let item_index = world.get::<FlattenItemIndex>(self_entity).unwrap().0;
@@ -3600,9 +3611,10 @@ pub trait SignalVecExt: SignalVec {
     //             });
 
     //             // Register the processor
-    //             let processor_handle = inner_signal_vec.for_each(processor_logic).register(world);
-    //             processor_entity.set(**processor_handle);
-    //             world.entity_mut(**processor_handle).insert(FlattenItemIndex(index));
+    //             let processor_handle =
+    // inner_signal_vec.for_each(processor_logic).register(world);
+    // processor_entity.set(**processor_handle);
+    // world.entity_mut(**processor_handle).insert(FlattenItemIndex(index));
 
     //             // Find replay triggers but don't trigger them yet
     //             let replay_triggers = find_replay_triggers(world, (**processor_handle).into());
@@ -3629,9 +3641,9 @@ pub trait SignalVecExt: SignalVec {
     //                             handle.cleanup(world);
     //                         }
     //                         // Only emit Clear if there were old items
-    //                         // Note: The inner processors will emit InsertAt diffs for their initial
-    // values,                         // so we need Clear to come BEFORE those. We'll queue it
-    // directly now.                         if had_old_items {
+    //                         // Note: The inner processors will emit InsertAt diffs for their
+    // initial values,                         // so we need Clear to come BEFORE those. We'll queue
+    // it directly now.                         if had_old_items {
     //                             world
     //                                 .get_mut::<QueuedVecDiffs<InnerItem<Self>>>(*output_signal)
     //                                 .unwrap()
@@ -3642,9 +3654,9 @@ pub trait SignalVecExt: SignalVec {
     //                         // Create processors and collect their replay triggers
     //                         let mut all_triggers = Vec::new();
     //                         for (i, inner_signal_vec) in values.into_iter().enumerate() {
-    //                             let (handle, triggers) = create_inner_processor(world, output_signal,
-    // i, inner_signal_vec);                             // Add entry with real handle
-    //                             let mut state =
+    //                             let (handle, triggers) = create_inner_processor(world,
+    // output_signal, i, inner_signal_vec);                             // Add entry with real
+    // handle                             let mut state =
     // world.get_mut::<FlattenState>(*output_signal).unwrap();
     // state.items.push((handle, 0));                             all_triggers.extend(triggers);
     //                         }
@@ -3655,17 +3667,17 @@ pub trait SignalVecExt: SignalVec {
     //                         // Update indices for all items after the insertion point FIRST
     //                         {
     //                             let handles_to_update: Vec<_> = {
-    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
-    //                                 state.items
-    //                                     .iter()
+    //                                 let state =
+    // world.get::<FlattenState>(*output_signal).unwrap();
+    // state.items                                     .iter()
     //                                     .enumerate()
     //                                     .skip(index)
     //                                     .map(|(i, (h, _))| (**h, i + 1))
     //                                     .collect()
     //                             };
     //                             for (handle_entity, new_index) in handles_to_update {
-    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
-    // new_index;                             }
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0
+    // = new_index;                             }
     //                         }
 
     //                         // Create processor
@@ -3730,17 +3742,17 @@ pub trait SignalVecExt: SignalVec {
     //                         // Update indices for items after the removal
     //                         {
     //                             let handles_to_update: Vec<_> = {
-    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
-    //                                 state.items
-    //                                     .iter()
+    //                                 let state =
+    // world.get::<FlattenState>(*output_signal).unwrap();
+    // state.items                                     .iter()
     //                                     .enumerate()
     //                                     .skip(index)
     //                                     .map(|(i, (h, _))| (**h, i))
     //                                     .collect()
     //                             };
     //                             for (handle_entity, new_index) in handles_to_update {
-    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
-    // new_index;                             }
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0
+    // = new_index;                             }
     //                         }
 
     //                         for _ in 0..old_len {
@@ -3760,10 +3772,10 @@ pub trait SignalVecExt: SignalVec {
     //                         // Update indices for all affected items
     //                         {
     //                             let handles_to_update: Vec<_> = {
-    //                                 let state = world.get::<FlattenState>(*output_signal).unwrap();
-    //                                 let start = old_index.min(new_index);
-    //                                 let end = old_index.max(new_index) + 1;
-    //                                 state.items
+    //                                 let state =
+    // world.get::<FlattenState>(*output_signal).unwrap();                                 let start
+    // = old_index.min(new_index);                                 let end =
+    // old_index.max(new_index) + 1;                                 state.items
     //                                     .iter()
     //                                     .enumerate()
     //                                     .skip(start)
@@ -3772,8 +3784,8 @@ pub trait SignalVecExt: SignalVec {
     //                                     .collect()
     //                             };
     //                             for (handle_entity, new_idx) in handles_to_update {
-    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0 =
-    // new_idx;                             }
+    //                                 world.get_mut::<FlattenItemIndex>(*handle_entity).unwrap().0
+    // = new_idx;                             }
     //                         }
 
     //                         // Calculate the new offset after the move
@@ -3783,8 +3795,8 @@ pub trait SignalVecExt: SignalVec {
     //                         };
 
     //                         // Emit Move diffs for each element in the block
-    //                         // We need to move elements one by one from old position to new position
-    //                         if old_offset < new_offset {
+    //                         // We need to move elements one by one from old position to new
+    // position                         if old_offset < new_offset {
     //                             // Moving forward: move from end to start to avoid overwriting
     //                             for i in (0..moved_len).rev() {
     //                                 out_diffs.push(VecDiff::Move {
@@ -3866,8 +3878,8 @@ pub trait SignalVecExt: SignalVec {
 
     //         let manager_handle = self.for_each(manager_logic).register(world);
 
-    //         // Pipe manager to output_signal so output_signal processes AFTER manager fills the queue
-    //         pipe_signal(world, *manager_handle, output_signal);
+    //         // Pipe manager to output_signal so output_signal processes AFTER manager fills the
+    // queue         pipe_signal(world, *manager_handle, output_signal);
 
     //         world
     //             .entity_mut(*output_signal)
@@ -7382,8 +7394,8 @@ pub(crate) mod tests {
             assert_eq!(current_state, vec![(2, 'b'), (3, 'C'), (4, 'd')]);
 
             // Case B: Update that changes sort order.
-            // Source is now [(3, 'C'), (4, 'd'), (2, 'b')]. Sorted is [(2, 'b'), (3, 'C'), (4, 'd')]
-            // Update (4, 'd') at source index 1 to (0, 'z').
+            // Source is now [(3, 'C'), (4, 'd'), (2, 'b')]. Sorted is [(2, 'b'), (3, 'C'), (4,
+            // 'd')] Update (4, 'd') at source index 1 to (0, 'z').
             // The old item was at sorted index 2. The new item should be at sorted index 0.
             source_vec.write(app.world_mut()).set(1, (0, 'z'));
             app.update();
@@ -7408,8 +7420,8 @@ pub(crate) mod tests {
             );
 
             // --- 6. Test Move (in source) ---
-            // Source: [(3, 'C'), (0, 'z'), (2, 'b')] -> move 0 to 2 -> [(0, 'z'), (2, 'b'), (3, 'C')]
-            // Sorted output should not change at all.
+            // Source: [(3, 'C'), (0, 'z'), (2, 'b')] -> move 0 to 2 -> [(0, 'z'), (2, 'b'), (3,
+            // 'C')] Sorted output should not change at all.
             source_vec.write(app.world_mut()).move_item(0, 2);
             app.update();
             let diffs = get_and_clear_output::<(u32, char)>(app.world_mut());

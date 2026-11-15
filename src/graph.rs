@@ -830,7 +830,8 @@ fn run_signal_node(world: &mut World, signal: SignalSystem) {
             Some(runner) => runner,
             None => {
                 if world.get_entity(*signal).is_err() {
-                    // Re-entrant combinators can despawn signals during the same frame; skip these stale IDs.
+                    // Re-entrant combinators can despawn signals during the same frame; skip these
+                    // stale IDs.
                     return;
                 }
                 let upstreams = get_upstreams(world, signal);
@@ -943,7 +944,8 @@ pub(crate) fn process_signal_graph_for_schedule(schedule: InternedScheduleLabel)
                 let _ = update_edge_change_levels(world, &mut state);
                 state.is_processing = true;
 
-                // Take this schedule's signals to avoid cloning; we'll put them back after processing
+                // Take this schedule's signals to avoid cloning; we'll put them back after
+                // processing
                 state.by_schedule.remove(&schedule).unwrap_or_default()
             })
         };

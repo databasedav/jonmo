@@ -1889,12 +1889,12 @@ pub trait SignalExt: Signal {
         }
 
         let signal = LazySignal::new(move |world: &mut World| {
-            // State entity that holds the latest value, serving as the communication channel between dynamic
-            // inner signals and the static output signal.
+            // State entity that holds the latest value, serving as the communication channel
+            // between dynamic inner signals and the static output signal.
             let reader_entity = LazyEntity::new();
 
-            // The output signal (reader). Reads from state and propagates. Has no upstream dependencies;
-            // triggered manually by the forwarder.
+            // The output signal (reader). Reads from state and propagates. Has no upstream
+            // dependencies; triggered manually by the forwarder.
             let reader_system = *from_system::<<Self::Item as Signal>::Item, _, _, _>(
                 clone!((reader_entity) move |In(_), mut query: Query<&mut FlattenState<<Self::Item as Signal>::Item>>| {
                     query.get_mut(*reader_entity).unwrap().value.take()
@@ -4834,8 +4834,8 @@ mod tests {
             .map(capture_output)
             .register(app.world_mut());
 
-        // 1. Initial emission: The first update runs with near-zero delta. The first value should always
-        //    pass.
+        // 1. Initial emission: The first update runs with near-zero delta. The first value should
+        //    always pass.
         app.update();
         assert_eq!(
             get_output(app.world()),
@@ -6391,8 +6391,8 @@ mod tests {
             crate::JonmoPlugin::new::<PostUpdate>().with_schedule::<Update>(),
         ));
 
-        // Build a chain: source -> map1 -> schedule::<Update> -> map2 -> schedule::<PostUpdate> -> map3
-        // Note: Scheduled doesn't create its own entity, it just tags its inner signal.
+        // Build a chain: source -> map1 -> schedule::<Update> -> map2 -> schedule::<PostUpdate> ->
+        // map3 Note: Scheduled doesn't create its own entity, it just tags its inner signal.
         // So the actual entities are: source, map1 (tagged Update), map2 (tagged PostUpdate), map3
         //
         // Expected tags:
