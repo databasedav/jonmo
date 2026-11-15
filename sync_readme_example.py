@@ -41,8 +41,8 @@ lines = lines[:mod_utils_line] + lines[mod_utils_line + 3:]
 # Join the lines into a single string
 content = ''.join(lines)
 
-# Replace `example_plugin` with `((DefaultPlugins, JonmoPlugin))`
-content = re.sub(r'examples_plugin', '(DefaultPlugins, JonmoPlugin)', content)
+# Replace `examples_plugin` with `(DefaultPlugins, JonmoPlugin::default())`
+content = re.sub(r'examples_plugin', '(DefaultPlugins, JonmoPlugin::default())', content)
 
 # Read the content of README.md
 with open('README.md', 'r') as file:

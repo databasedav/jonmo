@@ -39,7 +39,7 @@ fn ui(world: &mut World) {
         ..default()
     });
     ui_root.add_child(text);
-    ui_root.insert(SignalHandles::from([signal]));
+    ui_root.insert(SignalClaims::from([signal]));
 }
 
 fn incr_value(mut ticker: ResMut<ValueTicker>, time: Res<Time>, mut values: Query<&mut Value>) {

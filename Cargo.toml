@@ -19,10 +19,15 @@ bevy_platform = { version = "0.18", default-features = false }
 bevy_log = { version = "0.18", default-features = false, optional = true }
 bevy_time = { version = "0.18", default-features = false, optional = true }
 enclose = "1.2"
-dyn-clone = "1.0"
 apply = "=0.3.0"  # locked because last released in 2020
 cfg-if = "1.0"
+concurrent-queue = { version = "2.5", default-features = false }
 document-features = { version = "0.2", optional = true }
+
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies.concurrent-queue]
+version = "2.5"
+features = ["portable-atomic"]
+default-features = false
 
 [features]
 default = ["builder", "tracing", "time", "std"]
@@ -45,6 +50,7 @@ std = [
   "bevy_ecs/std",
   "bevy_platform/std",
   "bevy_time?/std",
+  "concurrent-queue/std",
 ]
 
 ## Rely on `critical-section` for synchronization primitives.
@@ -60,6 +66,9 @@ web = [
   "bevy_app/web",
   "bevy_platform/web",
 ]
+
+## Enables opt-in imperative signal subgraph evaluation (`jonmo::graph::run_signal_subgraph_once`, `jonmo::graph::BoxedSignalValue`, and `jonmo::graph::downcast_signal_value`).
+imperative-signal-evaluation = []
 
 deployed_wasm_example = []
 
@@ -90,6 +99,7 @@ allowlist = [
   "std",
   "critical-section",
   "web",
+  "imperative-signal-evaluation",
 ]
 
 [package.metadata.docs.rs]
@@ -131,3 +141,8 @@ name = "utils"
 path = "examples/utils.rs"
 doc-scrape-examples = true
 crate-type = ["lib"]
+
+[[bench]]
+name = "move_first"
+path = "benches/move_first.rs"
+harness = false

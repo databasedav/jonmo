@@ -8,6 +8,11 @@
 
 extern crate alloc;
 
+mod cleanup;
+pub mod dynamic;
+pub mod registration;
+mod replay;
+
 use bevy_app::prelude::*;
 use bevy_ecs::{
     prelude::*,
@@ -16,6 +21,20 @@ use bevy_ecs::{
 use bevy_platform::prelude::*;
 
 pub mod graph;
+pub use dynamic::{
+    DynamicEmissions, DynamicManagerStep, DynamicManagerUpdate, DynamicSignalOperatorSpec, IndexedSlotCommand,
+    IndexedSlots, KeyedSlotCommand, KeyedSlots, ReplayScalar, ReplaySignalMap, ReplaySignalVec, SameSignalIdentity,
+    ScalarSlot, ScalarSlotCommand,
+};
+pub use graph::{
+    RecursionLimitBehavior, ReplayCacheInspection, SignalClaim, SignalClaims, SignalEntity, SignalReleaseError,
+    inspect_map_replay_cache, inspect_scalar_replay_cache, inspect_vec_replay_cache,
+};
+pub use registration::{
+    MapSignalEntityRef, MapSignalKind, MapSignalMaterializer, OutputDelivery, RegistrarInputs, ReplayInitialization,
+    ScalarSignalEntityRef, ScalarSignalKind, ScalarSignalMaterializer, SignalEntityRef, SignalKind, SignalMaterializer,
+    SignalRegistrar, SignalRegistrationError, VecSignalEntityRef, VecSignalKind, VecSignalMaterializer,
+};
 pub mod signal;
 pub mod signal_map;
 pub mod signal_vec;
@@ -90,7 +109,7 @@ impl JonmoPlugin {
     /// Create a new `JonmoPlugin` with the given default schedule.
     ///
     /// The default schedule is used for signals without explicit `.schedule::<S>()` calls.
-    /// Additional schedules can be added with `.schedule::<S>()`.
+    /// Additional schedules can be added with `.with_schedule::<S>()`.
     pub fn new<S: ScheduleLabel + Default>() -> Self {
         Self {
             schedules: vec![S::default().intern()],
@@ -148,7 +167,7 @@ impl JonmoPlugin {
 
     /// Set the behavior when the signal registration recursion limit is exceeded.
     ///
-    /// Default: [`RecursionLimitBehavior::Panic`](graph::RecursionLimitBehavior::Panic)
+    /// Default: [`RecursionLimitBehavior::Panic`]
     ///
     /// # Example
     ///
@@ -174,8 +193,14 @@ pub struct SignalProcessing;
 
 impl Plugin for JonmoPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<cleanup::WorldCleanupQueue>();
+
         // First schedule is the default for signals without explicit scheduling
-        let default_schedule = self.schedules[0];
+        let default_schedule = self
+            .schedules
+            .first()
+            .copied()
+            .expect("JonmoPlugin requires at least one schedule");
 
         // Initialize graph state with configuration
         app.insert_resource(graph::SignalGraphState::with_options(
@@ -195,39 +220,42 @@ impl Plugin for JonmoPlugin {
             app.add_systems(
                 schedule,
                 (
-                    (
-                        signal_vec::trigger_replays::<signal_vec::VecReplayTrigger>,
-                        signal_vec::trigger_replays::<signal_map::MapReplayTrigger>,
-                    ),
                     graph::process_signal_graph_for_schedule(schedule),
-                    (
-                        graph::despawn_stale_signals,
-                        signal_vec::despawn_stale_mutable_vecs,
-                        signal_map::despawn_stale_mutable_btree_maps,
-                    ),
+                    cleanup::drain_world_cleanup,
                 )
                     .chain()
                     .in_set(SignalProcessing),
             );
         }
-
-        // Clear persistent inputs at frame end (after all signal processing)
-        app.add_systems(Last, graph::clear_signal_inputs.after(SignalProcessing));
     }
 }
 
-/// `use jonmo::prelude::*;` imports everything one needs to use start using [jonmo](crate).
+/// `use jonmo::prelude::*;` imports everything one needs to start using [jonmo](crate).
+///
+/// Opt-in imperative evaluation APIs are intentionally excluded from the normal prelude:
+///
+/// ```compile_fail,E0432
+/// use jonmo::prelude::run_signal_subgraph_once;
+/// ```
 pub mod prelude {
     #[cfg(feature = "builder")]
     pub use crate::builder::{SignalMapTaskExt, SignalTask, SignalTaskExt, SignalVecTaskExt};
     pub use crate::{
-        JonmoPlugin,
-        graph::SignalHandles,
-        signal::{self, BoxedSignal, IntoSignalEither, Signal, SignalEither, SignalExt},
-        signal_map::{
-            IntoSignalMapEither, MutableBTreeMap, MutableBTreeMapData, SignalMap, SignalMapEither, SignalMapExt,
+        JonmoPlugin, SignalClaim, SignalClaims,
+        signal::{
+            self, BoxedReplayableSignal, BoxedSignal, Broadcast, CachedSignal, IntoSignalEither, OptionSignal,
+            ReplayableBroadcast, ReplayableScheduled, ReplayableSignal, Scheduled, Signal, SignalEither, SignalExt,
         },
-        signal_vec::{IntoSignalVecEither, MutableVec, MutableVecData, SignalVec, SignalVecEither, SignalVecExt},
+        signal_map::{
+            BoxedReplayableSignalMap, BoxedSignalMap, BroadcastMap, CachedSignalMap, IntoSignalMapEither, MapDiff,
+            MutableBTreeMap, MutableBTreeMapData, ReplayableBroadcastMap, ReplayableScheduledMap, ReplayableSignalMap,
+            ScheduledMap, SignalMap, SignalMapEither, SignalMapExt,
+        },
+        signal_vec::{
+            BoxedReplayableSignalVec, BoxedSignalVec, BroadcastVec, CachedSignalVec, IntoSignalVecEither, MutableVec,
+            MutableVecData, ReplayableBroadcastVec, ReplayableScheduledVec, ReplayableSignalVec, ScheduledVec,
+            SignalVec, SignalVecEither, SignalVecExt, VecDiff,
+        },
         utils::{LazyEntity, clone, deref_cloned, deref_copied},
     };
     #[doc(no_inline)]
