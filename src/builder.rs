@@ -1,6 +1,6 @@
 //! Reactive entity builder ported from [Dominator](https://github.com/Pauan/rust-dominator)'s [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
 use super::{
-    graph::{SignalHandle, SignalHandles},
+    graph::{SignalClaim, SignalClaims},
     signal::{Signal, SignalExt},
     signal_map::{SignalMap, SignalMapExt},
     signal_vec::{SignalVec, SignalVecExt, VecDiff},
@@ -10,11 +10,11 @@ use bevy_ecs::{
     component::Mutable,
     lifecycle::HookContext,
     prelude::*,
-    system::{IntoObserverSystem, RunSystemOnce},
+    system::{Adapt, IntoAdapterSystem, IntoObserverSystem, RunSystemError, RunSystemOnce, SystemIn},
     world::{DeferredWorld, error::EntityMutableFetchError},
 };
 use bevy_platform::prelude::*;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::marker::PhantomData;
 
 // TODO: the fluent interface link breaks cargo fmt ??
 /// A thin facade over a Bevy [`Entity`] enabling the ergonomic registration of
@@ -28,65 +28,83 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// Port of [Dominator](https://github.com/Pauan/rust-dominator)'s
 /// [`DomBuilder`](https://docs.rs/dominator/latest/dominator/struct.DomBuilder.html).
 ///
-/// # `Clone` semantics
+/// # Linearity and branching
 ///
-/// This type implements [`Clone`] **only** to satisfy trait bounds required by signal combinators.
-/// **Cloning [`jonmo::Builder`](Builder)s at runtime is a bug.** See
-/// [`jonmo::Builder::clone`](Builder::clone) for details.
+/// `Builder` is a linear (`!Clone`), one-shot recipe consumed when spawning an [`Entity`].
+/// Builder-valued signals are valid in linear [`Signal`] and [`SignalVec`] chains (such as
+/// [`SignalExt::map`], [`SignalExt::to_signal_vec`], [`SignalVecExt::map`],
+/// [`SignalVecExt::filter_map`], [`Builder::child_signal`], and [`Builder::children_signal_vec`]),
+/// where each produced `Builder` spawns at most one entity.
+///
+/// Because a `Builder` owns one-shot spawn hooks, it cannot be cloned, cached, or broadcast:
+///
+/// ```compile_fail,E0277
+/// use jonmo::prelude::*;
+///
+/// fn assert_clone<T: Clone>(_: &T) {}
+///
+/// let builder = jonmo::Builder::new();
+/// assert_clone(&builder);
+/// ```
+///
+/// ```compile_fail,E0277
+/// use jonmo::prelude::*;
+///
+/// let _ = signal::once(jonmo::Builder::new()).broadcast();
+/// ```
+///
+/// ```compile_fail,E0277
+/// use jonmo::prelude::*;
+///
+/// let _ = signal::once(jonmo::Builder::new()).cache();
+/// ```
+///
+/// ```compile_fail,E0277
+/// use jonmo::prelude::*;
+///
+/// let _ = signal::once(vec![jonmo::Builder::new()]).to_signal_vec().broadcast();
+/// ```
+///
+/// To render the same reactive state into multiple entity branches, broadcast the cloneable
+/// upstream state signal first and map each branch to its own fresh `Builder` (using factory
+/// functions for reusable templates):
+///
+/// ```
+/// use bevy_app::App;
+/// use bevy_ecs::prelude::*;
+/// use jonmo::prelude::*;
+///
+/// #[derive(Resource, Clone)]
+/// struct Label(&'static str);
+///
+/// fn label_node(prefix: &'static str, text: &'static str) -> jonmo::Builder {
+///     jonmo::Builder::new().insert(Name::new(format!("{prefix}: {text}")))
+/// }
+///
+/// let mut app = App::new();
+/// app.add_plugins(JonmoPlugin::default());
+/// app.insert_resource(Label("ready"));
+///
+/// let state = signal::from_resource::<Label>().broadcast();
+/// let root = jonmo::Builder::new()
+///     .child_signal(
+///         state
+///             .clone()
+///             .map_in(|label: Label| Some(label_node("header", label.0))),
+///     )
+///     .child_signal(state.map_in(|label: Label| Some(label_node("footer", label.0))))
+///     .spawn(app.world_mut());
+///
+/// app.update();
+/// assert_eq!(app.world().get::<Children>(root).unwrap().len(), 2);
+/// ```
 #[derive(Default)]
 pub struct Builder {
     #[allow(clippy::type_complexity)]
-    on_spawns: Vec<Box<dyn FnOnce(&mut World, Entity) + Send + Sync>>,
-    /// Counter for assigning block indices during builder construction.
-    /// Each child/children/child_signal/children_signal_vec call gets a unique block index.
-    next_block: AtomicUsize,
-}
-
-impl Clone for Builder {
-    /// # Warning
-    ///
-    /// This clone implementation exists **only** to satisfy trait bounds required by signal
-    /// combinators (e.g., [`SignalExt::map`], [`SignalVecExt::filter_map`]). **Cloning
-    /// [`jonmo::Builder`](Builder)s at runtime is a bug and will lead to unexpected behavior.**
-    ///
-    /// Clones produce an empty builder with no on-spawn hooks. Use factory functions instead
-    /// if you need reusable UI templates:
-    ///
-    /// ```
-    /// use bevy_ecs::prelude::*;
-    /// use jonmo::prelude::*;
-    ///
-    /// fn my_widget(label: &str) -> jonmo::Builder {
-    ///     jonmo::Builder::new().insert(Name::new(label.to_string()))
-    ///     // ... other configuration
-    /// }
-    ///
-    /// // Correct: each call creates a fresh builder
-    /// let mut world = World::new();
-    /// let widget1 = my_widget("First").spawn(&mut world);
-    /// let widget2 = my_widget("Second").spawn(&mut world);
-    /// ```
-    #[track_caller]
-    fn clone(&self) -> Self {
-        let msg = format!(
-            "Cloning `jonmo::Builder` at {} is a bug! Use a factory function instead.",
-            core::panic::Location::caller()
-        );
-        if cfg!(debug_assertions) {
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "std")] {
-                    let backtrace = std::backtrace::Backtrace::force_capture();
-                    panic!("{}\nBacktrace:\n{}", msg, backtrace);
-                } else {
-                    panic!("{}", msg);
-                }
-            }
-        }
-        #[cfg(feature = "tracing")]
-        bevy_log::error!("{}", msg);
-
-        Self::default()
-    }
+    on_spawns: Vec<Box<dyn FnOnce(&mut World, Entity, usize) + Send + Sync>>,
+    /// Counter for assigning local block indices during builder construction.
+    /// Resolved against the target entity's dynamic base block offset at spawn time.
+    block_count: usize,
 }
 
 impl<T: Bundle> From<T> for Builder {
@@ -109,16 +127,42 @@ impl ChildBlockPopulations {
     }
 }
 
+struct EntityInputAdapter<I>(Entity, PhantomData<fn() -> I>);
+
+impl<I, S> Adapt<S> for EntityInputAdapter<I>
+where
+    I: 'static,
+    S: System<In = In<(Entity, I)>, Out = ()>,
+{
+    type In = In<I>;
+    type Out = ();
+
+    fn adapt(
+        &mut self,
+        input: I,
+        run_system: impl FnOnce(SystemIn<'_, S>) -> Result<S::Out, RunSystemError>,
+    ) -> Result<Self::Out, RunSystemError> {
+        run_system((self.0, input))
+    }
+}
+
 impl Builder {
     #[allow(missing_docs)]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
-    pub fn on_spawn(mut self, on_spawn: impl FnOnce(&mut World, Entity) + Send + Sync + 'static) -> Self {
+    fn on_spawn_with_base_block(
+        mut self,
+        on_spawn: impl FnOnce(&mut World, Entity, usize) + Send + Sync + 'static,
+    ) -> Self {
         self.on_spawns.push(Box::new(on_spawn));
         self
+    }
+
+    /// Run a function with mutable access to the [`World`] and this builder's [`Entity`].
+    pub fn on_spawn(self, on_spawn: impl FnOnce(&mut World, Entity) + Send + Sync + 'static) -> Self {
+        self.on_spawn_with_base_block(move |world, entity, _base_block| on_spawn(world, entity))
     }
 
     /// Run a [`System`] which takes [`In`] this builder's [`Entity`].
@@ -166,8 +210,8 @@ impl Builder {
     /// ```
     pub fn hold_tasks(self, tasks: impl IntoIterator<Item = Box<dyn SignalTask>> + Send + Sync + 'static) -> Self {
         self.on_spawn(move |world, entity| {
-            let handles: Vec<_> = tasks.into_iter().map(|task| task.register_task(world)).collect();
-            add_handles(world, entity, handles);
+            let claims: Vec<_> = tasks.into_iter().map(|task| task.register_task(world)).collect();
+            add_claims(world, entity, claims);
         })
     }
 
@@ -233,14 +277,15 @@ impl Builder {
     /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn on_signal<I, S, F, M>(self, signal: S, system: F) -> Self
     where
-        I: Clone + Send + Sync + 'static,
-        S: Signal<Item = I> + Send + Sync + 'static,
+        I: 'static,
+        S: Signal<Item = I>,
         F: IntoSystem<In<(Entity, I)>, (), M> + Send + Sync + 'static,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
-            let handle =
-                Signal::register_signal(signal.map(move |In(input): In<I>| (entity, input)).map(system), world);
-            add_handles(world, entity, [handle]);
+            let claim = signal
+                .map(IntoAdapterSystem::new(EntityInputAdapter(entity, PhantomData), system))
+                .register(world);
+            add_claims(world, entity, [claim]);
         };
         self.on_spawn(on_spawn)
     }
@@ -251,13 +296,21 @@ impl Builder {
     /// The `signal` will be automatically cleaned up when the [`Entity`] is despawned.
     pub fn on_signal_with_entity<I, S, F>(self, signal: S, mut f: F) -> Self
     where
-        I: Clone + Send + Sync + 'static,
-        S: Signal<Item = I> + Send + Sync + 'static,
+        I: 'static,
+        S: Signal<Item = I>,
         F: FnMut(EntityWorldMut, I) + Send + Sync + 'static,
     {
-        self.on_signal(signal, move |In((entity, value)), world: &mut World| {
-            f(world.entity_mut(entity), value)
-        })
+        let on_spawn = move |world: &mut World, entity: Entity| {
+            let claim = signal
+                .map(move |In(value): In<I>, world: &mut World| {
+                    if let Ok(entity_mut) = world.get_entity_mut(entity) {
+                        f(entity_mut, value);
+                    }
+                })
+                .register(world);
+            add_claims(world, entity, [claim]);
+        };
+        self.on_spawn(on_spawn)
     }
 
     /// Reactively run a function with mutable access (via [`Mut`]) to this builder's [`Entity`]'s
@@ -271,18 +324,17 @@ impl Builder {
     ) -> Self
     where
         C: Component<Mutability = Mutable>,
-        I: Clone + 'static,
+        I: 'static,
     {
         let on_spawn = move |world: &mut World, entity: Entity| {
-            let handle = Signal::register_signal(
-                signal.map(move |In(input): In<I>, mut components: Query<&mut C>| {
+            let claim = signal
+                .map(move |In(input): In<I>, mut components: Query<&mut C>| {
                     if let Ok(component) = components.get_mut(entity) {
                         f(component, input)
                     }
-                }),
-                world,
-            );
-            add_handles(world, entity, [handle]);
+                })
+                .register(world);
+            add_claims(world, entity, [claim]);
         };
         self.on_spawn(on_spawn)
     }
@@ -291,42 +343,41 @@ impl Builder {
     /// an [`Option`]al `C`; if the [`Signal`] outputs [`None`], the `C` [`Component`] is removed.
     pub fn component_signal<C>(self, signal: impl Signal<Item = Option<C>>) -> Self
     where
-        C: Component + Clone,
+        C: Component,
     {
-        self.on_signal(
-            signal,
-            move |In((entity, component_option)): In<(Entity, Option<C>)>, world: &mut World| {
-                let mut entity = world.entity_mut(entity);
-                if let Some(component) = component_option {
-                    entity.insert(component);
-                } else {
-                    entity.remove::<C>();
-                }
-            },
-        )
+        self.on_signal_with_entity(signal, |mut entity, component_option| {
+            if let Some(component) = component_option {
+                entity.insert(component);
+            } else {
+                entity.remove::<C>();
+            }
+        })
     }
 
     /// Declare a static child.
-    pub fn child(self, child: impl Into<Builder>) -> Self {
-        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
+    pub fn child(mut self, child: impl Into<Builder>) -> Self {
+        let local_block = self.block_count;
+        self.block_count += 1;
         let child = child.into();
-        let on_spawn = move |world: &mut World, parent| {
+        let on_spawn = move |world: &mut World, parent: Entity, base_block: usize| {
+            let block = base_block + local_block;
             let child_entity = world.spawn_empty().id();
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
             pops.0[block] = 1;
             let insert_offset = offset(block, &pops.0);
-            // need to call like this to avoid type ambiguity
-            EntityWorldMut::insert_children(&mut world.entity_mut(parent), insert_offset, &[child_entity]);
+            insert_children_clamped(world, parent, insert_offset, &[child_entity]);
             child.spawn_on_entity(world, child_entity).unwrap();
         };
-        self.on_spawn(on_spawn)
+        self.on_spawn_with_base_block(on_spawn)
     }
 
     /// Declare a reactive child. When the [`Signal`] outputs [`None`], the child is removed.
-    pub fn child_signal(self, child_option: impl Signal<Item = Option<Builder>>) -> Self {
-        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
-        let on_spawn = move |world: &mut World, parent: Entity| {
+    pub fn child_signal(mut self, child_option: impl Signal<Item = Option<Builder>>) -> Self {
+        let local_block = self.block_count;
+        self.block_count += 1;
+        let on_spawn = move |world: &mut World, parent: Entity, base_block: usize| {
+            let block = base_block + local_block;
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
 
@@ -335,34 +386,36 @@ impl Builder {
                                mut existing_child_option: Local<Option<Entity>>| {
                 if let Some(child) = child_option {
                     if let Some(existing_child) = existing_child_option.take() {
-                        world.entity_mut(existing_child).despawn();
+                        despawn_if_alive(world, existing_child);
                     }
                     let child_entity = world.spawn_empty().id();
                     let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
                     let insert_offset = offset(block, &pops.0);
-                    world.entity_mut(parent).insert_children(insert_offset, &[child_entity]);
+                    insert_children_clamped(world, parent, insert_offset, &[child_entity]);
                     child.spawn_on_entity(world, child_entity).unwrap();
                     *existing_child_option = Some(child_entity);
                     world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = 1;
                 } else {
                     if let Some(existing_child) = existing_child_option.take() {
-                        world.entity_mut(existing_child).despawn();
+                        despawn_if_alive(world, existing_child);
                     }
                     world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = 0;
                 }
             };
-            let handle = child_option.map(system).register(world);
-            add_handles(world, parent, [handle]);
+            let claim = child_option.map(system).register(world);
+            add_claims(world, parent, [claim]);
         };
-        self.on_spawn(on_spawn)
+        self.on_spawn_with_base_block(on_spawn)
     }
 
     /// Declare static children.
-    pub fn children(self, children: impl IntoIterator<Item = impl Into<Builder>> + Send + 'static) -> Self {
-        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Into<Builder>> + Send + 'static) -> Self {
+        let local_block = self.block_count;
+        self.block_count += 1;
         let children_vec: Vec<Builder> = children.into_iter().map(Into::into).collect();
         let population = children_vec.len();
-        let on_spawn = move |world: &mut World, parent: Entity| {
+        let on_spawn = move |world: &mut World, parent: Entity, base_block: usize| {
+            let block = base_block + local_block;
             let mut children_entities = Vec::with_capacity(children_vec.len());
             for _ in 0..children_vec.len() {
                 children_entities.push(world.spawn_empty().id());
@@ -371,20 +424,20 @@ impl Builder {
             pops.ensure_block(block);
             pops.0[block] = population;
             let insert_offset = offset(block, &pops.0);
-            world
-                .entity_mut(parent)
-                .insert_children(insert_offset, &children_entities);
+            insert_children_clamped(world, parent, insert_offset, &children_entities);
             for (child, child_entity) in children_vec.into_iter().zip(children_entities.iter().copied()) {
                 child.spawn_on_entity(world, child_entity).unwrap();
             }
         };
-        self.on_spawn(on_spawn)
+        self.on_spawn_with_base_block(on_spawn)
     }
 
     /// Declare reactive children.
-    pub fn children_signal_vec(self, children_signal_vec: impl SignalVec<Item = Builder>) -> Self {
-        let block = self.next_block.fetch_add(1, Ordering::Relaxed);
-        let on_spawn = move |world: &mut World, parent: Entity| {
+    pub fn children_signal_vec(mut self, children_signal_vec: impl SignalVec<Item = Builder>) -> Self {
+        let local_block = self.block_count;
+        self.block_count += 1;
+        let on_spawn = move |world: &mut World, parent: Entity, base_block: usize| {
+            let block = base_block + local_block;
             let mut pops = world.get_mut::<ChildBlockPopulations>(parent).unwrap();
             pops.ensure_block(block);
 
@@ -395,14 +448,12 @@ impl Builder {
                     match diff {
                         VecDiff::Replace { values: children } => {
                             for child_entity in children_entities.drain(..) {
-                                world.entity_mut(child_entity).despawn();
+                                despawn_if_alive(world, child_entity);
                             }
                             *children_entities = children.iter().map(|_| world.spawn_empty().id()).collect();
                             let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
                             let insert_offset = offset(block, &pops.0);
-                            world
-                                .entity_mut(parent)
-                                .insert_children(insert_offset, &children_entities);
+                            insert_children_clamped(world, parent, insert_offset, &children_entities);
                             for (child, child_entity) in children.into_iter().zip(children_entities.iter().copied()) {
                                 child.spawn_on_entity(world, child_entity).unwrap();
                             }
@@ -412,9 +463,7 @@ impl Builder {
                             let child_entity = world.spawn_empty().id();
                             let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
                             let insert_offset = offset(block, &pops.0);
-                            world
-                                .entity_mut(parent)
-                                .insert_children(insert_offset + index, &[child_entity]);
+                            insert_children_clamped(world, parent, insert_offset + index, &[child_entity]);
                             child.spawn_on_entity(world, child_entity).unwrap();
                             children_entities.insert(index, child_entity);
                             world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
@@ -423,50 +472,43 @@ impl Builder {
                             let child_entity = world.spawn_empty().id();
                             let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
                             let insert_offset = offset(block, &pops.0);
-                            world
-                                .entity_mut(parent)
-                                .insert_children(insert_offset + children_entities.len(), &[child_entity]);
+                            insert_children_clamped(
+                                world,
+                                parent,
+                                insert_offset + children_entities.len(),
+                                &[child_entity],
+                            );
                             child.spawn_on_entity(world, child_entity).unwrap();
                             children_entities.push(child_entity);
                             world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                         VecDiff::UpdateAt { index, value: node } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
-                                world.entity_mut(existing_child).despawn(); // removes from parent
+                                despawn_if_alive(world, existing_child);
                             }
                             let child_entity = world.spawn_empty().id();
                             let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
                             let insert_offset = offset(block, &pops.0);
-                            world
-                                .entity_mut(parent)
-                                .insert_children(insert_offset + index, &[child_entity]);
+                            insert_children_clamped(world, parent, insert_offset + index, &[child_entity]);
                             node.spawn_on_entity(world, child_entity).unwrap();
                             children_entities[index] = child_entity;
                         }
                         VecDiff::Move { old_index, new_index } => {
-                            // First, update our local tracker to match the new logical order. This is the
-                            // source of truth for which entity corresponds to which index.
+                            // First, update our local tracker to match the new logical order. This
+                            // is the source of truth for which entity corresponds to which index.
                             let moved_entity = children_entities.remove(old_index);
                             children_entities.insert(new_index, moved_entity);
 
-                            // Now, apply the same reordering to the actual parent entity in the world.
-                            let mut parent = world.entity_mut(parent);
-                            // Bevy's `remove_children` finds the entity and removes it from its
-                            // current position, correctly shifting subsequent children.
-                            parent.detach_children(&[moved_entity]);
-                            let parent_entity = parent.id();
-
-                            // The new insertion index must be calculated with the offset from any
-                            // preceding static children.
-                            let pops = world.get::<ChildBlockPopulations>(parent_entity).unwrap();
-                            let insert_offset = offset(block, &pops.0);
-                            world
-                                .entity_mut(parent_entity)
-                                .insert_children(insert_offset + new_index, &[moved_entity]);
+                            if world.get_entity(moved_entity).is_ok() {
+                                world.entity_mut(parent).detach_children(&[moved_entity]);
+                                let pops = world.get::<ChildBlockPopulations>(parent).unwrap();
+                                let insert_offset = offset(block, &pops.0);
+                                insert_children_clamped(world, parent, insert_offset + new_index, &[moved_entity]);
+                            }
                         }
                         VecDiff::RemoveAt { index } => {
                             if let Some(existing_child) = children_entities.get(index).copied() {
-                                world.entity_mut(existing_child).despawn();
+                                despawn_if_alive(world, existing_child);
                                 children_entities.remove(index);
                                 world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] =
                                     children_entities.len();
@@ -474,24 +516,24 @@ impl Builder {
                         }
                         VecDiff::Pop => {
                             if let Some(child_entity) = children_entities.pop() {
-                                world.entity_mut(child_entity).despawn();
+                                despawn_if_alive(world, child_entity);
                                 world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] =
                                     children_entities.len();
                             }
                         }
                         VecDiff::Clear => {
                             for child_entity in children_entities.drain(..) {
-                                world.entity_mut(child_entity).despawn();
+                                despawn_if_alive(world, child_entity);
                             }
                             world.get_mut::<ChildBlockPopulations>(parent).unwrap().0[block] = children_entities.len();
                         }
                     }
                 }
             };
-            let handle = children_signal_vec.for_each(system).register(world);
-            add_handles(world, parent, [handle]);
+            let claim = children_signal_vec.for_each(system).register(world);
+            add_claims(world, parent, [claim]);
         };
-        self.on_spawn(on_spawn)
+        self.on_spawn_with_base_block(on_spawn)
     }
 
     /// Spawn this builder on an existing [`Entity`].
@@ -503,9 +545,19 @@ impl Builder {
     pub fn spawn_on_entity(self, world: &mut World, entity: Entity) -> Result<(), EntityMutableFetchError> {
         let mut entity_mut = world.get_entity_mut(entity)?;
         let id = entity_mut.id();
-        entity_mut.insert((SignalHandles::default(), ChildBlockPopulations::default()));
+        if !entity_mut.contains::<SignalClaims>() {
+            entity_mut.insert(SignalClaims::default());
+        }
+        let base_block = if let Some(mut pops) = entity_mut.get_mut::<ChildBlockPopulations>() {
+            let base = pops.0.len();
+            pops.0.resize(base + self.block_count, 0);
+            base
+        } else {
+            entity_mut.insert(ChildBlockPopulations(vec![0; self.block_count]));
+            0
+        };
         for on_spawn in self.on_spawns {
-            on_spawn(world, id);
+            on_spawn(world, id, base_block);
         }
         Ok(())
     }
@@ -526,14 +578,14 @@ impl Builder {
 /// Use the [`.task()`](SignalTaskExt::task) method to convert a [`Signal`],
 /// [`SignalVec`], or [`SignalMap`] into a [`SignalTask`].
 pub trait SignalTask: Send + Sync + 'static {
-    /// Register this signal task with the world and return its handle.
-    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle;
+    /// Register this signal task with the world and return its claim.
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalClaim;
 }
 
 struct SignalTaskSignal<S>(S);
 
 impl<S: Signal + Send + Sync + 'static> SignalTask for SignalTaskSignal<S> {
-    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalClaim {
         self.0.register(world)
     }
 }
@@ -552,7 +604,7 @@ impl<S: Signal + Sized + Send + Sync + 'static> SignalTaskExt for S {}
 struct SignalTaskSignalVec<S>(S);
 
 impl<S: SignalVec + Send + Sync + 'static> SignalTask for SignalTaskSignalVec<S> {
-    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalClaim {
         self.0.register(world)
     }
 }
@@ -571,7 +623,7 @@ impl<S: SignalVec + Sized + Send + Sync + 'static> SignalVecTaskExt for S {}
 struct SignalTaskSignalMap<S>(S);
 
 impl<S: SignalMap + Send + Sync + 'static> SignalTask for SignalTaskSignalMap<S> {
-    fn register_task(self: Box<Self>, world: &mut World) -> SignalHandle {
+    fn register_task(self: Box<Self>, world: &mut World) -> SignalClaim {
         self.0.register(world)
     }
 }
@@ -600,15 +652,27 @@ fn on_despawn_hook(mut world: DeferredWorld, ctx: HookContext) {
 #[component(on_remove = on_despawn_hook)]
 struct OnDespawnCallbacks(Vec<Box<dyn FnOnce(&mut DeferredWorld, Entity) + Send + Sync + 'static>>);
 
-fn add_handles<I>(world: &mut World, entity: Entity, handles: I)
+fn add_claims<I>(world: &mut World, entity: Entity, claims: I)
 where
-    I: IntoIterator<Item = SignalHandle>,
+    I: IntoIterator<Item = SignalClaim>,
 {
     let mut entity = world.entity_mut(entity);
-    let mut existing_handles = entity.get_mut::<SignalHandles>().unwrap();
-    for handle in handles {
-        existing_handles.add(handle);
+    let mut existing_claims = entity.get_mut::<SignalClaims>().unwrap();
+    for claim in claims {
+        existing_claims.add(claim);
     }
+}
+
+fn despawn_if_alive(world: &mut World, entity: Entity) {
+    if let Ok(child) = world.get_entity_mut(entity) {
+        child.despawn();
+    }
+}
+
+fn insert_children_clamped(world: &mut World, parent: Entity, desired_index: usize, children: &[Entity]) {
+    let current_len = world.get::<Children>(parent).map_or(0, Children::len);
+    let index = desired_index.min(current_len);
+    EntityWorldMut::insert_children(&mut world.entity_mut(parent), index, children);
 }
 
 fn offset(i: usize, child_block_populations: &[usize]) -> usize {
@@ -620,7 +684,7 @@ mod tests {
     use super::*;
     use crate::{
         self as jonmo, JonmoPlugin,
-        graph::STALE_SIGNALS,
+        graph::{SignalClaimCount, SignalEntity},
         signal::{self, SignalExt},
         signal_vec::MutableVec,
     };
@@ -632,15 +696,113 @@ mod tests {
 
     /// Helper to create a minimal Bevy App with the JonmoPlugin for testing.
     fn create_test_app() -> App {
-        cleanup();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, JonmoPlugin::default()));
         app
     }
 
-    fn cleanup() {
-        STALE_SIGNALS.lock().unwrap().clear();
-        crate::signal_vec::tests::cleanup(true);
+    fn claim_count(world: &World, signal: SignalEntity) -> usize {
+        **world
+            .get::<SignalClaimCount>(*signal)
+            .expect("registered signal should have a claim count")
+    }
+
+    #[test]
+    fn adding_claims_and_removing_owner_releases_once_registration_ownership_observability() {
+        let mut app = create_test_app();
+        let retained = signal::from_system(|In(_)| 1).broadcast();
+        let first = retained.clone().register(app.world_mut());
+        let second = retained.clone().register(app.world_mut());
+        let signal = first.entity();
+        let owner = app.world_mut().spawn(SignalClaims::default()).id();
+
+        add_claims(app.world_mut(), owner, [first]);
+        add_claims(app.world_mut(), owner, [second]);
+        assert_eq!(app.world().get::<SignalClaims>(owner).unwrap().len(), 2);
+        assert_eq!(claim_count(app.world(), signal), 2);
+
+        app.world_mut().entity_mut(owner).remove::<SignalClaims>();
+        app.world_mut().flush();
+        assert_eq!(claim_count(app.world(), signal), 0);
+        app.world_mut().flush();
+        assert_eq!(claim_count(app.world(), signal), 0);
+    }
+
+    #[test]
+    fn replacing_claim_owner_releases_only_replaced_claims_registration_ownership_observability() {
+        let mut app = create_test_app();
+        let retained = signal::from_system(|In(_)| 1).broadcast();
+        let replaced = retained.clone().register(app.world_mut());
+        let replacement = retained.clone().register(app.world_mut());
+        let signal = replaced.entity();
+        let owner = app.world_mut().spawn(SignalClaims::from([replaced])).id();
+        assert_eq!(claim_count(app.world(), signal), 2);
+
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(SignalClaims::from([replacement]));
+        app.world_mut().flush();
+        assert_eq!(app.world().get::<SignalClaims>(owner).unwrap().len(), 1);
+        assert_eq!(claim_count(app.world(), signal), 1);
+
+        app.world_mut().entity_mut(owner).remove::<SignalClaims>();
+        app.world_mut().flush();
+        assert_eq!(claim_count(app.world(), signal), 0);
+    }
+
+    #[test]
+    fn despawning_claim_owner_releases_once_registration_ownership_observability() {
+        let mut app = create_test_app();
+        let retained = signal::from_system(|In(_)| 1).broadcast();
+        let first = retained.clone().register(app.world_mut());
+        let second = retained.clone().register(app.world_mut());
+        let signal = first.entity();
+        let owner = app.world_mut().spawn(SignalClaims::from([first, second])).id();
+        assert_eq!(claim_count(app.world(), signal), 2);
+
+        app.world_mut().entity_mut(owner).despawn();
+        app.world_mut().flush();
+        assert_eq!(claim_count(app.world(), signal), 0);
+    }
+
+    #[test]
+    fn builder_preserves_and_accumulates_claims_registration_ownership_observability() {
+        let mut app = create_test_app();
+        let signal_a = signal::from_system(|In(_)| 1).broadcast();
+        let signal_b = signal::from_system(|In(_)| 2).broadcast();
+        let probe_a = signal_a.clone().register(app.world_mut());
+        let entity_a = probe_a.entity();
+        probe_a.release(app.world_mut());
+        let probe_b = signal_b.clone().register(app.world_mut());
+        let entity_b = probe_b.entity();
+        probe_b.release(app.world_mut());
+
+        let owner = Builder::new()
+            .hold_tasks(vec![signal_a.clone().task(), signal_b.clone().task()])
+            .spawn(app.world_mut());
+        assert_eq!(app.world().get::<SignalClaims>(owner).unwrap().len(), 2);
+        assert_eq!(claim_count(app.world(), entity_a), 1);
+        assert_eq!(claim_count(app.world(), entity_b), 1);
+
+        Builder::new()
+            .spawn_on_entity(app.world_mut(), owner)
+            .expect("empty builder initialization should preserve existing claims");
+        assert_eq!(app.world().get::<SignalClaims>(owner).unwrap().len(), 2);
+        assert_eq!(claim_count(app.world(), entity_a), 1);
+        assert_eq!(claim_count(app.world(), entity_b), 1);
+
+        Builder::new()
+            .hold_tasks(vec![signal_a.clone().task()])
+            .spawn_on_entity(app.world_mut(), owner)
+            .expect("the existing claim owner should remain spawnable");
+        assert_eq!(app.world().get::<SignalClaims>(owner).unwrap().len(), 3);
+        assert_eq!(claim_count(app.world(), entity_a), 2);
+        assert_eq!(claim_count(app.world(), entity_b), 1);
+
+        app.world_mut().entity_mut(owner).despawn();
+        app.world_mut().flush();
+        assert_eq!(claim_count(app.world(), entity_a), 0);
+        assert_eq!(claim_count(app.world(), entity_b), 0);
     }
 
     #[test]
@@ -674,7 +836,8 @@ mod tests {
         // It will only fire when the i32 value inside SignalSource actually changes.
         let source_signal = signal::from_resource::<SignalSource>()
             .map_in(|source: SignalSource| source.0)
-            .dedupe();
+            .dedupe()
+            .broadcast();
 
         // --- 2. Test Basic Execution & Correct Parameters ---
         let builder1 = jonmo::Builder::new()
@@ -714,10 +877,23 @@ mod tests {
         app.update();
 
         let output_guard = app.world().resource::<TestOutput>().0.lock().unwrap();
-        assert_eq!(output_guard.len(), 2, "Systems for both entities should have run.");
-        // Use a HashSet because the order of execution is not guaranteed.
+        assert_eq!(
+            output_guard.len(),
+            3,
+            "Entity 2 should receive the replayed 100 and then both entities should receive 200."
+        );
+        let entity2_values: Vec<i32> = output_guard
+            .iter()
+            .filter_map(|&(entity, value)| (entity == entity2).then_some(value))
+            .collect();
+        assert_eq!(
+            entity2_values,
+            vec![100, 200],
+            "Entity 2 should receive the current replayed 100 before the newer 200."
+        );
+        // Use a HashSet because the order between entity1 and entity2 is not guaranteed.
         let received_set: HashSet<(Entity, i32)> = output_guard.iter().cloned().collect();
-        let expected_set: HashSet<(Entity, i32)> = [(entity1, 200), (entity2, 200)].into();
+        let expected_set: HashSet<(Entity, i32)> = [(entity1, 200), (entity2, 100), (entity2, 200)].into();
         assert_eq!(
             received_set, expected_set,
             "Systems received incorrect parameters for multi-entity test."
@@ -787,7 +963,8 @@ mod tests {
         // The signal reads the resource and deduplicates it, so it only fires on change.
         let source_signal = signal::from_resource::<SignalSource>()
             .map_in(|source: SignalSource| source.0)
-            .dedupe();
+            .dedupe()
+            .broadcast();
 
         // The closure that will be passed to `on_signal_with_component`.
         // It adds the signal's value to the component's value.
@@ -846,7 +1023,10 @@ mod tests {
         assert_eq!(component1.0, 45, "Entity 1 should be 25 + 20 = 45.");
 
         let component2 = app.world().get::<TestComponent>(entity2).unwrap();
-        assert_eq!(component2.0, 120, "Entity 2 should be 100 + 20 = 120.");
+        assert_eq!(
+            component2.0, 130,
+            "Entity 2 should receive the current replayed 10 and then the newer 20."
+        );
 
         // --- 5. Test Automatic Cleanup ---
         // Despawn the first entity.
@@ -865,7 +1045,7 @@ mod tests {
 
         // Verify that only the second entity was updated.
         let component2 = app.world().get::<TestComponent>(entity2).unwrap();
-        assert_eq!(component2.0, 150, "Only Entity 2 should be updated (120 + 30).");
+        assert_eq!(component2.0, 160, "Only Entity 2 should be updated (130 + 30).");
     }
 
     #[test]
@@ -890,7 +1070,8 @@ mod tests {
             .dedupe()
             .map_in(|source: SignalSource| {
                 source.0.map(TargetComponent) // Option<String> -> Option<TargetComponent>
-            });
+            })
+            .broadcast();
 
         // --- 2. Test Initial Insertion ---
         let builder = jonmo::Builder::new().component_signal(source_signal.clone());
@@ -1162,7 +1343,8 @@ mod tests {
             app.update();
 
             // --- 6. Test: Child's Signals Function Correctly ---
-            // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+            // Use LazyEntity + signal::Builder pattern instead of removed
+            // component_signal_from_parent
             let child_entity = LazyEntity::new();
             let child_builder_with_signal = jonmo::Builder::new().lazy_entity(child_entity.clone()).on_signal(
                 signal::from_parent(child_entity.clone())
@@ -1209,8 +1391,6 @@ mod tests {
             app.world_mut().entity_mut(parent_entity_signal).despawn();
             app.update();
         }
-
-        cleanup()
     }
 
     // Marker components for easy identification in the child_signal test
@@ -1375,8 +1555,6 @@ mod tests {
                 "No reactive children should exist after parent is despawned."
             );
         }
-
-        cleanup()
     }
 
     #[test]
@@ -1485,7 +1663,8 @@ mod tests {
             // Verifies that children can have their own complex logic (signals, hierarchy) and that
             // they are properly cleaned up when the parent is despawned.
             {
-                // Use LazyEntity + signal::Builder pattern instead of removed component_signal_from_parent
+                // Use LazyEntity + signal::Builder pattern instead of removed
+                // component_signal_from_parent
                 let complex_child_entity = LazyEntity::new();
                 let complex_child_builder = jonmo::Builder::new()
                     .lazy_entity(complex_child_entity.clone())
@@ -1647,8 +1826,6 @@ mod tests {
                 assert_eq!(app.world().get::<Children>(parent_entity).unwrap().len(), 7);
             }
         }
-
-        cleanup()
     }
 
     /// Helper to get a Vec of all children's entity IDs.
@@ -1695,7 +1872,8 @@ mod tests {
             // The SignalVec that will drive the children.
             let children_signal = source_vec.signal_vec().map_in(child_builder_factory);
 
-            // The parent builder, with static children sandwiching the reactive ones to test ordering.
+            // The parent builder, with static children sandwiching the reactive ones to test
+            // ordering.
             let parent_builder = jonmo::Builder::new()
                 .insert(ParentComp)
                 .child(jonmo::Builder::new().insert(StaticChildBefore))
@@ -1866,8 +2044,6 @@ mod tests {
             app.update();
             // The test passes if the above update doesn't panic.
         }
-
-        cleanup()
     }
 
     #[test]
@@ -2089,5 +2265,149 @@ mod tests {
             child_entity,
             "Child callback should receive child entity."
         );
+    }
+
+    #[test]
+    fn test_multi_builder_spawn_on_entity_preserves_child_blocks() {
+        #[derive(Component)]
+        struct PlainMarker;
+
+        #[derive(Resource, Clone)]
+        struct HeaderA(Option<&'static str>);
+
+        #[derive(Resource, Clone)]
+        struct HeaderB(Option<&'static str>);
+
+        fn child_names(world: &World, parent: Entity) -> Vec<String> {
+            world
+                .get::<Children>(parent)
+                .map(|children| {
+                    children
+                        .iter()
+                        .map(|child| world.get::<Name>(child).unwrap().as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        let mut app = create_test_app();
+        app.insert_resource(HeaderA(Some("a_head")));
+        app.insert_resource(HeaderB(Some("b_head")));
+
+        let vec_a = MutableVec::builder().values(["a1", "a2"]).spawn(app.world_mut());
+        let vec_b = MutableVec::builder().values(["b1", "b2"]).spawn(app.world_mut());
+
+        // First Builder spawned onto a fresh entity with child_signal + children_signal_vec.
+        let parent = jonmo::Builder::new()
+            .child(Name::new("a_static"))
+            .child_signal(
+                signal::from_resource_changed::<HeaderA>()
+                    .map_in(|HeaderA(label)| label.map(|s| jonmo::Builder::from(Name::new(s)))),
+            )
+            .children_signal_vec(
+                vec_a
+                    .signal_vec()
+                    .map_in(|label: &'static str| jonmo::Builder::from(Name::new(label))),
+            )
+            .spawn(app.world_mut());
+
+        // Second Builder injected onto the SAME entity with its own child_signal +
+        // children_signal_vec.
+        jonmo::Builder::new()
+            .child_signal(
+                signal::from_resource_changed::<HeaderB>()
+                    .map_in(|HeaderB(label)| label.map(|s| jonmo::Builder::from(Name::new(s)))),
+            )
+            .children_signal_vec(
+                vec_b
+                    .signal_vec()
+                    .map_in(|label: &'static str| jonmo::Builder::from(Name::new(label))),
+            )
+            .spawn_on_entity(app.world_mut(), parent)
+            .unwrap();
+
+        // Third Builder injected onto the SAME entity attaching only a plain component.
+        jonmo::Builder::new()
+            .insert(PlainMarker)
+            .spawn_on_entity(app.world_mut(), parent)
+            .unwrap();
+
+        app.update();
+        assert!(app.world().get::<PlainMarker>(parent).is_some());
+        assert_eq!(
+            child_names(app.world(), parent),
+            vec!["a_static", "a_head", "a1", "a2", "b_head", "b1", "b2"]
+        );
+
+        // Toggle HeaderA off, push to vec_a, insert into vec_b, update HeaderB.
+        app.insert_resource(HeaderA(None));
+        vec_a.write(app.world_mut()).push("a3");
+        app.insert_resource(HeaderB(Some("b_head_2")));
+        vec_b.write(app.world_mut()).insert(1, "b1_5");
+        app.update();
+        assert_eq!(
+            child_names(app.world(), parent),
+            vec!["a_static", "a1", "a2", "a3", "b_head_2", "b1", "b1_5", "b2"]
+        );
+
+        // Toggle HeaderA back on and remove from vec_a.
+        app.insert_resource(HeaderA(Some("a_head_2")));
+        vec_a.write(app.world_mut()).remove(1);
+        app.update();
+        assert_eq!(
+            child_names(app.world(), parent),
+            vec!["a_static", "a_head_2", "a1", "a3", "b_head_2", "b1", "b1_5", "b2"]
+        );
+    }
+
+    #[test]
+    fn test_external_child_despawn_resilience() {
+        #[derive(Resource, Clone)]
+        struct Toggle(Option<&'static str>);
+
+        let mut app = create_test_app();
+        app.insert_resource(Toggle(Some("sig_1")));
+        let vec_items = MutableVec::builder().values(["v1", "v2"]).spawn(app.world_mut());
+
+        let parent = jonmo::Builder::new()
+            .child(Name::new("static_sibling"))
+            .child_signal(
+                signal::from_resource_changed::<Toggle>()
+                    .map_in(|Toggle(label)| label.map(|s| jonmo::Builder::from(Name::new(s)))),
+            )
+            .children_signal_vec(
+                vec_items
+                    .signal_vec()
+                    .map_in(|label: &'static str| jonmo::Builder::from(Name::new(label))),
+            )
+            .spawn(app.world_mut());
+
+        app.update();
+        let initial_children: Vec<Entity> = app.world().get::<Children>(parent).unwrap().iter().collect();
+        assert_eq!(initial_children.len(), 4);
+
+        // Externally despawn the static sibling, the child_signal child, and the first vec child!
+        app.world_mut().entity_mut(initial_children[0]).despawn();
+        app.world_mut().entity_mut(initial_children[1]).despawn();
+        app.world_mut().entity_mut(initial_children[2]).despawn();
+
+        // Subsequent updates/moves/removals must not panic due to already-despawned children or
+        // clamped offsets.
+        app.insert_resource(Toggle(Some("sig_2")));
+        vec_items.write(app.world_mut()).push("v3");
+        vec_items.write(app.world_mut()).move_item(0, 2);
+        vec_items.write(app.world_mut()).set(2, "v1_replaced");
+        app.update();
+
+        app.insert_resource(Toggle(None));
+        vec_items.write(app.world_mut()).clear();
+        app.update();
+
+        let remaining: Vec<Entity> = app
+            .world()
+            .get::<Children>(parent)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        assert!(remaining.is_empty());
     }
 }

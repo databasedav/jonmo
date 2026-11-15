@@ -76,9 +76,9 @@ fn ui_root() -> jonmo::Builder {
                 // we're creating a signal that will produce a `Text` component whenever the counter
                 // changes.
                 .component_signal(
-                    // `signal::from_component_changed` creates a signal that reactively reads a component from an
-                    // entity that doesn't exist yet, identified by our `LazyEntity`, only firing when the component
-                    // changes.
+                    // `signal::from_component_changed` creates a signal that reactively reads a
+                    // component from an entity that doesn't exist yet, identified by our
+                    // `LazyEntity`, only firing when the component changes.
                     signal::from_component_changed::<Counter>(counter_holder.clone())
                         // `map_in` is a shorthand for `.map` that takes a regular function instead of a Bevy
                         // system; this is especially convenient when additional `SystemParam`s aren't necessary.

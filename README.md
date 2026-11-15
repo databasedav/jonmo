@@ -8,16 +8,18 @@
 in bengali, jonmo means "birth"
 ```
 
-[jonmo](https://github.com/databasedav/jonmo) provides an ergonomic, functional, and declarative API for specifying Bevy [system](https://docs.rs/bevy/latest/bevy/ecs/system/index.html) dependency graphs, where "output" handles to nodes of the graph are canonically referred to as "signals". Building upon these signals, jonmo offers a high level [entity builder](https://docs.rs/jonmo/latest/jonmo/builder/struct.Builder.html) which enables one to declare reactive entities, components, and children using a familiar fluent syntax with semantics and API ported from the incredible [FRP](https://en.wikipedia.org/wiki/Functional_reactive_programming) signals of [futures-signals](https://github.com/Pauan/rust-signals) and its web UI dependents [MoonZoon](https://github.com/MoonZoon/MoonZoon) and [Dominator](https://github.com/Pauan/rust-dominator).
+[jonmo](https://github.com/databasedav/jonmo) provides an ergonomic, functional, and declarative API for specifying Bevy [system](https://docs.rs/bevy/latest/bevy/ecs/system/index.html) dependency graphs. Its lazy, composable graph values are canonically referred to as "signals". Building upon these signals, jonmo offers a high level [entity builder](https://docs.rs/jonmo/latest/jonmo/builder/struct.Builder.html) which enables one to declare reactive entities, components, and children using a familiar fluent syntax with semantics and API ported from the incredible [FRP](https://en.wikipedia.org/wiki/Functional_reactive_programming) signals of [futures-signals](https://github.com/Pauan/rust-signals) and its web UI dependents [MoonZoon](https://github.com/MoonZoon/MoonZoon) and [Dominator](https://github.com/Pauan/rust-dominator).
 
-The runtime of jonmo is quite simple; every frame, the outputs of systems are forwarded to their dependants, recursively. The complexity and power of jonmo really emerges from its monadic signal combinators, defined within the [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html), [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/signal_vec/trait.SignalVecExt.html), and [`SignalMapExt`](https://docs.rs/jonmo/latest/jonmo/signal_map/trait.SignalMapExt.html) traits (ported from futures-signals' traits of the same name), which internally manage special Bevy systems that allow for the declarative composition of complex data flows with minimalistic, high-level, signals-oriented methods.
+The runtime of jonmo processes materialized signal entities in deterministic topological order per schedule: linear chains move values directly to their single active dependent without cloning, while explicit [`.broadcast()`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html#tymethod.broadcast) boundaries fan out to multiple active dependents and [`.cache()`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html#tymethod.cache) provides current-state replayability for dynamic switching. Signal combinators defined on [`SignalExt`](https://docs.rs/jonmo/latest/jonmo/signal/trait.SignalExt.html), [`SignalVecExt`](https://docs.rs/jonmo/latest/jonmo/signal_vec/trait.SignalVecExt.html), and [`SignalMapExt`](https://docs.rs/jonmo/latest/jonmo/signal_map/trait.SignalMapExt.html) (ported from futures-signals' traits of the same name) compose Bevy systems into static and dynamic reactive dataflows with concise, high-level methods.
 
 ### assorted features:
 - fine-grained reactivity for all entities, components, and children
+- move-first linear signal chains supporting non-`Clone` payloads (including move-only [`jonmo::Builder`](https://docs.rs/jonmo/latest/jonmo/builder/struct.Builder.html) recipes), with explicit `.broadcast()` fan-out and `.cache()` replayability
 - ***diff-less*** constant-time reactive updates for collections (available through [`MutableVec`](https://docs.rs/jonmo/latest/jonmo/signal_vec/struct.MutableVec.html) and [`MutableBTreeMap`](https://docs.rs/jonmo/latest/jonmo/signal_map/struct.MutableBTreeMap.html))
-- automated system lifecycle management when using the builder API, simple component on-remove hook when not
-- polling API for when one needs an escape hatch from the regular push-based output semantics (polling is used sparsely internally for some combinators)
-- either wrappers (a la <https://github.com/rayon-rs/either>) and type-erased signals (via boxing) for cheap and flexible management of distinct signal types from different branches of logic
+- automated world-local lifecycle and claim management through `Builder` or linear `SignalClaim` / `SignalClaims` ownership
+- public `SignalRegistrar` and `DynamicSignalOperatorSpec` APIs giving custom static and dynamic combinators parity with built-ins
+- non-executing replay-cache inspection (`inspect_*_replay_cache`), plus opt-in imperative subgraph evaluation behind the `imperative-signal-evaluation` feature
+- either wrappers (a la <https://github.com/rayon-rs/either>) and move-only type-erased signals (via boxing) for flexible branching across distinct signal types
 - `no_std` compatible
 
 ## [feature flags](https://docs.rs/jonmo/latest/jonmo/#feature-flags-1)
@@ -35,7 +37,7 @@ use jonmo::prelude::*;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, JonmoPlugin))
+        .add_plugins((DefaultPlugins, JonmoPlugin::default()))
         .add_systems(
             Startup,
             (
@@ -144,7 +146,7 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
 |bevy|jonmo|
 |-|-|
-|0.18|0.7|
+|0.18|0.7–0.8|
 |0.17|0.6|
 |0.16|0.3|
 |0.15|0.1|

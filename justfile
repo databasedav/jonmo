@@ -1,6 +1,6 @@
 set allow-duplicate-recipes
 
-KAAJ_HAALKA_COMMIT := "76f9d4427977a475624a90c397e682a37931be51"
+KAAJ_HAALKA_COMMIT := "3b496e5d55d86fc57703a90c7c731fe430ec6ac0"
 
 fetch_kaaj_justfile:
   curl https://raw.githubusercontent.com/databasedav/haalka/{{ KAAJ_HAALKA_COMMIT }}/kaaj/justfile > kaaj.just
@@ -12,7 +12,7 @@ format_nickels:
   nickel format nickel/Nickel-pkg.ncl
 
 test:
-  cargo test tests -- --test-threads=1 && just doctest
+  cargo test --lib --tests --locked && cargo test --lib --tests --all-features --locked && just doctest
 
 # TODO: use an actual list https://github.com/casey/just/issues/2458
 exclude_examples := '"test", "utils"'
