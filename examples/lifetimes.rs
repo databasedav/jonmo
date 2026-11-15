@@ -209,7 +209,8 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
             // Child 2: A reactive text span for the index.
             .child(
                 jonmo::Builder::from(TextColor(Color::BLACK)).component_signal(
-                    // `component_signal` takes a signal and uses its output to insert/update a component.
+                    // `component_signal` takes a signal and uses its output to insert/update a
+                    // component.
                     index
                         .clone()
                         .map_in(|index| index.as_ref().map(ToString::to_string).map(TextSpan)),
@@ -221,8 +222,8 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
             .child(
                 jonmo::Builder::from(TextColor(Color::BLACK)).component_signal(
                     // This is where the `LazyEntity` becomes powerful.
-                    // We create a signal that reads a component from the entity that `lifetime_holder` will eventually
-                    // point to.
+                    // We create a signal that reads a component from the entity that
+                    // `lifetime_holder` will eventually point to.
                     signal::from_component_changed(lifetime_holder)
                         // Map the `Lifetime` component to its inner `f32` value and round it.
                         .map_in(|Lifetime(lifetime)| lifetime.round())
