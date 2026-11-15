@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![allow(unused_variables)]
 mod utils;
 use utils::*;
 
@@ -15,7 +14,7 @@ fn main() {
             PostStartup,
             (
                 move |world: &mut World| {
-                    ui_root(numbers.clone(), world).spawn(world);
+                    ui_root(numbers.clone()).spawn(world);
                 },
                 camera,
             ),
@@ -31,12 +30,7 @@ struct Numbers(MutableVec<i32>);
 #[derive(Component, Default, Clone)]
 struct Lifetime(f32);
 
-#[rustfmt::skip]
-fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> jonmo::Builder {
-    let list_a = MutableVec::builder().values([1, 2, 3, 4, 5]).spawn(world).signal_vec();
-    let list_b = MutableVec::builder().values([3, 4, 5]).spawn(world).signal_vec();
-    let map = MutableBTreeMap::builder().values([(1, 2), (2, 3)]).spawn(world);
-    // map.signal_map().
+fn ui_root(numbers: MutableVec<i32>) -> jonmo::Builder {
     jonmo::Builder::from(Node {
         height: Val::Percent(100.0),
         width: Val::Percent(100.0),
@@ -46,56 +40,14 @@ fn ui_root(numbers: MutableVec<i32>, world: &mut World) -> jonmo::Builder {
         row_gap: Val::Px(10.0),
         ..default()
     })
-    // .child_signal(numbers.clone().is_empty().map(|In(len)| item(len as u32)))
     .children_signal_vec(
-        // MutableVec::from([numbers.signal_vec(), numbers.signal_vec()]).signal_vec()
         numbers
             .signal_vec()
-            // signal::from_system(|In(_)| 1)
-            // signal::from_system(|In(_), toggle: Res<ToggleFilter>| toggle.0)
-            // .dedupe()
-            // .switch_signal_vec(move |In(toggle)| {
-            //     if toggle {
-            //         // println!("toggled to A");
-            //         list_a.clone()
-            //     } else {
-            //         // println!("toggled to B");
-            //         list_b.clone()
-            //     }
-            // })
-            // .dedupe()
-            // .to_signal_vec()
             .filter_signal(|In(n)| {
-                signal::from_system(move |In(_), toggle: Res<ToggleFilter>| {
-                    n % 2 == if toggle.0 { 0 } else { 1 }
-                })
+                signal::from_system(move |In(_), toggle: Res<ToggleFilter>| n % 2 == if toggle.0 { 0 } else { 1 })
+                    .cache()
             })
-            // .map_signal(|In(n): In<i32>| {
-            //     signal::from_system(move |In(_)| n + 1).dedupe()
-            // })
-            // .debug()
-            // .map_in(|n: i32| -n)
-            // .sort_by_cmp()
-            // .flatten()
-            // .chain(numbers)
-            // .intersperse(0)
-            // .sort_by(|In((left, right)): In<(i32, i32)>| left.cmp(&right).reverse())
-            // .sort_by_key(|In(n): In<i32>| -n)
-            // .intersperse_with(|In(index_signal): In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>, world: &mut World| {
-            //     let signal = index_signal.debug().register(world);
-            //     poll_signal(world, *signal)
-            //         .and_then(downcast_any_clone::<Option<usize>>).flatten().unwrap_or_default() as i32
-            // })
-            .map(|In(n)| item(n))
-            // .intersperse_with(
-            //     |index_signal: In<jonmo::signal::Dedupe<jonmo::signal::Source<Option<usize>>>>| {
-            //         jonmo::Builder::from(Node::default()).component_signal(
-            //             index_signal
-            //                 .debug()
-            //                 .map_in(|idx_opt| Text::new(format!("{}", idx_opt.unwrap_or(0)))),
-            //         )
-            //     },
-            // ),
+            .map(|In(n)| item(n)),
     )
 }
 

@@ -68,7 +68,19 @@ fn get_active_map(save_states: &SaveStates, active_save: ActiveSave) -> MutableB
 const LETTER_SIZE: f32 = 60.;
 
 fn ui_root() -> jonmo::Builder {
-    let active_save = signal::from_resource_changed::<ActiveSave>();
+    let active_save = signal::from_resource_changed::<ActiveSave>().broadcast();
+    let active_map = active_save
+        .clone()
+        .switch_signal_map(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+            get_active_map(&save_states, active_save).signal_map()
+        })
+        .broadcast();
+    let active_entries = active_save
+        .clone()
+        .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
+            get_active_map(&save_states, active_save).signal_vec_entries()
+        })
+        .broadcast();
 
     jonmo::Builder::from(Node {
         height: Val::Percent(100.0),
@@ -102,42 +114,36 @@ fn ui_root() -> jonmo::Builder {
                 }))),
             )
             .child(
-                sum_container()
-                .child(
+                sum_container().child(
                     text_node()
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .with_component::<Node>(|mut node| node.height = Val::Px(100.))
                         .component_signal(
-                            active_save
+                            active_entries
                                 .clone()
-                                .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
-                                    get_active_map(&save_states, active_save).signal_vec_entries()
-                                })
                                 .map_in(|(_, LetterData { count, .. })| count)
                                 .sum()
                                 .dedupe()
                                 .map_in_ref(ToString::to_string)
                                 .map_in(Text)
                                 .map_in(Some),
-                        )
+                        ),
                 ),
             ),
         )
-        .children(ROWS.into_iter().map(clone!((active_save) move |row| {
+        .children(ROWS.into_iter().map(clone!((active_map, active_entries) move |row| {
             jonmo::Builder::from(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(GAP * 2.),
                 ..default()
             })
             .children(row.chars().map(
-                clone!((active_save) move |l| {
-                    let letter_data = active_save
+                clone!((active_map) move |l| {
+                    let letter_data = active_map
                         .clone()
-                        .switch_signal_map(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
-                            get_active_map(&save_states, active_save).signal_map()
-                        })
                         .key(l)
-                        .map_in(Option::unwrap_or_default);
+                        .map_in(Option::unwrap_or_default)
+                        .broadcast();
                     letter(l, letter_data)
                 }),
             ))
@@ -147,11 +153,8 @@ fn ui_root() -> jonmo::Builder {
                     text_node()
                         .insert((TextColor(BLUE), TextFont::from_font_size(LETTER_SIZE)))
                         .component_signal(
-                            active_save
+                            active_entries
                                 .clone()
-                                .switch_signal_vec(move |In(active_save): In<ActiveSave>, save_states: Res<SaveStates>| {
-                                    get_active_map(&save_states, active_save).signal_vec_entries()
-                                })
                                 .filter(move |In((letter, _))| row.contains(letter))
                                 .map_in(|(_, LetterData { count, .. })| count)
                                 .sum()
@@ -178,7 +181,7 @@ fn sum_container() -> jonmo::Builder {
     })
 }
 
-fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave> + Clone) -> jonmo::Builder {
+fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave>) -> jonmo::Builder {
     jonmo::Builder::from((Node {
         width: Val::Px(100.),
         height: Val::Px(100.),
@@ -247,8 +250,7 @@ fn letter(letter: char, data: impl Signal<Item = LetterData> + Clone) -> jonmo::
         text_node()
             .insert(TextFont::from_font_size(LETTER_SIZE / 1.5))
             .component_signal(
-                data.clone()
-                    .map_in(|LetterData { count, .. }| count)
+                data.map_in(|LetterData { count, .. }| count)
                     .dedupe()
                     .map_in_ref(ToString::to_string)
                     .map_in(Text)
