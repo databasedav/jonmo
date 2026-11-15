@@ -25,8 +25,8 @@ fn main() {
     // 1. --- DATA SOURCE SETUP ---
     // `MutableVec` is the core reactive data source for lists in `jonmo`.
     // We initialize it with two random colors.
-    // It's wrapped in an `Arc<RwLock<...>>` internally, so cloning it is cheap
-    // and allows multiple systems to access and modify the same data.
+    // Its backing data lives in an ECS `MutableVecData<Color>` component, so cloning
+    // the `MutableVec` handle is cheap and lets multiple systems access the same list.
     let colors = MutableVec::builder()
         .values([random_color(), random_color()])
         .spawn(world);
@@ -34,12 +34,10 @@ fn main() {
     app.add_plugins(examples_plugin)
         // 2. --- RESOURCE MANAGEMENT ---
         // We insert a clone of our `MutableVec` into a Bevy resource. This makes it
-        // accessible to any system that needs to read or modify the list of colors,
-        // such as our `hotkeys` system or the remove button's `observe` system.
+        // accessible to any system or observer that needs to read or modify the list of colors,
+        // such as our `+` and remove button `observe` handlers.
         .insert_resource(Colors(colors.clone()))
         .add_systems(
-            // We use `PostStartup` to ensure that Bevy's UI systems are initialized
-            // before we try to spawn our UI.
             Startup,
             (
                 // 3. --- UI SPAWNING ---
@@ -102,7 +100,9 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> jonmo::Builder {
         // The first element of the tuple is a *new signal* that will always contain
         // the current index of that specific item, or `None` if it has been removed.
         // This is crucial for displaying the index or for actions like removing a specific item.
-        colors.enumerate().map_in(|(index, color)| item(index.dedupe(), color)),
+        colors
+            .enumerate()
+            .map_in(|(index, color)| item(index.dedupe().broadcast(), color)),
     )
     .child(
         jonmo::Builder::from((
@@ -126,9 +126,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> jonmo::Builder {
                 move |_: On<Pointer<Click>>,
                       colors: Res<Colors>,
                       mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
-                    // Try to get the `Index` component from the clicked entity.
-                    // We found the index! Now we can mutate the central data source.
-                    // `colors.0.write()` gets a write lock on the `MutableVec`.
+                    // Append a new random color to the central `MutableVec` data source.
                     let mut guard = colors.0.write(&mut mutable_vec_datas);
                     guard.insert(guard.len(), random_color());
                 },

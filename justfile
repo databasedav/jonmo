@@ -18,7 +18,7 @@ clippy *extras:
   cargo +stable clippy --all-features --all-targets --locked --no-deps {{ extras }} -- --deny warnings
 
 test:
-  cargo test tests -- --test-threads=1 && just doctest
+  cargo test --lib --tests --locked && cargo test --lib --tests --all-features --locked && just doctest
 
 # TODO: use an actual list https://github.com/casey/just/issues/2458
 exclude_examples := '"test", "utils"'

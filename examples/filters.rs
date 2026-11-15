@@ -435,9 +435,11 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jon
                 .switch_signal_vec(move |In(sorted)| {
                     let base = items.signal_vec().enumerate();
                     if sorted {
-                        base.sort_by_key(|In((_, Data { number, .. }))| number).left_either()
+                        base.sort_by_key(|In((_, Data { number, .. }))| number)
+                            .cache()
+                            .left_either()
                     } else {
-                        base.right_either()
+                        base.cache().right_either()
                     }
                 })
                 .filter_signal(clone!((row_parent) move | In((_, Data { number, .. })) | {
