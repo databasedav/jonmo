@@ -191,7 +191,7 @@ fn save_card(save_char: char, active_save_signal: impl Signal<Item = ActiveSave>
         border_radius: BorderRadius::all(Val::Px(GAP * 2.)),
         ..default()
     },))
-    .observe(move |_click: On<Pointer<Click>>, mut active_save: ResMut<ActiveSave>| {
+    .observe(move |_click: On<PointerClick>, mut active_save: ResMut<ActiveSave>| {
         active_save.0 = save_char;
     })
     .component_signal(

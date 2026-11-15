@@ -117,7 +117,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> jonmo::Builder {
                 TextLayout::justify(Justify::Center),
             )))
             .child(button("+", -2.).observe(
-                |_: On<Pointer<Click>>, datas: Res<Datas>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                |_: On<PointerClick>, datas: Res<Datas>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     datas.0.write(&mut mutable_vec_datas).insert(0, random_data());
                 },
             ))
@@ -152,7 +152,7 @@ fn ui(items: MutableVec<Data>, rows: MutableVec<()>) -> jonmo::Builder {
                 // BackgroundColor(Color::WHITE),
             ))
             .child(button("+", -2.).observe(
-                |_: On<Pointer<Click>>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
+                |_: On<PointerClick>, rows: Res<Rows>, mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     rows.0.write(&mut mutable_vec_datas).push(());
                 },
             )),
@@ -231,7 +231,7 @@ fn number_toggle(row_parent: LazyEntity, parity: Parity) -> impl Fn(jonmo::Build
     move |builder| {
         builder
             .observe(
-                clone!((row_parent) move |_: On<Pointer<Click>>, mut number_filters: Query<&mut NumberFilters>| {
+                clone!((row_parent) move |_: On<PointerClick>, mut number_filters: Query<&mut NumberFilters>| {
                     toggle(&mut number_filters.get_mut(*row_parent).unwrap().0, parity);
                 }),
             )
@@ -266,14 +266,12 @@ fn number_toggles(row_parent: LazyEntity) -> jonmo::Builder {
         text_node("sort")
             .insert(TextFont::from_font_size(13.))
             .insert(BackgroundColor(bevy::color::palettes::basic::GRAY.into()))
-            .observe(
-                clone!((row_parent) move |_: On<Pointer<Click>>, mut commands: Commands| {
-                    commands.queue(clone!((row_parent) move |world: &mut World| {
-                        let mut entity = world.entity_mut(*row_parent);
-                        if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
-                    }))
-                }),
-            )
+            .observe(clone!((row_parent) move |_: On<PointerClick>, mut commands: Commands| {
+                commands.queue(clone!((row_parent) move |world: &mut World| {
+                    let mut entity = world.entity_mut(*row_parent);
+                    if entity.take::<Sorted>().is_none() { entity.insert(Sorted); }
+                }))
+            }))
             .component_signal(
                 signal::from_entity(row_parent.clone())
                     .has_component::<Sorted>()
@@ -293,7 +291,7 @@ fn shape_toggle(row_parent: LazyEntity, shape: Shape) -> jonmo::Builder {
         BackgroundColor(bevy::color::palettes::basic::GRAY.into()),
     ))
     .observe(
-        clone!((row_parent) move |_: On<Pointer<Click>>, mut shape_filters: Query<&mut ShapeFilters>| {
+        clone!((row_parent) move |_: On<PointerClick>, mut shape_filters: Query<&mut ShapeFilters>| {
             toggle(&mut shape_filters.get_mut(*row_parent).unwrap().0, shape);
         }),
     )
@@ -342,7 +340,7 @@ fn color_toggles(row_parent: LazyEntity) -> jonmo::Builder {
                     BorderColor::all(Color::BLACK),
                 ))
                 .observe(
-                    clone!((row_parent) move |_: On<Pointer<Click>>, mut color_filters: Query<&mut ColorFilters>| {
+                    clone!((row_parent) move |_: On<PointerClick>, mut color_filters: Query<&mut ColorFilters>| {
                         toggle(&mut color_filters.get_mut(*row_parent).unwrap().0, color);
                     }),
                 )
@@ -398,7 +396,7 @@ fn row(index: impl Signal<Item = Option<usize>>, items: MutableVec<Data>) -> jon
         button("-", -3.)
             .component_signal(index.map_in(|index| index.map(Index)))
             .observe(
-                |click: On<Pointer<Click>>,
+                |click: On<PointerClick>,
                  rows: Res<Rows>,
                  indices: Query<&Index>,
                  mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
@@ -499,7 +497,7 @@ fn item(index: impl Signal<Item = Option<usize>>, Data { number, color, shape }:
     ))
     .component_signal(index.map_in(|index| index.map(Index)))
     .observe(
-        |click: On<Pointer<Click>>,
+        |click: On<PointerClick>,
          datas: Res<Datas>,
          indices: Query<&Index>,
          mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {

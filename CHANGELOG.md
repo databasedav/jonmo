@@ -6,7 +6,7 @@ the format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### changed
 
-- upgrade to bevy 0.19
+- upgrade to bevy 0.20
 - signals, signal vecs, and signal maps now use move-first delivery by default: ordinary concrete and boxed signal chains do not implement `Clone`, registration (`register` / `try_register`) and combinators consume their receiver, and linear chains support move-only (`!Clone`) items end-to-end
 - fan-out is now explicit via `SignalExt::broadcast`, `SignalVecExt::broadcast`, and `SignalMapExt::broadcast` (producing cloneable `Broadcast`, `BroadcastVec`, and `BroadcastMap` handles that perform exact N − 1 clones for N live active dependents)
 - replayability is separated from broadcast and expressed via `ReplayableSignal`, `ReplayableSignalVec`, and `ReplayableSignalMap`; non-replayable chains gain current-state replay through construction-time `.cache()` (`CachedSignal`, `CachedSignalVec`, `CachedSignalMap`), with `.cache().broadcast()` sharing one replay cache and `.broadcast().cache()` creating a branch-local warming cache on ordinary event broadcasts
