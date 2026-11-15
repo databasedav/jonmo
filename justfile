@@ -11,12 +11,6 @@ import? 'kaaj.just'
 format_nickels:
   nickel format nickel/Nickel-pkg.ncl
 
-doc *extras:
-  cargo +stable doc --all-features --no-deps --locked {{ extras }}
-
-clippy *extras:
-  cargo +stable clippy --all-features --all-targets --locked --no-deps {{ extras }} -- --deny warnings
-
 test:
   cargo test --lib --tests --locked && cargo test --lib --tests --all-features --locked && just doctest
 

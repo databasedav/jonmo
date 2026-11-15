@@ -123,7 +123,7 @@ fn ui_root(colors: impl SignalVec<Item = Color>) -> jonmo::Builder {
             // button entity to listen for a `Click` event.
             world.entity_mut(entity).observe(
                 // This closure is the event handler that runs when the button is clicked.
-                move |_: On<Pointer<Click>>,
+                move |_: On<PointerClick>,
                       colors: Res<Colors>,
                       mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {
                     // Append a new random color to the central `MutableVec` data source.
@@ -259,7 +259,7 @@ fn item(index: impl Signal<Item = Option<usize>> + Clone, color: Color) -> jonmo
             // button entity to listen for a `Click` event.
             world.entity_mut(entity).observe(
                 // This closure is the event handler that runs when the button is clicked.
-                move |_: On<Pointer<Click>>,
+                move |_: On<PointerClick>,
                       indices: Query<&Index>,
                       colors: Res<Colors>,
                       mut mutable_vec_datas: Query<&mut MutableVecData<_>>| {

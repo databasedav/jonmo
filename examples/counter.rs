@@ -109,7 +109,7 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         BackgroundColor(color),
     ))
     // Attach observers to the entity
-    .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+    .observe(move |_: On<PointerClick>, mut counters: Query<&mut Counter>| {
         // Use the fulfilled `LazyEntity` to get mutable access to the `Counter` component on our
         // state-holding entity.
         **counters.get_mut(*counter_holder).unwrap() += step;

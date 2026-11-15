@@ -9,8 +9,9 @@ use super::{
 use bevy_ecs::{
     component::Mutable,
     lifecycle::HookContext,
+    observer::IntoEntityObserver,
     prelude::*,
-    system::{Adapt, IntoAdapterSystem, IntoObserverSystem, RunSystemError, RunSystemOnce, SystemIn},
+    system::{Adapt, IntoAdapterSystem, RunSystemError, RunSystemOnce, SystemIn},
     world::{DeferredWorld, error::EntityMutableFetchError},
 };
 use bevy_platform::prelude::*;
@@ -243,10 +244,7 @@ impl Builder {
     }
 
     /// Attach an [`Observer`] to this builder.
-    pub fn observe<E: EntityEvent, B: Bundle, Marker>(
-        self,
-        observer: impl IntoObserverSystem<E, B, Marker> + Sync,
-    ) -> Self {
+    pub fn observe<Marker>(self, observer: impl IntoEntityObserver<Marker> + Sync) -> Self {
         self.on_spawn(|world, entity| {
             world.entity_mut(entity).observe(observer);
         })

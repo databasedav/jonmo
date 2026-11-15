@@ -2,7 +2,7 @@
 
 [![Crates.io Version](https://img.shields.io/crates/v/jonmo?style=for-the-badge)](https://crates.io/crates/jonmo)
 [![Docs.rs](https://img.shields.io/docsrs/jonmo?style=for-the-badge)](https://docs.rs/jonmo)
-[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-0.19-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
+[![Following released Bevy versions](https://img.shields.io/badge/Bevy%20tracking-0.20-lightblue?style=for-the-badge)](https://bevyengine.org/learn/quick-start/plugin-development/#main-branch-tracking)
 
 ```text
 in bengali, jonmo means "birth"
@@ -99,7 +99,7 @@ fn counter_button(counter_holder: LazyEntity, color: Color, label: &'static str,
         },
         BackgroundColor(color),
     ))
-    .observe(move |_: On<Pointer<Click>>, mut counters: Query<&mut Counter>| {
+    .observe(move |_: On<PointerClick>, mut counters: Query<&mut Counter>| {
         **counters.get_mut(*counter_holder).unwrap() += step;
     })
     .child(jonmo::Builder::from((Text::from(label), TextFont::from_font_size(25.))))
@@ -146,6 +146,7 @@ All examples are compiled to wasm for both webgl2 and webgpu (check [compatibili
 
 |bevy|jonmo|
 |-|-|
+|0.20|0.10|
 |0.19|0.9|
 |0.18|0.7–0.8|
 |0.17|0.6|
